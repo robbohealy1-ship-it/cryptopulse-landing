@@ -214,6 +214,7 @@ body {
     filter: blur(100px);
     opacity: 0.15;
     animation: float 8s ease-in-out infinite;
+    z-index: 2;
 }
 
 .orb-1 {
@@ -238,6 +239,7 @@ body {
 .grid-overlay {
     position: absolute;
     inset: 0;
+    z-index: 2;
     background-image:
         linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
         linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
