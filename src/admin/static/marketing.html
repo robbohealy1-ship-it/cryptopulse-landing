@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Free Marketing Dashboard - CryptoPulse</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            color: #667eea;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            color: #666;
+            font-size: 1.1em;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .card h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .card p {
+            color: #666;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+        
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 10px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-success {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+        }
+        
+        .btn-warning {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+        
+        .btn-info {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 15px;
+            display: none;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .setup-guide {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .setup-guide h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+        
+        .setup-guide ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        
+        .setup-guide li {
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .setup-guide li:last-child {
+            border-bottom: none;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        
+        .badge-free {
+            background: #28a745;
+            color: white;
+        }
+        
+        .badge-api {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .content-display {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Free Marketing Dashboard</h1>
+            <p>Push your signals to Reddit, Discord, Telegram, and Forums - All FREE!</p>
+        </div>
+        
+        <div class="grid">
+            <!-- Daily Marketing -->
+            <div class="card">
+                <h2>📅 Daily Marketing</h2>
+                <p>Post to Discord servers, Telegram groups, and generate forum content. Runs automatically at 09:00 UTC daily.</p>
+                <button class="btn btn-primary" onclick="triggerDailyMarketing()">
+                    🚀 Run Daily Campaign
+                </button>
+                <div id="daily-status" class="status"></div>
+            </div>
+            
+            <!-- Weekly Blitz -->
+            <div class="card">
+                <h2>🔥 Weekly Blitz</h2>
+                <p>Full marketing blitz: Reddit posts, multi-Discord, and forums. Runs automatically every Sunday at 10:00 UTC.</p>
+                <button class="btn btn-success" onclick="triggerWeeklyMarketing()">
+                    💥 Run Weekly Blitz
+                </button>
+                <div id="weekly-status" class="status"></div>
+            </div>
+            
+            <!-- Reddit Only -->
+            <div class="card">
+                <h2>🤖 Reddit Post</h2>
+                <p>Post performance report to crypto subreddits (r/CryptoMoonShots, r/CryptoSignals, etc.)</p>
+                <button class="btn btn-warning" onclick="postToReddit()">
+                    📮 Post to Reddit
+                </button>
+                <div id="reddit-status" class="status"></div>
+                <small style="color: #999; display: block; margin-top: 10px;">
+                    ⚠️ Requires Reddit API credentials in .env
+                </small>
+            </div>
+            
+            <!-- Discord Only -->
+            <div class="card">
+                <h2>💬 Discord Blast</h2>
+                <p>Post performance update to all configured Discord servers via webhooks.</p>
+                <button class="btn btn-info" onclick="postToDiscord()">
+                    📡 Discord Blast
+                </button>
+                <div id="discord-status" class="status"></div>
+            </div>
+            
+            <!-- Forum Content -->
+            <div class="card">
+                <h2>📝 Forum Content</h2>
+                <p>Generate formatted content for BitcoinTalk, CryptoCompare, and other forums. Copy and paste manually.</p>
+                <button class="btn btn-primary" onclick="generateForumContent()">
+                    📋 Generate Content
+                </button>
+                <div id="forum-status" class="status"></div>
+                <div id="forum-content" class="content-display"></div>
+            </div>
+            
+            <!-- Social Proof -->
+            <div class="card">
+                <h2>🏆 Social Proof</h2>
+                <p>Generate social proof content with real performance stats for sharing anywhere.</p>
+                <button class="btn btn-success" onclick="getSocialProof()">
+                    ✨ Get Social Proof
+                </button>
+                <div id="social-status" class="status"></div>
+                <div id="social-content" class="content-display"></div>
+            </div>
+        </div>
+        
+        <!-- Setup Guide -->
+        <div class="setup-guide">
+            <h3>📚 Setup Guide</h3>
+            <ul>
+                <li>
+                    <strong>✅ praw installed</strong> <span class="badge badge-free">FREE</span>
+                    <br><small>Python Reddit API wrapper - Already installed!</small>
+                </li>
+                <li>
+                    <strong>Reddit API</strong> <span class="badge badge-api">NEEDS API</span>
+                    <br><small>Get FREE at: <a href="https://www.reddit.com/prefs/apps" target="_blank">reddit.com/prefs/apps</a></small>
+                    <br><small>Add to .env: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME</small>
+                </li>
+                <li>
+                    <strong>Discord Webhooks</strong> <span class="badge badge-free">FREE</span>
+                    <br><small>Get from Discord servers: Server Settings → Integrations → Webhooks</small>
+                    <br><small>Add to .env: DISCORD_WEBHOOK_URLS (comma-separated)</small>
+                </li>
+                <li>
+                    <strong>Telegram Groups</strong> <span class="badge badge-free">FREE</span>
+                    <br><small>Join crypto groups, get IDs with @getidsbot</small>
+                    <br><small>Add to .env: TELEGRAM_CROSS_POST_GROUPS (comma-separated)</small>
+                </li>
+                <li>
+                    <strong>Automated Schedule</strong> <span class="badge badge-free">FREE</span>
+                    <br><small>Daily: 09:00 UTC | Weekly: Sunday 10:00 UTC</small>
+                    <br><small>Or use buttons above to trigger manually anytime!</small>
+                </li>
+            </ul>
+        </div>
+    </div>
+    
+    <script>
+        async function triggerDailyMarketing() {
+            const btn = event.target;
+            const status = document.getElementById('daily-status');
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Running...';
+            status.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/marketing/viral-daily', {method: 'POST'});
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus(status, 'success', '✅ ' + data.message);
+                } else {
+                    showStatus(status, 'error', '❌ ' + data.message);
+                }
+            } catch (error) {
+                showStatus(status, 'error', '❌ Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🚀 Run Daily Campaign';
+            }
+        }
+        
+        async function triggerWeeklyMarketing() {
+            const btn = event.target;
+            const status = document.getElementById('weekly-status');
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Running...';
+            status.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/marketing/viral-weekly', {method: 'POST'});
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus(status, 'success', '✅ ' + data.message);
+                } else {
+                    showStatus(status, 'error', '❌ ' + data.message);
+                }
+            } catch (error) {
+                showStatus(status, 'error', '❌ Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '💥 Run Weekly Blitz';
+            }
+        }
+        
+        async function postToReddit() {
+            const btn = event.target;
+            const status = document.getElementById('reddit-status');
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Posting...';
+            status.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/marketing/reddit-post', {method: 'POST'});
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus(status, 'success', '✅ ' + data.message);
+                } else {
+                    showStatus(status, 'info', '⚠️ ' + data.message);
+                }
+            } catch (error) {
+                showStatus(status, 'error', '❌ Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📮 Post to Reddit';
+            }
+        }
+        
+        async function postToDiscord() {
+            const btn = event.target;
+            const status = document.getElementById('discord-status');
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Posting...';
+            status.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/marketing/discord-blast', {method: 'POST'});
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus(status, 'success', '✅ ' + data.message);
+                } else {
+                    showStatus(status, 'error', '❌ ' + data.message);
+                }
+            } catch (error) {
+                showStatus(status, 'error', '❌ Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📡 Discord Blast';
+            }
+        }
+        
+        async function generateForumContent() {
+            const btn = event.target;
+            const status = document.getElementById('forum-status');
+            const content = document.getElementById('forum-content');
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Generating...';
+            status.style.display = 'none';
+            content.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/marketing/forum-content');
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus(status, 'success', '✅ ' + data.message + ' - Copy below:');
+                    content.textContent = data.content;
+                    content.style.display = 'block';
+                } else {
+                    showStatus(status, 'error', '❌ ' + data.message);
+                }
+            } catch (error) {
+                showStatus(status, 'error', '❌ Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📋 Generate Content';
+            }
+        }
+        
+        async function getSocialProof() {
+            const btn = event.target;
+            const status = document.getElementById('social-status');
+            const content = document.getElementById('social-content');
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Generating...';
+            status.style.display = 'none';
+            content.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/marketing/social-proof');
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus(status, 'success', '✅ Social proof generated - Copy below:');
+                    content.textContent = data.content;
+                    content.style.display = 'block';
+                } else {
+                    showStatus(status, 'error', '❌ ' + data.message);
+                }
+            } catch (error) {
+                showStatus(status, 'error', '❌ Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '✨ Get Social Proof';
+            }
+        }
+        
+        function showStatus(element, type, message) {
+            element.className = 'status ' + type;
+            element.textContent = message;
+            element.style.display = 'block';
+        }
+    </script>
+</body>
+</html>

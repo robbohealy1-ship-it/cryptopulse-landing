@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CryptoPulse Admin</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0f172a; color: #e2e8f0;
+  min-height: 100vh;
+}
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 20px 0; border-bottom: 1px solid #1e293b; margin-bottom: 24px;
+}
+header h1 { font-size: 24px; color: #38bdf8; }
+.status-dot {
+  width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px;
+}
+.status-dot.online { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+.status-dot.offline { background: #ef4444; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px; margin-bottom: 24px;
+}
+.card {
+  background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+  padding: 20px; transition: border-color 0.2s;
+}
+.card:hover { border-color: #38bdf8; }
+.card h3 { font-size: 13px; text-transform: uppercase; color: #94a3b8; margin-bottom: 8px; }
+.card .value { font-size: 32px; font-weight: 700; color: #f8fafc; }
+.card .change { font-size: 13px; margin-top: 4px; }
+.change.up { color: #22c55e; }
+.change.down { color: #ef4444; }
+
+.section {
+  background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+  padding: 20px; margin-bottom: 20px;
+}
+.section h2 {
+  font-size: 16px; color: #38bdf8; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+
+.btn {
+  background: #38bdf8; color: #0f172a; border: none; padding: 10px 18px;
+  border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px;
+  transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover { background: #7dd3fc; }
+.btn.danger { background: #ef4444; color: white; }
+.btn.danger:hover { background: #f87171; }
+.btn.success { background: #22c55e; color: white; }
+.btn.success:hover { background: #4ade80; }
+.btn.ghost { background: transparent; border: 1px solid #475569; color: #e2e8f0; }
+.btn.ghost:hover { border-color: #38bdf8; color: #38bdf8; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, textarea, select {
+  background: #0f172a; border: 1px solid #334155; color: #e2e8f0;
+  padding: 10px 14px; border-radius: 8px; font-size: 14px; width: 100%;
+}
+input:focus, textarea:focus, select:focus { outline: none; border-color: #38bdf8; }
+textarea { min-height: 100px; resize: vertical; }
+
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+.table-wrap { overflow-x: auto; }
+table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+th, td { padding: 12px; text-align: left; border-bottom: 1px solid #334155; }
+th { color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 11px; }
+tr:hover { background: #0f172a; }
+.badge {
+  display: inline-block; padding: 3px 10px; border-radius: 20px;
+  font-size: 11px; font-weight: 600;
+}
+.badge.long { background: rgba(34,197,94,0.15); color: #22c55e; }
+.badge.short { background: rgba(239,68,68,0.15); color: #ef4444; }
+.badge.pending { background: rgba(251,191,36,0.15); color: #fbbf24; }
+.badge.closed { background: rgba(148,163,184,0.15); color: #94a3b8; }
+.badge.approved { background: rgba(34,197,94,0.15); color: #22c55e; }
+
+.actions { display: flex; gap: 8px; }
+
+.tabs {
+  display: flex; gap: 4px; border-bottom: 1px solid #334155; margin-bottom: 16px;
+}
+.tab {
+  padding: 10px 18px; font-size: 14px; cursor: pointer;
+  border-bottom: 2px solid transparent; color: #94a3b8;
+}
+.tab.active { color: #38bdf8; border-bottom-color: #38bdf8; }
+.tab:hover { color: #e2e8f0; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.toast {
+  position: fixed; bottom: 20px; right: 20px;
+  background: #1e293b; border: 1px solid #334155; border-left: 4px solid #38bdf8;
+  padding: 14px 20px; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+  display: none; align-items: center; gap: 10px; z-index: 1000;
+}
+.toast.show { display: flex; }
+.toast.error { border-left-color: #ef4444; }
+.toast.success { border-left-color: #22c55e; }
+
+.loading {
+  display: inline-block; width: 16px; height: 16px;
+  border: 2px solid #334155; border-top-color: #38bdf8;
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.empty-state {
+  text-align: center; padding: 40px; color: #64748b; font-size: 14px;
+}
+
+.compact-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px;
+}
+.modal {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center;
+  z-index: 2000;
+}
+.modal.show { display: flex; }
+.modal-content {
+  background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+  width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto;
+  padding: 24px;
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 16px;
+}
+.modal-header h3 { color: #38bdf8; margin: 0; }
+.close-btn {
+  background: none; border: none; color: #94a3b8; font-size: 20px; cursor: pointer;
+}
+.close-btn:hover { color: #e2e8f0; }
+.sub-nav {
+  display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;
+}
+.sub-nav button {
+  background: #0f172a; border: 1px solid #334155; color: #94a3b8;
+  padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer;
+}
+.sub-nav button.active { border-color: #38bdf8; color: #38bdf8; }
+.sub-panel { display: none; }
+.sub-panel.active { display: block; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <div>
+    <h1>CryptoPulse Admin</h1>
+    <span id="systemStatus" style="font-size:13px;color:#64748b;"><span class="status-dot offline" id="statusDot"></span>Checking...</span>
+  </div>
+  <div style="font-size:13px;color:#64748b;">
+    <span id="clock">--:-- UTC</span>
+  </div>
+</header>
+
+<!-- Overview Cards -->
+<div class="grid" id="statsGrid">
+  <div class="card"><h3>Signals Today</h3><div class="value" id="statSignals">--</div></div>
+  <div class="card"><h3>Win Rate</h3><div class="value" id="statWinRate">--%</div><div class="change up" id="statWinRateChange">--</div></div>
+  <div class="card"><h3>Total P&L</h3><div class="value" id="statPnl">--%</div><div class="change up" id="statPnlChange">--</div></div>
+  <div class="card"><h3>Pending</h3><div class="value" id="statPending">--</div></div>
+  <div class="card"><h3>VIP Subscribers</h3><div class="value" id="statSubs">--</div></div>
+  <div class="card"><h3>System</h3><div class="value" style="font-size:18px;margin-top:8px;" id="statSystem">Loading</div></div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('signals')">Signals</div>
+  <div class="tab" onclick="switchTab('marketing')">Marketing</div>
+  <div class="tab" onclick="switchTab('subscribers')">Subscribers</div>
+  <div class="tab" onclick="switchTab('schedule')">Schedule</div>
+  <div class="tab" onclick="switchTab('history')">History</div>
+  <div class="tab" onclick="switchTab('settings')">Settings</div>
+  <div class="tab" onclick="switchTab('alpha')">🎰 Alpha</div>
+</div>
+
+<!-- Signals Tab -->
+<div class="tab-panel active" id="tab-signals">
+  <div class="sub-nav">
+    <button class="active" onclick="switchSubTab(this,'sig-pending')">Pending</button>
+    <button onclick="switchSubTab(this,'sig-active')">Active Trades</button>
+    <button onclick="switchSubTab(this,'sig-create')">Create Signal</button>
+    <button onclick="switchSubTab(this,'sig-performance')">Performance</button>
+  </div>
+  <div class="sub-panel active" id="sig-pending">
+    <div class="section">
+      <h2>Pending Approval</h2>
+      <div id="pendingSignals"><div class="empty-state">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>Quick Scan</h2>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Trigger an instant market scan.</p>
+      <button class="btn" onclick="triggerJob('scan')">Run 15m Scan Now</button>
+    </div>
+  </div>
+  <div class="sub-panel" id="sig-active">
+    <div class="section">
+      <h2>🔄 Active Trades (Live Tracking)</h2>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Running trades being monitored for TP/SL hits. Data persists across restarts.</p>
+      <div id="activeSignals"><div class="empty-state">Loading...</div></div>
+    </div>
+  </div>
+  <div class="sub-panel" id="sig-create">
+    <div class="section">
+      <h2>Create Manual Signal</h2>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Manually publish a signal directly to VIP + Free.</p>
+      <div class="form-row">
+        <div class="form-group"><label>Symbol</label><input type="text" id="manSymbol" placeholder="BTC/USDT"></div>
+        <div class="form-group"><label>Direction</label><select id="manDir"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Timeframe</label><select id="manTF"><option value="15m">15m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option></select></div>
+        <div class="form-group"><label>Confidence %</label><input type="number" id="manConf" value="90" min="80" max="100"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Entry Price</label><input type="number" id="manEntry" placeholder="65000"></div>
+        <div class="form-group"><label>Stop Loss</label><input type="number" id="manSL" placeholder="64000"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>TP1</label><input type="number" id="manTP1" placeholder="67000"></div>
+        <div class="form-group"><label>TP2 (optional)</label><input type="number" id="manTP2" placeholder=""></div>
+      </div>
+      <div class="form-group"><label>Notes</label><textarea id="manNotes" placeholder="Setup rationale..."></textarea></div>
+      <button class="btn success" onclick="createManualSignal()">Publish Signal Now</button>
+    </div>
+  </div>
+  <div class="sub-panel" id="sig-performance">
+    <div class="section">
+      <h2>Performance Analytics</h2>
+      <div style="display:flex;gap:10px;margin-bottom:12px;align-items:center;">
+        <label style="color:#94a3b8;font-size:13px;">Period:</label>
+        <select id="perfDays" onchange="loadPerformance()">
+          <option value="7">Last 7 Days</option>
+          <option value="30" selected>Last 30 Days</option>
+          <option value="90">Last 90 Days</option>
+        </select>
+      </div>
+      <div class="grid" id="perfCards" style="margin-bottom:16px;">
+        <div class="card"><h3>Total Signals</h3><div class="value" id="perfTotal">--</div></div>
+        <div class="card"><h3>Win Rate</h3><div class="value" id="perfWinRate">--%</div></div>
+        <div class="card"><h3>Total P&L</h3><div class="value" id="perfTotalPnl">--%</div></div>
+        <div class="card"><h3>Avg per Trade</h3><div class="value" id="perfAvg">--%</div></div>
+      </div>
+      <div class="table-wrap">
+        <h3 style="color:#94a3b8;font-size:13px;margin-bottom:8px;">By Symbol</h3>
+        <table><thead><tr><th>Symbol</th><th>Count</th><th>Wins</th><th>Total P&L</th></tr></thead><tbody id="perfBySymbol"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Marketing Tab -->
+<div class="tab-panel" id="tab-marketing">
+  <div class="section">
+    <h2>🚀 Free Viral Marketing</h2>
+    <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Post to Reddit, Discord, Telegram, and Forums - All FREE!</p>
+    <a href="/marketing" target="_blank" class="btn success" style="width:100%;justify-content:center;text-decoration:none;margin-bottom:16px;">
+      🎯 Open Marketing Dashboard
+    </a>
+  </div>
+
+  <div class="section">
+    <h2>Quick Post</h2>
+    <div class="form-group">
+      <label>Channel</label>
+      <select id="postChannel">
+        <option value="free">Free Channel</option>
+        <option value="vip">VIP Channel</option>
+        <option value="both">Both</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Message (HTML supported)</label>
+      <textarea id="postMessage" placeholder="Type your message..."></textarea>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <button class="btn" onclick="sendPost()">Send Post</button>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8;cursor:pointer;">
+        <input type="checkbox" id="postPin"> Pin message
+      </label>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Campaign Triggers</h2>
+    <p style="color:#64748b;font-size:13px;margin-bottom:12px;">One-click marketing campaigns.</p>
+    <div class="compact-grid">
+      <div class="card" style="padding:16px;">
+        <h3>FOMO Alert</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post "VIP just hit targets" to free channel.</p>
+        <button class="btn" onclick="triggerCampaign('fomo')" style="width:100%;justify-content:center;">Trigger FOMO</button>
+      </div>
+      <div class="card" style="padding:16px;">
+        <h3>Social Proof</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post this week's win rate and P&L.</p>
+        <button class="btn" onclick="triggerCampaign('social_proof')" style="width:100%;justify-content:center;">Trigger Social Proof</button>
+      </div>
+      <div class="card" style="padding:16px;">
+        <h3>Urgency</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post limited VIP spots message.</p>
+        <button class="btn" onclick="triggerCampaign('urgency')" style="width:100%;justify-content:center;">Trigger Urgency</button>
+      </div>
+      <div class="card" style="padding:16px;">
+        <h3>Custom Campaign</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post your own message to free channel.</p>
+        <div class="form-group" style="margin-bottom:8px;">
+          <input type="text" id="customCampaignMsg" placeholder="Custom message...">
+        </div>
+        <button class="btn ghost" onclick="triggerCustomCampaign()" style="width:100%;justify-content:center;">Send Custom</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Subscribers Tab -->
+<div class="tab-panel" id="tab-subscribers">
+  <div class="section">
+    <h2>Subscriber Overview</h2>
+    <div class="grid" style="margin-bottom:16px;">
+      <div class="card"><h3>Total</h3><div class="value" id="subTotal">--</div></div>
+      <div class="card"><h3>Active</h3><div class="value" id="subActive">--</div></div>
+      <div class="card"><h3>Expired</h3><div class="value" id="subExpired">--</div></div>
+      <div class="card"><h3>Monthly Revenue</h3><div class="value" id="subRevenue">$--</div></div>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr><th>User</th><th>Status</th><th>Plan</th><th>Joined</th><th>Expires</th></tr></thead><tbody id="subTable"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody></table>
+    </div>
+  </div>
+  <div class="section">
+    <h2>VIP DM Blast</h2>
+    <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Send a message to all VIP subscribers via DM.</p>
+    <div class="form-group">
+      <label>Filter</label>
+      <select id="blastFilter">
+        <option value="">All Subscribers</option>
+        <option value="active">Active Only</option>
+        <option value="expired">Expired Only</option>
+        <option value="trial">Trial Only</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Message (HTML supported)</label>
+      <textarea id="blastMessage" placeholder="Type your VIP blast message..."></textarea>
+    </div>
+    <button class="btn" onclick="sendDmBlast()">Send DM Blast</button>
+  </div>
+</div>
+
+<!-- Schedule Tab -->
+<div class="tab-panel" id="tab-schedule">
+  <div class="section">
+    <h2>Scheduled Jobs</h2>
+    <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Manually trigger scheduled content now.</p>
+    <div class="compact-grid">
+      <div class="card" style="padding:16px;">
+        <h3>Morning Outlook</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post full market analysis to both channels.</p>
+        <button class="btn" onclick="triggerJob('outlook')" style="width:100%;justify-content:center;">Post Now</button>
+      </div>
+      <div class="card" style="padding:16px;">
+        <h3>Evening Recap</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post daily summary with P&L to both channels.</p>
+        <button class="btn" onclick="triggerJob('recap')" style="width:100%;justify-content:center;">Post Now</button>
+      </div>
+      <div class="card" style="padding:16px;">
+        <h3>Weekly Report</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post weekly stats and analysis to VIP.</p>
+        <button class="btn" onclick="triggerJob('weekly')" style="width:100%;justify-content:center;">Post Now</button>
+      </div>
+      <div class="card" style="padding:16px;">
+        <h3>Market Scan</h3>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Run a 15m scan for new setups.</p>
+        <button class="btn" onclick="triggerJob('scan')" style="width:100%;justify-content:center;">Run Now</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- History Tab -->
+<div class="tab-panel" id="tab-history">
+  <div class="section">
+    <h2>Signal History</h2>
+    <div style="display:flex;gap:10px;margin-bottom:12px;">
+      <select id="historyFilter" onchange="loadHistory()">
+        <option value="">All</option>
+        <option value="closed">Closed</option>
+        <option value="published">Published</option>
+        <option value="rejected">Rejected</option>
+      </select>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Symbol</th><th>Dir</th><th>TF</th><th>Conf</th><th>R/R</th><th>Entry</th><th>SL</th><th>TP1</th><th>Status</th><th>P&L</th>
+          </tr>
+        </thead>
+        <tbody id="historyTable">
+          <tr><td colspan="11" class="empty-state">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Tab -->
+<div class="tab-panel" id="tab-settings">
+  <div class="section">
+    <h2>System Configuration</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+        <tbody id="settingsTable"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="section">
+    <h2>Components</h2>
+    <div id="componentsStatus"></div>
+  </div>
+</div>
+
+</div>
+
+<!-- Alpha/Degen Plays Tab -->
+<div class="tab-panel" id="tab-alpha">
+  <div class="sub-nav">
+    <button class="active" onclick="switchAlphaSubTab(this,'alpha-active')">Active Plays</button>
+    <button onclick="switchAlphaSubTab(this,'alpha-pending')">Pending Discovery</button>
+    <button onclick="switchAlphaSubTab(this,'alpha-stats')">Stats</button>
+  </div>
+  
+  <div class="sub-panel active" id="alpha-active">
+    <div class="section">
+      <h2>🎰 Active Alpha Plays</h2>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Low-cap degen plays being tracked. VIP: 1/day | Free: 1/week</p>
+      <div style="display:flex;gap:10px;margin-bottom:16px;">
+        <button class="btn" onclick="triggerAlphaScan()">🔍 Scan Now</button>
+        <button class="btn ghost" onclick="loadAlphaPlays()">🔄 Refresh</button>
+      </div>
+      <div id="alphaActiveList"><div class="empty-state">Loading...</div></div>
+    </div>
+  </div>
+  
+  <div class="sub-panel" id="alpha-pending">
+    <div class="section">
+      <h2>⏳ Pending Alpha Discovery</h2>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Discovered plays waiting for admin approval.</p>
+      <div id="alphaPendingList"><div class="empty-state">Loading...</div></div>
+    </div>
+  </div>
+  
+  <div class="sub-panel" id="alpha-stats">
+    <div class="section">
+      <h2>📊 Alpha Play Statistics</h2>
+      <div class="grid" style="margin-bottom:16px;">
+        <div class="card"><h3>VIP Today</h3><div class="value" id="alphaVipToday">--</div><div class="change" id="alphaVipLimit">/--</div></div>
+        <div class="card"><h3>Free This Week</h3><div class="value" id="alphaFreeWeek">--</div><div class="change" id="alphaFreeLimit">/--</div></div>
+        <div class="card"><h3>Active Plays</h3><div class="value" id="alphaActiveCount">--</div></div>
+        <div class="card"><h3>Pending</h3><div class="value" id="alphaPendingCount">--</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<div class="toast" id="toast">
+  <span id="toastMsg">Message</span>
+</div>
+
+<script>
+const API = '';
+
+function showToast(msg, type='success') {
+  const t = document.getElementById('toast');
+  document.getElementById('toastMsg').textContent = msg;
+  t.className = 'toast show ' + type;
+  setTimeout(() => t.className = 'toast', 3000);
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'history') loadHistory();
+  if (name === 'settings') loadSettings();
+  if (name === 'subscribers') loadSubscribers();
+  if (name === 'signals') { loadStats(); loadPerformance(); }
+  if (name === 'alpha') { loadAlphaPlays(); loadAlphaStats(); }
+}
+
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(API + url, opts);
+    if (!r.ok) throw new Error(await r.text());
+    return await r.json();
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+    throw e;
+  }
+}
+
+async function loadStatus() {
+  try {
+    const s = await fetchJSON('/api/status');
+    const dot = document.getElementById('statusDot');
+    dot.className = 'status-dot ' + (s.status === 'running' ? 'online' : 'offline');
+    document.getElementById('systemStatus').innerHTML =
+      '<span class="status-dot ' + (s.status === 'running' ? 'online' : 'offline') + '"></span>' +
+      (s.status === 'running' ? 'System Online' : 'System Offline');
+    document.getElementById('statSystem').textContent = s.status === 'running' ? 'Online' : 'Offline';
+    document.getElementById('statSystem').style.color = s.status === 'running' ? '#22c55e' : '#ef4444';
+  } catch (e) {}
+}
+
+async function loadStats() {
+  try {
+    const daily = await fetchJSON('/api/stats/daily');
+    document.getElementById('statSignals').textContent = daily.approved || 0;
+    document.getElementById('statWinRate').textContent = (daily.win_rate ? daily.win_rate.toFixed(0) : 0) + '%';
+    document.getElementById('statPnl').textContent = (daily.total_pnl ? daily.total_pnl.toFixed(1) : 0) + '%';
+    document.getElementById('statPnlChange').textContent = daily.wins + 'W / ' + daily.losses + 'L';
+    document.getElementById('statPnlChange').className = 'change ' + ((daily.total_pnl||0) >= 0 ? 'up' : 'down');
+  } catch (e) {}
+  try {
+    const pending = await fetchJSON('/api/signals/pending');
+    document.getElementById('statPending').textContent = pending.count;
+    renderPending(pending.signals);
+  } catch (e) {}
+  try {
+    const subs = await fetchJSON('/api/subscribers');
+    document.getElementById('statSubs').textContent = subs.count;
+  } catch (e) {}
+}
+
+function renderPending(signals) {
+  const el = document.getElementById('pendingSignals');
+  if (!signals || signals.length === 0) {
+    el.innerHTML = '<div class="empty-state">No signals pending approval.</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Conf</th><th>R/R</th><th>Entry</th><th>SL</th><th>TP1</th><th>Actions</th></tr></thead><tbody>';
+  for (const s of signals) {
+    html += `<tr>
+      <td><b>${s.symbol}</b></td>
+      <td><span class="badge ${s.direction.toLowerCase()}">${s.direction}</span></td>
+      <td>${s.timeframe}</td>
+      <td>${s.confidence.toFixed(1)}%</td>
+      <td>1:${s.risk_reward.toFixed(1)}</td>
+      <td>$${s.entry_price.toLocaleString()}</td>
+      <td>$${s.stop_loss.toLocaleString()}</td>
+      <td>$${s.take_profit_1.toLocaleString()}</td>
+      <td class="actions">
+        <button class="btn success" style="padding:6px 12px;font-size:12px;" onclick="signalAction('${s.id}','approve')">Approve</button>
+        <button class="btn danger" style="padding:6px 12px;font-size:12px;" onclick="signalAction('${s.id}','reject')">Reject</button>
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+async function loadActiveSignals() {
+  try {
+    const data = await fetchJSON('/api/signals/active');
+    renderActiveSignals(data.signals);
+  } catch (e) {
+    document.getElementById('activeSignals').innerHTML = '<div class="empty-state">Error loading active trades</div>';
+  }
+}
+
+function renderActiveSignals(signals) {
+  const el = document.getElementById('activeSignals');
+  if (!signals || signals.length === 0) {
+    el.innerHTML = '<div class="empty-state">No active trades being tracked.<br><small style="color:#64748b;">Approved signals will appear here and persist across restarts.</small></div>';
+    return;
+  }
+  
+  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>Current</th><th>P&L</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Status</th></tr></thead><tbody>';
+  for (const s of signals) {
+    const pnlClass = s.pnl_percent >= 0 ? 'up' : 'down';
+    const pnlEmoji = s.pnl_percent >= 0 ? '🟢' : '🔴';
+    const tp1Status = s.tp1_hit ? '✅' : '⏳';
+    const tp2Status = s.tp2_hit ? '✅' : '⏳';
+    const tp3Status = s.tp3_hit ? '✅' : '⏳';
+    
+    html += `<tr>
+      <td><b>${s.symbol}</b></td>
+      <td><span class="badge ${s.direction.toLowerCase()}">${s.direction}</span></td>
+      <td>${s.timeframe}</td>
+      <td>$${s.entry_price.toFixed(4)}</td>
+      <td>$${s.current_price ? s.current_price.toFixed(4) : 'N/A'}</td>
+      <td><span class="change ${pnlClass}">${pnlEmoji} ${s.pnl_percent >= 0 ? '+' : ''}${s.pnl_percent}%</span></td>
+      <td>$${s.stop_loss ? s.stop_loss.toFixed(4) : 'N/A'}</td>
+      <td>${tp1Status} $${s.take_profit_1 ? s.take_profit_1.toFixed(4) : 'N/A'}</td>
+      <td>${tp2Status} $${s.take_profit_2 ? s.take_profit_2.toFixed(4) : 'N/A'}</td>
+      <td>${tp3Status} $${s.take_profit_3 ? s.take_profit_3.toFixed(4) : 'N/A'}</td>
+      <td><span style="font-size:11px;color:#64748b;">Tracking</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+async function signalAction(id, action) {
+  await fetchJSON('/api/signals/action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({signal_id: id, action: action})
+  });
+  showToast(`Signal ${action}d`);
+  loadStats();
+}
+
+async function sendPost() {
+  const channel = document.getElementById('postChannel').value;
+  const message = document.getElementById('postMessage').value;
+  const pin = document.getElementById('postPin').checked;
+  if (!message.trim()) return showToast('Enter a message', 'error');
+  await fetchJSON('/api/marketing/post', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel, message, pin})
+  });
+  showToast('Post sent');
+  document.getElementById('postMessage').value = '';
+}
+
+async function triggerCampaign(type) {
+  let msg = null;
+  if (type === 'custom') {
+    msg = document.getElementById('customCampaignMsg').value;
+    if (!msg.trim()) return showToast('Enter a message', 'error');
+  }
+  await fetchJSON('/api/marketing/campaign', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({campaign_type: type, message: msg})
+  });
+  showToast('Campaign triggered');
+  if (type === 'custom') document.getElementById('customCampaignMsg').value = '';
+}
+
+function triggerCustomCampaign() { triggerCampaign('custom'); }
+
+async function triggerJob(type) {
+  await fetchJSON('/api/schedule/trigger', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({job_type: type})
+  });
+  showToast(type + ' triggered');
+}
+
+async function loadHistory() {
+  const filter = document.getElementById('historyFilter').value;
+  const params = new URLSearchParams({limit: '50'});
+  if (filter) params.set('status', filter);
+  const data = await fetchJSON('/api/signals/history?' + params.toString());
+  const tbody = document.getElementById('historyTable');
+  if (!data.signals || data.signals.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No signals found.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.signals.map(s => {
+    const time = s.created_at ? new Date(s.created_at).toLocaleString() : 'N/A';
+    const dir = s.direction || '?';
+    const pnl = s.pnl_percent != null ? (s.pnl_percent > 0 ? '+' : '') + s.pnl_percent.toFixed(1) + '%' : '--';
+    const pnlClass = s.pnl_percent != null ? (s.pnl_percent >= 0 ? 'up' : 'down') : '';
+    return `<tr>
+      <td>${time}</td>
+      <td><b>${s.symbol}</b></td>
+      <td><span class="badge ${dir.toLowerCase()}">${dir}</span></td>
+      <td>${s.timeframe || '--'}</td>
+      <td>${s.confidence ? s.confidence.toFixed(0) + '%' : '--'}</td>
+      <td>${s.risk_reward ? '1:' + s.risk_reward.toFixed(1) : '--'}</td>
+      <td>$${s.entry_price ? s.entry_price.toLocaleString() : '--'}</td>
+      <td>$${s.stop_loss ? s.stop_loss.toLocaleString() : '--'}</td>
+      <td>$${s.take_profit_1 ? s.take_profit_1.toLocaleString() : '--'}</td>
+      <td><span class="badge ${s.status || 'pending'}">${s.status || 'pending'}</span></td>
+      <td class="change ${pnlClass}">${pnl}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadSettings() {
+  try {
+    const s = await fetchJSON('/api/settings');
+    const tbody = document.getElementById('settingsTable');
+    const rows = Object.entries(s).map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    tbody.innerHTML = rows;
+  } catch (e) {}
+  try {
+    const status = await fetchJSON('/api/status');
+    const comps = status.components || {};
+    const html = Object.entries(comps).map(([k,v]) =>
+      `<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #334155;">
+        <span style="text-transform:capitalize;">${k.replace(/_/g,' ')}</span>
+        <span style="color:${v ? '#22c55e' : '#ef4444'};font-weight:600;">${v ? 'Enabled' : 'Disabled'}</span>
+      </div>`
+    ).join('');
+    document.getElementById('componentsStatus').innerHTML = html;
+  } catch (e) {}
+}
+
+function switchSubTab(btn, panelId) {
+  const parent = btn.closest('.tab-panel.active') || document.getElementById('tab-signals');
+  parent.querySelectorAll('.sub-nav button').forEach(b => b.classList.remove('active'));
+  parent.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(panelId).classList.add('active');
+  if (panelId === 'sig-performance') loadPerformance();
+  if (panelId === 'sig-active') loadActiveSignals();
+}
+
+async function createManualSignal() {
+  const body = {
+    symbol: document.getElementById('manSymbol').value,
+    direction: document.getElementById('manDir').value,
+    timeframe: document.getElementById('manTF').value,
+    entry_price: parseFloat(document.getElementById('manEntry').value),
+    stop_loss: parseFloat(document.getElementById('manSL').value),
+    take_profit_1: parseFloat(document.getElementById('manTP1').value),
+    take_profit_2: parseFloat(document.getElementById('manTP2').value) || null,
+    confidence: parseFloat(document.getElementById('manConf').value),
+    notes: document.getElementById('manNotes').value
+  };
+  if (!body.symbol || !body.entry_price || !body.stop_loss || !body.take_profit_1) {
+    return showToast('Fill required fields', 'error');
+  }
+  await fetchJSON('/api/signals/create', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  showToast('Signal published');
+  document.getElementById('manSymbol').value=''; document.getElementById('manEntry').value='';
+  document.getElementById('manSL').value=''; document.getElementById('manTP1').value='';
+  document.getElementById('manTP2').value=''; document.getElementById('manNotes').value='';
+}
+
+async function loadPerformance() {
+  const days = document.getElementById('perfDays').value;
+  try {
+    const d = await fetchJSON('/api/signals/performance?days=' + days);
+    document.getElementById('perfTotal').textContent = d.total_signals;
+    document.getElementById('perfWinRate').textContent = d.win_rate + '%';
+    document.getElementById('perfTotalPnl').textContent = (d.total_pnl > 0 ? '+' : '') + d.total_pnl + '%';
+    document.getElementById('perfAvg').textContent = (d.avg_pnl_per_trade > 0 ? '+' : '') + d.avg_pnl_per_trade + '%';
+    const tbody = document.getElementById('perfBySymbol');
+    const rows = Object.entries(d.by_symbol || {}).map(([sym, v]) =>
+      `<tr><td><b>${sym}</b></td><td>${v.count}</td><td>${v.wins}</td><td class="change ${v.total_pnl >= 0 ? 'up' : 'down'}">${v.total_pnl > 0 ? '+' : ''}${v.total_pnl.toFixed(1)}%</td></tr>`
+    ).join('');
+    tbody.innerHTML = rows || '<tr><td colspan="4" class="empty-state">No data</td></tr>';
+  } catch (e) {}
+}
+
+async function loadSubscribers() {
+  try {
+    const d = await fetchJSON('/api/subscribers/detailed');
+    document.getElementById('subTotal').textContent = d.count;
+    document.getElementById('subActive').textContent = d.active;
+    document.getElementById('subExpired').textContent = d.expired;
+  } catch (e) {}
+  try {
+    const s = await fetchJSON('/api/subscribers/stats');
+    document.getElementById('subRevenue').textContent = '$' + (s.monthly_revenue_estimate || 0);
+  } catch (e) {}
+  try {
+    const d = await fetchJSON('/api/subscribers/detailed');
+    const tbody = document.getElementById('subTable');
+    if (!d.subscribers || d.subscribers.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No subscribers found.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.subscribers.map(s => {
+      const joined = s.created_at ? new Date(s.created_at).toLocaleDateString() : 'N/A';
+      const expires = s.expires_at ? new Date(s.expires_at).toLocaleDateString() : 'N/A';
+      const statusClass = s.status === 'active' ? 'approved' : (s.status === 'expired' ? 'closed' : 'pending');
+      return `<tr><td>${s.username || s.user_id || 'Unknown'}</td><td><span class="badge ${statusClass}">${s.status || 'unknown'}</span></td><td>${s.plan || '--'}</td><td>${joined}</td><td>${expires}</td></tr>`;
+    }).join('');
+  } catch (e) {}
+}
+
+async function sendDmBlast() {
+  const message = document.getElementById('blastMessage').value;
+  const filter = document.getElementById('blastFilter').value;
+  if (!message.trim()) return showToast('Enter a message', 'error');
+  await fetchJSON('/api/subscribers/blast', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message, filter_status: filter || null})});
+  showToast('DM blast sent');
+  document.getElementById('blastMessage').value = '';
+}
+
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.getUTCHours().toString().padStart(2,'0') + ':' +
+    now.getUTCMinutes().toString().padStart(2,'0') + ' UTC';
+}
+
+// Auto-refresh active trades if on that tab
+let activeTradesInterval = null;
+
+function startActiveTradesRefresh() {
+  if (activeTradesInterval) {
+    clearInterval(activeTradesInterval);
+  }
+  loadActiveSignals();
+  activeTradesInterval = setInterval(loadActiveSignals, 15000); // Refresh every 15s
+}
+
+function stopActiveTradesRefresh() {
+  if (activeTradesInterval) {
+    clearInterval(activeTradesInterval);
+    activeTradesInterval = null;
+  }
+}
+
+// Enhanced switchSubTab to handle auto-refresh
+const originalSwitchSubTab = switchSubTab;
+switchSubTab = function(btn, panelId) {
+  originalSwitchSubTab(btn, panelId);
+  
+  // Start/stop auto-refresh based on active tab
+  if (panelId === 'sig-active') {
+    startActiveTradesRefresh();
+  } else {
+    stopActiveTradesRefresh();
+  }
+};
+
+// ==================== ALPHA/DEGEN PLAYS ====================
+
+function switchAlphaSubTab(btn, panelId) {
+  const parent = document.getElementById('tab-alpha');
+  parent.querySelectorAll('.sub-nav button').forEach(b => b.classList.remove('active'));
+  parent.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(panelId).classList.add('active');
+  if (panelId === 'alpha-active' || panelId === 'alpha-stats') {
+    loadAlphaPlays();
+    loadAlphaStats();
+  }
+}
+
+async function loadAlphaPlays() {
+  try {
+    const data = await fetchJSON('/api/alpha/plays');
+    renderAlphaActive(data.active);
+    renderAlphaPending(data.pending);
+  } catch (e) {
+    document.getElementById('alphaActiveList').innerHTML = '<div class="empty-state">Error loading alpha plays</div>';
+  }
+}
+
+function renderAlphaActive(plays) {
+  const el = document.getElementById('alphaActiveList');
+  if (!plays || plays.length === 0) {
+    el.innerHTML = '<div class="empty-state">No active alpha plays.<br><small style="color:#64748b;">Trigger a scan to find low-cap opportunities.</small></div>';
+    return;
+  }
+  
+  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Chain</th><th>Entry</th><th>Current</th><th>P&L</th><th>SL</th><th>TP1</th><th>TP2</th><th>Status</th><th>MC</th></tr></thead><tbody>';
+  for (const p of plays) {
+    const pnlClass = p.current_pnl >= 0 ? 'up' : 'down';
+    const pnlEmoji = p.current_pnl >= 0 ? '🟢' : '🔴';
+    const chainEmoji = p.chain === 'sol' ? '☀️' : (p.chain === 'eth' ? '💎' : '🔵');
+    
+    html += `<tr>
+      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${p.name}</small></td>
+      <td>${chainEmoji} ${p.chain.toUpperCase()}</td>
+      <td>$${p.entry_price ? p.entry_price.toFixed(6) : 'N/A'}</td>
+      <td>$${p.current_price ? p.current_price.toFixed(6) : 'N/A'}</td>
+      <td><span class="change ${pnlClass}">${pnlEmoji} ${p.current_pnl >= 0 ? '+' : ''}${p.current_pnl}%</span></td>
+      <td style="color:#ef4444;">$${p.stop_loss ? p.stop_loss.toFixed(6) : 'N/A'}</td>
+      <td style="color:#22c55e;">$${p.take_profit_1 ? p.take_profit_1.toFixed(6) : 'N/A'}</td>
+      <td style="color:#22c55e;">$${p.take_profit_2 ? p.take_profit_2.toFixed(6) : 'N/A'}</td>
+      <td><span class="badge ${p.status}">${p.status.toUpperCase()}</span></td>
+      <td>$${(p.market_cap / 1e6).toFixed(2)}M</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+function renderAlphaPending(plays) {
+  const el = document.getElementById('alphaPendingList');
+  if (!plays || plays.length === 0) {
+    el.innerHTML = '<div class="empty-state">No pending alpha plays.<br><small style="color:#64748b;">Run a scan to discover low-cap gems.</small></div>';
+    return;
+  }
+  
+  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Chain</th><th>Score</th><th>MC</th><th>24h Change</th><th>Catalyst</th><th>Actions</th></tr></thead><tbody>';
+  for (const p of plays) {
+    const chainEmoji = p.chain === 'sol' ? '☀️' : (p.chain === 'eth' ? '💎' : '🔵');
+    const changeClass = p.price_change_24h >= 0 ? 'up' : 'down';
+    
+    html += `<tr>
+      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${p.name}</small></td>
+      <td>${chainEmoji} ${p.chain.toUpperCase()}</td>
+      <td><span class="badge ${p.overall_score >= 80 ? 'approved' : 'pending'}">${p.overall_score.toFixed(0)}</span></td>
+      <td>$${(p.market_cap / 1e6).toFixed(2)}M</td>
+      <td><span class="change ${changeClass}">${p.price_change_24h >= 0 ? '+' : ''}${p.price_change_24h.toFixed(1)}%</span></td>
+      <td style="max-width:200px;font-size:12px;">${p.catalyst}</td>
+      <td><button class="btn success" onclick="approveAlpha('${p.symbol}')">Approve</button></td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+async function approveAlpha(symbol) {
+  try {
+    showToast('Approving ' + symbol + '...');
+    const result = await fetchJSON('/api/alpha/approve?symbol=' + encodeURIComponent(symbol), {method: 'POST'});
+    if (result.success) {
+      showToast(symbol + ' approved and published!');
+      loadAlphaPlays();
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Error approving alpha: ' + e.message, 'error');
+  }
+}
+
+async function triggerAlphaScan() {
+  try {
+    showToast('Scanning for alpha plays...');
+    const result = await fetchJSON('/api/alpha/trigger', {method: 'POST'});
+    if (result.success) {
+      showToast(result.message);
+      // Refresh after a few seconds to show results
+      setTimeout(loadAlphaPlays, 5000);
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Error triggering scan: ' + e.message, 'error');
+  }
+}
+
+async function loadAlphaStats() {
+  try {
+    const stats = await fetchJSON('/api/alpha/stats');
+    document.getElementById('alphaVipToday').textContent = stats.vip_daily_count || 0;
+    document.getElementById('alphaVipLimit').textContent = '/' + (stats.vip_daily_limit || 1);
+    document.getElementById('alphaFreeWeek').textContent = stats.free_weekly_count || 0;
+    document.getElementById('alphaFreeLimit').textContent = '/' + (stats.free_weekly_limit || 1);
+    document.getElementById('alphaActiveCount').textContent = stats.active_plays || 0;
+    document.getElementById('alphaPendingCount').textContent = stats.pending_plays || 0;
+  } catch (e) {}
+}
+
+// Init
+updateClock();
+setInterval(updateClock, 30000);
+loadStatus();
+loadStats();
+setInterval(loadStats, 30000); // Stats every 30s
+setInterval(loadStatus, 10000); // Status every 10s for faster updates
+</script>
+</body>
+</html>

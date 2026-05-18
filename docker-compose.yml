@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # Main Signal Engine
+  cryptopulse-engine:
+    build: .
+    container_name: cryptopulse-engine
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./charts:/app/charts
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    command: python src/main.py
+    networks:
+      - cryptopulse-network
+
+  # FastAPI Server
+  cryptopulse-api:
+    build: .
+    container_name: cryptopulse-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    ports:
+      - "8001:8000"
+    depends_on:
+      - postgres
+    command: uvicorn src.api.server:app --host 0.0.0.0 --port 8000
+    networks:
+      - cryptopulse-network
+
+  # Streamlit Dashboard
+  cryptopulse-dashboard:
+    build: .
+    container_name: cryptopulse-dashboard
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./charts:/app/charts
+    ports:
+      - "8501:8501"
+    depends_on:
+      - postgres
+      - cryptopulse-api
+    command: streamlit run src/dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+    networks:
+      - cryptopulse-network
+
+  # PostgreSQL Database (local development)
+  postgres:
+    image: postgres:15-alpine
+    container_name: cryptopulse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cryptopulse
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: cryptopulse_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - cryptopulse-network
+
+volumes:
+  postgres-data:
+
+networks:
+  cryptopulse-network:
+    driver: bridge
