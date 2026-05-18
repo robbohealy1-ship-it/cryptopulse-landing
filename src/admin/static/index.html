@@ -599,29 +599,82 @@ function renderActiveSignals(signals) {
     return;
   }
   
-  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>Current</th><th>P&L</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Status</th></tr></thead><tbody>';
+  let html = '<div class="compact-grid">';
   for (const s of signals) {
     const pnlClass = s.pnl_percent >= 0 ? 'up' : 'down';
-    const pnlEmoji = s.pnl_percent >= 0 ? '🟢' : '🔴';
-    const tp1Status = s.tp1_hit ? '✅' : '⏳';
-    const tp2Status = s.tp2_hit ? '✅' : '⏳';
-    const tp3Status = s.tp3_hit ? '✅' : '⏳';
+    const pnlSign = s.pnl_percent >= 0 ? '+' : '';
+    const entryType = s.is_limit_order ? '⏳ LIMIT' : '⚡ MARKET';
+    const entryColor = s.is_limit_order ? '#fbbf24' : '#22c55e';
+    const slMoved = s.stop_moved_to_breakeven ? '🔒 Breakeven' : 'Active';
     
-    html += `<tr>
-      <td><b>${s.symbol}</b></td>
-      <td><span class="badge ${s.direction.toLowerCase()}">${s.direction}</span></td>
-      <td>${s.timeframe}</td>
-      <td>$${s.entry_price.toFixed(4)}</td>
-      <td>$${s.current_price ? s.current_price.toFixed(4) : 'N/A'}</td>
-      <td><span class="change ${pnlClass}">${pnlEmoji} ${s.pnl_percent >= 0 ? '+' : ''}${s.pnl_percent}%</span></td>
-      <td>$${s.stop_loss ? s.stop_loss.toFixed(4) : 'N/A'}</td>
-      <td>${tp1Status} $${s.take_profit_1 ? s.take_profit_1.toFixed(4) : 'N/A'}</td>
-      <td>${tp2Status} $${s.take_profit_2 ? s.take_profit_2.toFixed(4) : 'N/A'}</td>
-      <td>${tp3Status} $${s.take_profit_3 ? s.take_profit_3.toFixed(4) : 'N/A'}</td>
-      <td><span style="font-size:11px;color:#64748b;">Tracking</span></td>
-    </tr>`;
+    // TP Progress Bar
+    let tpProgress = 0;
+    if (s.tp3_hit) tpProgress = 100;
+    else if (s.tp2_hit) tpProgress = 66;
+    else if (s.tp1_hit) tpProgress = 33;
+    
+    html += `
+    <div class="card" style="position:relative;">
+      <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:12px;">
+        <div>
+          <h3 style="font-size:18px;color:#f8fafc;margin-bottom:4px;">${s.symbol}</h3>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <span class="badge ${s.direction.toLowerCase()}">${s.direction}</span>
+            <span style="font-size:11px;color:${entryColor};">${entryType}</span>
+            <span style="font-size:11px;color:#64748b;">${s.timeframe}</span>
+            <span style="font-size:11px;color:#64748b;">${s.setup_type || 'N/A'}</span>
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <div class="change ${pnlClass}" style="font-size:20px;font-weight:700;">${pnlSign}${s.pnl_percent}%</div>
+          <div style="font-size:11px;color:#64748b;">Conf: ${s.confidence}%</div>
+        </div>
+      </div>
+      
+      <!-- Prices -->
+      <div style="background:#0f172a;border-radius:8px;padding:12px;margin-bottom:12px;font-size:12px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div><span style="color:#94a3b8;">Entry:</span> <b>$${s.entry_price.toFixed(6)}</b></div>
+          <div><span style="color:#94a3b8;">Current:</span> <b>$${s.current_price ? s.current_price.toFixed(6) : 'N/A'}</b></div>
+          <div><span style="color:#94a3b8;">SL:</span> <b>$${s.stop_loss ? s.stop_loss.toFixed(6) : 'N/A'}</b></div>
+          <div><span style="color:#64748b;font-size:10px;">${slMoved}</span></div>
+        </div>
+      </div>
+      
+      <!-- TP Progress -->
+      <div style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px;">
+          <span style="color:#94a3b8;">Take Profits</span>
+          <span style="color:#64748b;">${s.tp1_hit ? 1 : 0} + ${s.tp2_hit ? 1 : 0} + ${s.tp3_hit ? 1 : 0} / 3</span>
+        </div>
+        <div style="background:#0f172a;height:6px;border-radius:3px;overflow:hidden;margin-bottom:8px;">
+          <div style="background:linear-gradient(90deg,#22c55e,#38bdf8);height:100%;width:${tpProgress}%;transition:width 0.3s;"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;">
+          <div style="background:${s.tp1_hit ? 'rgba(34,197,94,0.15)' : '#0f172a'};padding:6px;border-radius:4px;text-align:center;border:1px solid ${s.tp1_hit ? '#22c55e' : '#334155'};">
+            <div style="color:${s.tp1_hit ? '#22c55e' : '#64748b'};">${s.tp1_hit ? '✅' : '⏳'} TP1</div>
+            <div style="color:#94a3b8;font-size:10px;">$${s.take_profit_1 ? s.take_profit_1.toFixed(4) : 'N/A'}</div>
+          </div>
+          <div style="background:${s.tp2_hit ? 'rgba(34,197,94,0.15)' : '#0f172a'};padding:6px;border-radius:4px;text-align:center;border:1px solid ${s.tp2_hit ? '#22c55e' : '#334155'};">
+            <div style="color:${s.tp2_hit ? '#22c55e' : '#64748b'};">${s.tp2_hit ? '✅' : '⏳'} TP2</div>
+            <div style="color:#94a3b8;font-size:10px;">$${s.take_profit_2 ? s.take_profit_2.toFixed(4) : 'N/A'}</div>
+          </div>
+          <div style="background:${s.tp3_hit ? 'rgba(34,197,94,0.15)' : '#0f172a'};padding:6px;border-radius:4px;text-align:center;border:1px solid ${s.tp3_hit ? '#22c55e' : '#334155'};">
+            <div style="color:${s.tp3_hit ? '#22c55e' : '#64748b'};">${s.tp3_hit ? '✅' : '⏳'} TP3</div>
+            <div style="color:#94a3b8;font-size:10px;">$${s.take_profit_3 ? s.take_profit_3.toFixed(4) : 'N/A'}</div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Actions -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="editSignal('${s.id}')">✏️ Edit</button>
+        <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="markTPModal('${s.id}', '${s.symbol}')">✅ Mark TP</button>
+        <button class="btn danger" style="flex:1;font-size:12px;padding:8px;" onclick="closeSignalModal('${s.id}', '${s.symbol}', ${s.current_price || 0})">🔴 Close</button>
+      </div>
+    </div>`;
   }
-  html += '</tbody></table></div>';
+  html += '</div>';
   el.innerHTML = html;
 }
 
@@ -971,6 +1024,141 @@ async function loadAlphaStats() {
   } catch (e) {}
 }
 
+// ==================== MANUAL TRADE MANAGEMENT ====================
+
+let currentEditSignalId = null;
+
+async function editSignal(signalId) {
+  currentEditSignalId = signalId;
+  try {
+    const signals = await fetchJSON('/api/signals/active');
+    const signal = signals.signals.find(s => s.id === signalId);
+    if (!signal) return showToast('Signal not found', 'error');
+    
+    document.getElementById('editEntry').value = signal.entry_price;
+    document.getElementById('editSL').value = signal.stop_loss;
+    document.getElementById('editTP1').value = signal.take_profit_1;
+    document.getElementById('editTP2').value = signal.take_profit_2 || '';
+    document.getElementById('editTP3').value = signal.take_profit_3 || '';
+    document.getElementById('editModalTitle').textContent = `Edit ${signal.symbol}`;
+    
+    document.getElementById('editModal').classList.add('show');
+  } catch (e) {
+    showToast('Error loading signal: ' + e.message, 'error');
+  }
+}
+
+async function saveSignalEdit() {
+  if (!currentEditSignalId) return;
+  
+  const updates = {};
+  const entry = parseFloat(document.getElementById('editEntry').value);
+  const sl = parseFloat(document.getElementById('editSL').value);
+  const tp1 = parseFloat(document.getElementById('editTP1').value);
+  const tp2 = parseFloat(document.getElementById('editTP2').value);
+  const tp3 = parseFloat(document.getElementById('editTP3').value);
+  
+  if (entry) updates.entry_price = entry;
+  if (sl) updates.stop_loss = sl;
+  if (tp1) updates.take_profit_1 = tp1;
+  if (tp2) updates.take_profit_2 = tp2;
+  if (tp3) updates.take_profit_3 = tp3;
+  
+  if (Object.keys(updates).length === 0) {
+    return showToast('No changes to save', 'error');
+  }
+  
+  try {
+    const result = await fetchJSON(`/api/signals/${currentEditSignalId}/update`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updates)
+    });
+    
+    if (result.success) {
+      showToast('Signal updated successfully!');
+      closeModal('editModal');
+      loadActiveSignals();
+    } else {
+      showToast('Error: ' + result.message, 'error');
+    }
+  } catch (e) {
+    showToast('Error updating signal: ' + e.message, 'error');
+  }
+}
+
+function markTPModal(signalId, symbol) {
+  document.getElementById('markTPSignalId').value = signalId;
+  document.getElementById('markTPModalTitle').textContent = `Mark TP Hit - ${symbol}`;
+  document.getElementById('markTPModal').classList.add('show');
+}
+
+async function confirmMarkTP() {
+  const signalId = document.getElementById('markTPSignalId').value;
+  const tpLevel = parseInt(document.getElementById('markTPLevel').value);
+  
+  if (!signalId || !tpLevel) return showToast('Invalid input', 'error');
+  
+  try {
+    const result = await fetchJSON(`/api/signals/${signalId}/mark-tp`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ signal_id: signalId, tp_level: tpLevel })
+    });
+    
+    if (result.success) {
+      showToast(`TP${tpLevel} marked as hit! VIP notified.`);
+      closeModal('markTPModal');
+      loadActiveSignals();
+    } else {
+      showToast('Error: ' + result.message, 'error');
+    }
+  } catch (e) {
+    showToast('Error marking TP: ' + e.message, 'error');
+  }
+}
+
+function closeSignalModal(signalId, symbol, currentPrice) {
+  document.getElementById('closeSignalId').value = signalId;
+  document.getElementById('closePrice').value = currentPrice.toFixed(6);
+  document.getElementById('closeModalTitle').textContent = `Close Trade - ${symbol}`;
+  document.getElementById('closeModal').classList.add('show');
+}
+
+async function confirmCloseSignal() {
+  const signalId = document.getElementById('closeSignalId').value;
+  const closePrice = parseFloat(document.getElementById('closePrice').value);
+  const reason = document.getElementById('closeReason').value;
+  
+  if (!signalId || !closePrice || !reason) {
+    return showToast('Please fill all fields', 'error');
+  }
+  
+  if (!confirm('Are you sure you want to close this trade?')) return;
+  
+  try {
+    const result = await fetchJSON(`/api/signals/${signalId}/close`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ signal_id: signalId, close_price: closePrice, reason: reason })
+    });
+    
+    if (result.success) {
+      showToast(`Trade closed! P&L: ${result.pnl_percent >= 0 ? '+' : ''}${result.pnl_percent}%`);
+      closeModal('closeModal');
+      loadActiveSignals();
+    } else {
+      showToast('Error: ' + result.message, 'error');
+    }
+  } catch (e) {
+    showToast('Error closing signal: ' + e.message, 'error');
+  }
+}
+
+function closeModal(modalId) {
+  document.getElementById(modalId).classList.remove('show');
+}
+
 // Init
 updateClock();
 setInterval(updateClock, 30000);
@@ -979,5 +1167,98 @@ loadStats();
 setInterval(loadStats, 30000); // Stats every 30s
 setInterval(loadStatus, 10000); // Status every 10s for faster updates
 </script>
+
+<!-- Edit Signal Modal -->
+<div id="editModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 id="editModalTitle">Edit Signal</h3>
+      <button class="close-btn" onclick="closeModal('editModal')">×</button>
+    </div>
+    <div class="form-group">
+      <label>Entry Price</label>
+      <input type="number" id="editEntry" step="0.000001" placeholder="0.000000">
+    </div>
+    <div class="form-group">
+      <label>Stop Loss</label>
+      <input type="number" id="editSL" step="0.000001" placeholder="0.000000">
+    </div>
+    <div class="form-group">
+      <label>Take Profit 1</label>
+      <input type="number" id="editTP1" step="0.000001" placeholder="0.000000">
+    </div>
+    <div class="form-group">
+      <label>Take Profit 2 (optional)</label>
+      <input type="number" id="editTP2" step="0.000001" placeholder="0.000000">
+    </div>
+    <div class="form-group">
+      <label>Take Profit 3 (optional)</label>
+      <input type="number" id="editTP3" step="0.000001" placeholder="0.000000">
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn ghost" onclick="closeModal('editModal')">Cancel</button>
+      <button class="btn success" onclick="saveSignalEdit()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Mark TP Modal -->
+<div id="markTPModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 id="markTPModalTitle">Mark TP Hit</h3>
+      <button class="close-btn" onclick="closeModal('markTPModal')">×</button>
+    </div>
+    <input type="hidden" id="markTPSignalId">
+    <div class="form-group">
+      <label>Which TP was hit?</label>
+      <select id="markTPLevel">
+        <option value="1">TP1</option>
+        <option value="2">TP2</option>
+        <option value="3">TP3</option>
+      </select>
+    </div>
+    <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">
+      This will mark the TP as hit in the database and send a notification to the VIP channel.
+      If TP1, it will also move SL to breakeven.
+    </p>
+    <div style="display:flex;gap:8px;">
+      <button class="btn ghost" onclick="closeModal('markTPModal')">Cancel</button>
+      <button class="btn success" onclick="confirmMarkTP()">✅ Mark as Hit</button>
+    </div>
+  </div>
+</div>
+
+<!-- Close Signal Modal -->
+<div id="closeModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 id="closeModalTitle">Close Trade</h3>
+      <button class="close-btn" onclick="closeModal('closeModal')">×</button>
+    </div>
+    <input type="hidden" id="closeSignalId">
+    <div class="form-group">
+      <label>Close Price</label>
+      <input type="number" id="closePrice" step="0.000001" placeholder="0.000000">
+    </div>
+    <div class="form-group">
+      <label>Reason</label>
+      <select id="closeReason">
+        <option value="manual">Manual Close</option>
+        <option value="tp_hit">TP Hit (missed by bot)</option>
+        <option value="sl_hit">SL Hit (missed by bot)</option>
+        <option value="expired">Signal Expired</option>
+      </select>
+    </div>
+    <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">
+      This will close the trade, calculate P&L, and send a notification to the VIP channel.
+    </p>
+    <div style="display:flex;gap:8px;">
+      <button class="btn ghost" onclick="closeModal('closeModal')">Cancel</button>
+      <button class="btn danger" onclick="confirmCloseSignal()">🔴 Close Trade</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
