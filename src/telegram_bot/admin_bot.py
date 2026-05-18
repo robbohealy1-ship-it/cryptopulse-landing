@@ -301,10 +301,25 @@ class AdminBot:
             
         except Exception as e:
             logger.error(f"Error sending signal for approval: {e}")
+            # Fallback: send simple text notification so admin knows a signal is waiting
+            try:
+                await self.send_notification(
+                    f"⚠️ <b>Signal approval message failed</b>\n\n"
+                    f"Symbol: {signal.symbol} {signal.direction.value}\n"
+                    f"ID: {signal.id}\n"
+                    f"Check dashboard to approve/reject.\n\n"
+                    f"Error: {str(e)[:100]}"
+                )
+            except Exception as fallback_err:
+                logger.error(f"Fallback notification also failed: {fallback_err}")
             return False
     
     def _format_signal_message(self, signal: TradingSignal) -> str:
         direction_emoji = "🟢" if signal.direction.value == "LONG" else "🔴"
+        
+        tp2_str = f"${signal.take_profit_2:.8f}" if signal.take_profit_2 is not None else "N/A"
+        tp3_str = f"${signal.take_profit_3:.8f}" if signal.take_profit_3 is not None else "N/A"
+        expires_str = signal.expires_at.strftime('%H:%M:%S UTC') if signal.expires_at else 'No expiry'
         
         message = f"""
 {direction_emoji} <b>SIGNAL CANDIDATE</b> {direction_emoji}
@@ -317,8 +332,8 @@ class AdminBot:
 💰 <b>ENTRY:</b> ${signal.entry_price:.8f}
 🛑 <b>STOP LOSS:</b> ${signal.stop_loss:.8f}
 🎯 <b>TP1:</b> ${signal.take_profit_1:.8f}
-🎯 <b>TP2:</b> ${signal.take_profit_2:.8f}
-🎯 <b>TP3:</b> ${signal.take_profit_3:.8f}
+🎯 <b>TP2:</b> {tp2_str}
+🎯 <b>TP3:</b> {tp3_str}
 
 📊 <b>Risk/Reward:</b> 1:{signal.risk_reward:.2f}
 ⚡ <b>Confidence:</b> {signal.confidence:.1f}/100
@@ -340,7 +355,7 @@ class AdminBot:
 <b>Market Context:</b>
 {signal.market_context or 'No significant context'}
 
-⏰ <b>Expires:</b> {signal.expires_at.strftime('%H:%M:%S UTC')}
+⏰ <b>Expires:</b> {expires_str}
 """
         return message.strip()
     
