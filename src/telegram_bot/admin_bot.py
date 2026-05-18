@@ -324,21 +324,31 @@ class AdminBot:
         tp2_str = f"${signal.take_profit_2:.8f}" if signal.take_profit_2 is not None else "N/A"
         tp3_str = f"${signal.take_profit_3:.8f}" if signal.take_profit_3 is not None else "N/A"
         
-        # Entry type indicator
+        # Entry type indicator with strategy
         if signal.is_limit_order:
-            entry_type = "⏳ LIMIT"
+            entry_type = "⏳ <b>LIMIT ORDER</b>"
+            if signal.setup_type.value in ['breakout_retest', 'bos_retest', 'choch_retest']:
+                strategy = "Wait for retest"
+            else:
+                strategy = "Price moved away - wait for pullback"
         else:
-            entry_type = "⚡ MARKET"
+            entry_type = "⚡ <b>MARKET ENTRY</b>"
+            if signal.setup_type.value in ['liquidity_sweep', 'fair_value_gap']:
+                strategy = "Enter on sweep/FVG fill"
+            else:
+                strategy = "Enter now at current price"
         
         # Truncate reasoning to fit in caption
-        reasoning_short = signal.reasoning[:150] + "..." if len(signal.reasoning) > 150 else signal.reasoning
+        reasoning_short = signal.reasoning[:120] + "..." if len(signal.reasoning) > 120 else signal.reasoning
         
         message = f"""{direction_emoji} <b>SIGNAL CANDIDATE</b> {direction_emoji}
 
 <b>{signal.symbol}</b> | {signal.direction.value} | {signal.timeframe}
 <b>Setup:</b> {signal.setup_type.value.replace('_', ' ').title()}
 
-{entry_type} <b>ENTRY:</b> ${signal.entry_price:.8f}
+{entry_type}
+💰 <b>ENTRY:</b> ${signal.entry_price:.8f}
+🔹 <i>{strategy}</i>
 🛑 <b>SL:</b> ${signal.stop_loss:.8f}
 🎯 <b>TP1:</b> ${signal.take_profit_1:.8f}
 🎯 <b>TP2:</b> {tp2_str}

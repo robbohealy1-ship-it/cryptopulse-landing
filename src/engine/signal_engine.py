@@ -281,18 +281,48 @@ class SignalEngine:
             
             from src.models.signal import TechnicalScore, ContextScore
             
-            # Determine if this should be a limit order or market entry
+            # Determine entry execution type based on setup, price distance, and volatility
             current_price = df['close'].iloc[-1]
             is_limit = False
             
-            if direction == SignalDirection.LONG:
-                # LONG: If current price is ABOVE entry, it's a limit order (wait for pullback to entry)
-                if current_price > entry_price * 1.002:  # 0.2% buffer
-                    is_limit = True
+            # Calculate distance from entry (%)
+            price_distance = abs(current_price - entry_price) / entry_price * 100
+            
+            # Get volatility (ATR as % of price)
+            atr = (df['high'].iloc[-20:] - df['low'].iloc[-20:]).mean()
+            volatility_pct = (atr / current_price) * 100
+            
+            # EXECUTION STRATEGY LOGIC:
+            # 1. BREAKOUT setups → MARKET (enter on momentum)
+            # 2. RETEST setups → LIMIT (wait for pullback)
+            # 3. Price far from entry (>1%) → LIMIT (wait for retest)
+            # 4. Price at entry (<0.3%) → MARKET (enter now)
+            # 5. High volatility (>3%) + close to entry → MARKET (may not get retest)
+            
+            if setup_type.value in ['breakout_retest', 'bos_retest', 'choch_retest']:
+                # Retest setups: Wait for price to come back to entry zone
+                is_limit = True
+            elif setup_type.value in ['liquidity_sweep', 'fair_value_gap']:
+                # Sweep/FVG: If price already moved away, wait for retest
+                if direction == SignalDirection.LONG:
+                    is_limit = current_price > entry_price * 1.003  # >0.3% above
+                else:
+                    is_limit = current_price < entry_price * 0.997  # >0.3% below
+            elif price_distance > 1.0:
+                # Price is far from entry (>1%) → LIMIT order
+                is_limit = True
+            elif price_distance < 0.3:
+                # Price is very close to entry (<0.3%) → MARKET order
+                is_limit = False
+            elif volatility_pct > 3.0 and price_distance < 0.8:
+                # High volatility + close to entry → MARKET (may not get retest)
+                is_limit = False
             else:
-                # SHORT: If current price is BELOW entry, it's a limit order (wait for bounce to entry)
-                if current_price < entry_price * 0.998:  # 0.2% buffer
-                    is_limit = True
+                # Default: Check if price moved away from entry
+                if direction == SignalDirection.LONG:
+                    is_limit = current_price > entry_price * 1.005  # >0.5% above
+                else:
+                    is_limit = current_price < entry_price * 0.995  # >0.5% below
             
             signal = TradingSignal(
                 id=str(uuid.uuid4()),
