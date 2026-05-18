@@ -178,6 +178,38 @@ class DiscordPublisher:
         payload = {"embeds": [embed]}
         return await self._send_webhook(payload)
     
+    async def post_free_teaser(self, signal) -> bool:
+        """Post free channel teaser to Discord (no prices, same as Telegram Free)"""
+        direction = signal.direction.value
+        color = 0x00ff00 if direction == "LONG" else 0xff4444
+        ticker = signal.symbol.replace('/', '')
+        
+        tv_link = self._get_tradingview_link(signal.symbol, getattr(signal, 'timeframe', '15m'))
+        
+        embed = {
+            "title": f"🔥 {direction} SIGNAL ALERT",
+            "description": (
+                f"**{ticker}** | Confidence: {signal.confidence:.0f}%\n"
+                f"⏱ Timeframe: {signal.timeframe}\n\n"
+                f"💡 **Free channel gets the teaser.**\n"
+                f"💎 **VIP gets the full plan:**\n"
+                f"   ✅ Exact entry price\n"
+                f"   ✅ Stop loss level\n"
+                f"   ✅ 3 profit targets\n"
+                f"   ✅ Live updates\n\n"
+                f"📈 [View Chart]({tv_link})\n\n"
+                f"🔐 [Join VIP Instantly](https://t.me/CryptoPulseVIPAccessBot)"
+            ),
+            "color": color,
+            "footer": {
+                "text": "CryptoPulse Signals | Free Channel"
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        payload = {"embeds": [embed]}
+        return await self._send_webhook(payload)
+    
     async def post_welcome(self, member_count: int = 0) -> bool:
         """Post welcome/announcement message"""
         message = (

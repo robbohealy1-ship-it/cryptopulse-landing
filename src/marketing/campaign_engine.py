@@ -126,28 +126,15 @@ class CampaignEngine:
             logger.error(f"Free channel teaser failed: {e}")
 
     async def _discord_signal_embed(self, signal: TradingSignal):
-        """Post signal to Discord as rich embed"""
+        """Post free teaser to Discord (same format as Telegram Free — no prices)"""
         if not self.discord or not self.discord.enabled:
             return
 
-        direction_emoji = "🟢 LONG" if signal.direction.value == "LONG" else "🔴 SHORT"
-        color = 0x00ff00 if signal.direction.value == "LONG" else 0xff4444
-
         try:
-            await self.discord.post_marketing(
-                title=f"{direction_emoji} Signal: {signal.symbol}",
-                message=(
-                    f"**Confidence:** {signal.confidence:.0f}%\n"
-                    f"**Timeframe:** {signal.timeframe}\n"
-                    f"**R:R:** {signal.risk_reward:.1f}\n\n"
-                    f"💎 VIP members get exact entry, SL, and 3 TPs.\n"
-                    f"🔗 {self.landing_url}"
-                ),
-                color=color
-            )
-            logger.info(f"📢 Discord signal embed sent: {signal.symbol}")
+            await self.discord.post_free_teaser(signal)
+            logger.info(f"📢 Discord free teaser sent: {signal.symbol}")
         except Exception as e:
-            logger.error(f"Discord signal embed failed: {e}")
+            logger.error(f"Discord free teaser failed: {e}")
 
     async def _twitter_signal_teaser(self, signal: TradingSignal):
         """Post signal teaser to Twitter/X if enabled"""
