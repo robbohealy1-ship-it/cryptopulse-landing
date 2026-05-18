@@ -281,6 +281,19 @@ class SignalEngine:
             
             from src.models.signal import TechnicalScore, ContextScore
             
+            # Determine if this should be a limit order or market entry
+            current_price = df['close'].iloc[-1]
+            is_limit = False
+            
+            if direction == SignalDirection.LONG:
+                # LONG: If current price is BELOW entry, it's a limit order (wait for pullback)
+                if current_price < entry_price * 0.998:  # 0.2% buffer
+                    is_limit = True
+            else:
+                # SHORT: If current price is ABOVE entry, it's a limit order (wait for bounce)
+                if current_price > entry_price * 1.002:  # 0.2% buffer
+                    is_limit = True
+            
             signal = TradingSignal(
                 id=str(uuid.uuid4()),
                 symbol=symbol,
@@ -292,7 +305,7 @@ class SignalEngine:
                 take_profit_1=tp1,
                 take_profit_2=tp2,
                 take_profit_3=tp3,
-                is_limit_order=False,
+                is_limit_order=is_limit,
                 technical_score=TechnicalScore(
                     trend_score=inst_score.structure_score,
                     volume_score=inst_score.volume_profile_score,

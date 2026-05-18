@@ -268,6 +268,23 @@ Join VIP to get:
             chart_link = signal.chart_url or ""
             chart_section = f"\n📊 <a href='{chart_link}'>View Chart</a>\n" if chart_link else ""
             
+            # Entry type and instructions
+            if signal.is_limit_order:
+                entry_type = "⏳ <b>LIMIT ORDER</b>"
+                entry_instruction = f"Set limit order at ${signal.entry_price:.8f} — wait for retest"
+            else:
+                entry_type = "⚡ <b>MARKET ENTRY</b>"
+                entry_instruction = f"Enter now at market price (~${signal.entry_price:.8f})"
+            
+            # Setup-specific entry context
+            setup_context = ""
+            if signal.setup_type.value == "breakout_retest":
+                setup_context = "📍 Entry: Breakout retest zone"
+            elif signal.setup_type.value == "liquidity_sweep":
+                setup_context = "📍 Entry: After liquidity sweep"
+            elif signal.setup_type.value == "fair_value_gap":
+                setup_context = "📍 Entry: FVG fill zone"
+            
             message = f"""
 {exclusive_header}{direction_emoji} <b>VIP SIGNAL</b> {direction_emoji}
 
@@ -275,7 +292,11 @@ Join VIP to get:
 <b>Direction:</b> {signal.direction.value}
 <b>Timeframe:</b> {signal.timeframe}
 
-💰 <b>Entry Zone:</b> ${signal.entry_price:.8f}
+{entry_type}
+💰 <b>Entry:</b> ${signal.entry_price:.8f}
+{setup_context}
+🔹 <i>{entry_instruction}</i>
+
 🛑 <b>Stop Loss:</b> ${signal.stop_loss:.8f}
 
 🎯 <b>Targets:</b>
