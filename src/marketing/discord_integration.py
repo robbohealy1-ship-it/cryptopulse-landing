@@ -103,12 +103,12 @@ class DiscordPublisher:
                 },
                 {
                     "name": "🎯 Target 2",
-                    "value": f"${signal.take_profit_2:.8f}",
+                    "value": f"${signal.take_profit_2:.8f}" if signal.take_profit_2 is not None else "N/A",
                     "inline": True
                 },
                 {
                     "name": "🎯 Target 3",
-                    "value": f"${signal.take_profit_3:.8f}",
+                    "value": f"${signal.take_profit_3:.8f}" if signal.take_profit_3 is not None else "N/A",
                     "inline": True
                 }
             ],
