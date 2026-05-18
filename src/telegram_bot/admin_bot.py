@@ -260,11 +260,31 @@ class AdminBot:
                 reply_markup=reply_markup
             )
     
+    def _format_short_approval_caption(self, signal: TradingSignal) -> str:
+        """Short caption for photo (under 1024 chars for Telegram limit)"""
+        direction_emoji = "🟢" if signal.direction.value == "LONG" else "🔴"
+        return (
+            f"{direction_emoji} <b>SIGNAL CANDIDATE</b> {direction_emoji}\n\n"
+            f"<b>Symbol:</b> {signal.symbol}\n"
+            f"<b>Direction:</b> {signal.direction.value}\n"
+            f"<b>Setup:</b> {signal.setup_type.value.replace('_', ' ').title()}\n"
+            f"<b>Timeframe:</b> {signal.timeframe}\n\n"
+            f"💰 <b>Entry:</b> ${signal.entry_price:.8f}\n"
+            f"🛑 <b>SL:</b> ${signal.stop_loss:.8f}\n"
+            f"🎯 <b>TP1:</b> ${signal.take_profit_1:.8f}\n\n"
+            f"📊 <b>R/R:</b> 1:{signal.risk_reward:.2f}\n"
+            f"⚡ <b>Confidence:</b> {signal.confidence:.1f}%\n\n"
+            f"<i>Full details below ↓</i>"
+        )
+    
     async def send_signal_for_approval(self, signal: TradingSignal) -> bool:
         try:
             self.pending_signals[signal.id] = signal
             
-            message = self._format_signal_message(signal)
+            # Full message for text (no length limit)
+            full_message = self._format_signal_message(signal)
+            # Short caption for photo (must be < 1024 chars)
+            short_caption = self._format_short_approval_caption(signal)
             
             keyboard = [
                 [
@@ -280,18 +300,26 @@ class AdminBot:
             chart_path = await self.chart_generator.generate_chart(signal)
             
             if chart_path:
+                # Send photo with SHORT caption
                 with open(chart_path, 'rb') as photo:
                     await self.app.bot.send_photo(
                         chat_id=self.admin_chat_id,
                         photo=photo,
-                        caption=message,
+                        caption=short_caption,
                         reply_markup=reply_markup,
                         parse_mode='HTML'
                     )
-            else:
+                # Send full details as separate message
                 await self.app.bot.send_message(
                     chat_id=self.admin_chat_id,
-                    text=message,
+                    text=full_message,
+                    parse_mode='HTML'
+                )
+            else:
+                # No chart: send everything as text message
+                await self.app.bot.send_message(
+                    chat_id=self.admin_chat_id,
+                    text=short_caption + "\n\n" + full_message,
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
