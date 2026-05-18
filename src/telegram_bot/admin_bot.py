@@ -260,31 +260,12 @@ class AdminBot:
                 reply_markup=reply_markup
             )
     
-    def _format_short_approval_caption(self, signal: TradingSignal) -> str:
-        """Short caption for photo (under 1024 chars for Telegram limit)"""
-        direction_emoji = "🟢" if signal.direction.value == "LONG" else "🔴"
-        return (
-            f"{direction_emoji} <b>SIGNAL CANDIDATE</b> {direction_emoji}\n\n"
-            f"<b>Symbol:</b> {signal.symbol}\n"
-            f"<b>Direction:</b> {signal.direction.value}\n"
-            f"<b>Setup:</b> {signal.setup_type.value.replace('_', ' ').title()}\n"
-            f"<b>Timeframe:</b> {signal.timeframe}\n\n"
-            f"💰 <b>Entry:</b> ${signal.entry_price:.8f}\n"
-            f"🛑 <b>SL:</b> ${signal.stop_loss:.8f}\n"
-            f"🎯 <b>TP1:</b> ${signal.take_profit_1:.8f}\n\n"
-            f"📊 <b>R/R:</b> 1:{signal.risk_reward:.2f}\n"
-            f"⚡ <b>Confidence:</b> {signal.confidence:.1f}%\n\n"
-            f"<i>Full details below ↓</i>"
-        )
-    
     async def send_signal_for_approval(self, signal: TradingSignal) -> bool:
         try:
             self.pending_signals[signal.id] = signal
             
-            # Full message for text (no length limit)
-            full_message = self._format_signal_message(signal)
-            # Short caption for photo (must be < 1024 chars)
-            short_caption = self._format_short_approval_caption(signal)
+            # Format approval message (condensed to fit in caption)
+            approval_message = self._format_signal_message(signal)
             
             keyboard = [
                 [
@@ -300,26 +281,20 @@ class AdminBot:
             chart_path = await self.chart_generator.generate_chart(signal)
             
             if chart_path:
-                # Send photo with SHORT caption
+                # Send photo with approval message as caption
                 with open(chart_path, 'rb') as photo:
                     await self.app.bot.send_photo(
                         chat_id=self.admin_chat_id,
                         photo=photo,
-                        caption=short_caption,
+                        caption=approval_message,
                         reply_markup=reply_markup,
                         parse_mode='HTML'
                     )
-                # Send full details as separate message
-                await self.app.bot.send_message(
-                    chat_id=self.admin_chat_id,
-                    text=full_message,
-                    parse_mode='HTML'
-                )
             else:
-                # No chart: send everything as text message
+                # No chart: send as text message
                 await self.app.bot.send_message(
                     chat_id=self.admin_chat_id,
-                    text=short_caption + "\n\n" + full_message,
+                    text=approval_message,
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
@@ -343,47 +318,39 @@ class AdminBot:
             return False
     
     def _format_signal_message(self, signal: TradingSignal) -> str:
+        """Condensed approval message that fits in 1024 char Telegram caption limit"""
         direction_emoji = "🟢" if signal.direction.value == "LONG" else "🔴"
         
         tp2_str = f"${signal.take_profit_2:.8f}" if signal.take_profit_2 is not None else "N/A"
         tp3_str = f"${signal.take_profit_3:.8f}" if signal.take_profit_3 is not None else "N/A"
-        expires_str = signal.expires_at.strftime('%H:%M:%S UTC') if signal.expires_at else 'No expiry'
         
-        message = f"""
-{direction_emoji} <b>SIGNAL CANDIDATE</b> {direction_emoji}
+        # Entry type indicator
+        if signal.is_limit_order:
+            entry_type = "⏳ LIMIT"
+        else:
+            entry_type = "⚡ MARKET"
+        
+        # Truncate reasoning to fit in caption
+        reasoning_short = signal.reasoning[:150] + "..." if len(signal.reasoning) > 150 else signal.reasoning
+        
+        message = f"""{direction_emoji} <b>SIGNAL CANDIDATE</b> {direction_emoji}
 
-<b>Symbol:</b> {signal.symbol}
-<b>Direction:</b> {signal.direction.value}
+<b>{signal.symbol}</b> | {signal.direction.value} | {signal.timeframe}
 <b>Setup:</b> {signal.setup_type.value.replace('_', ' ').title()}
-<b>Timeframe:</b> {signal.timeframe}
 
-💰 <b>ENTRY:</b> ${signal.entry_price:.8f}
-🛑 <b>STOP LOSS:</b> ${signal.stop_loss:.8f}
+{entry_type} <b>ENTRY:</b> ${signal.entry_price:.8f}
+🛑 <b>SL:</b> ${signal.stop_loss:.8f}
 🎯 <b>TP1:</b> ${signal.take_profit_1:.8f}
 🎯 <b>TP2:</b> {tp2_str}
 🎯 <b>TP3:</b> {tp3_str}
 
-📊 <b>Risk/Reward:</b> 1:{signal.risk_reward:.2f}
-⚡ <b>Confidence:</b> {signal.confidence:.1f}/100
+📊 <b>R/R:</b> 1:{signal.risk_reward:.2f} | ⚡ <b>Conf:</b> {signal.confidence:.1f}%
 
-<b>Technical Score:</b> {signal.technical_score.total_score:.1f}/100
-├─ Trend: {signal.technical_score.trend_score:.0f}
-├─ Volume: {signal.technical_score.volume_score:.0f}
-├─ Momentum: {signal.technical_score.momentum_score:.0f}
-└─ Structure: {signal.technical_score.structure_score:.0f}
+<b>Tech:</b> {signal.technical_score.total_score:.0f}/100 (T:{signal.technical_score.trend_score:.0f} V:{signal.technical_score.volume_score:.0f} M:{signal.technical_score.momentum_score:.0f} S:{signal.technical_score.structure_score:.0f})
+<b>Context:</b> {signal.context_score.total_score:.0f}/100 (M:{signal.context_score.macro_score:.0f} N:{signal.context_score.news_score:.0f} S:{signal.context_score.sentiment_score:.0f})
 
-<b>Context Score:</b> {signal.context_score.total_score:.1f}/100
-├─ Macro: {signal.context_score.macro_score:.0f}
-├─ News: {signal.context_score.news_score:.0f}
-└─ Sentiment: {signal.context_score.sentiment_score:.0f}
-
-<b>Reasoning:</b>
-{signal.reasoning}
-
-<b>Market Context:</b>
-{signal.market_context or 'No significant context'}
-
-⏰ <b>Expires:</b> {expires_str}
+<b>Analysis:</b>
+{reasoning_short}
 """
         return message.strip()
     
