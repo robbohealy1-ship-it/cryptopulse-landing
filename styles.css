@@ -204,7 +204,7 @@ body {
     content: '';
     position: absolute;
     inset: 0;
-    background: linear-gradient(180deg, rgba(10,14,26,0.55) 0%, rgba(10,14,26,0.35) 40%, rgba(10,14,26,0.70) 100%);
+    background: linear-gradient(180deg, rgba(10,14,26,0.25) 0%, rgba(10,14,26,0.15) 40%, rgba(10,14,26,0.45) 100%);
     z-index: 1;
 }
 
