@@ -21,6 +21,9 @@ ALTER TABLE signals ADD COLUMN IF NOT EXISTS stop_updated_at TIMESTAMP WITH TIME
 -- Add expires_at column (was missing)
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;
 
+-- Add cancellation_reason column (for manual close tracking)
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+
 -- Create indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
 CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol);
