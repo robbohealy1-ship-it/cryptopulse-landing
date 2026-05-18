@@ -102,6 +102,17 @@ class TradingSignal(BaseModel):
     actual_exit: Optional[float] = None
     pnl_percent: Optional[float] = None
     
+    # TP/SL hit tracking
+    tp1_hit: bool = False
+    tp2_hit: bool = False
+    tp3_hit: bool = False
+    tp1_hit_at: Optional[datetime] = None
+    tp2_hit_at: Optional[datetime] = None
+    tp3_hit_at: Optional[datetime] = None
+    stop_hit: bool = False
+    stop_hit_at: Optional[datetime] = None
+    stop_moved_to_breakeven: bool = False
+    
     # Tracking fields for admin workflow
     admin_approved: bool = False
     admin_rejected: bool = False
