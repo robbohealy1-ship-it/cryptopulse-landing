@@ -286,12 +286,12 @@ class SignalEngine:
             is_limit = False
             
             if direction == SignalDirection.LONG:
-                # LONG: If current price is BELOW entry, it's a limit order (wait for pullback)
-                if current_price < entry_price * 0.998:  # 0.2% buffer
+                # LONG: If current price is ABOVE entry, it's a limit order (wait for pullback to entry)
+                if current_price > entry_price * 1.002:  # 0.2% buffer
                     is_limit = True
             else:
-                # SHORT: If current price is ABOVE entry, it's a limit order (wait for bounce)
-                if current_price > entry_price * 1.002:  # 0.2% buffer
+                # SHORT: If current price is BELOW entry, it's a limit order (wait for bounce to entry)
+                if current_price < entry_price * 0.998:  # 0.2% buffer
                     is_limit = True
             
             signal = TradingSignal(
