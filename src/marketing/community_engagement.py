@@ -272,6 +272,8 @@ class CommunityEngagement:
                         # Convert HTML to Discord markdown
                         discord_text = text.replace('<b>', '**').replace('</b>', '**')
                         discord_text = discord_text.replace('<i>', '*').replace('</i>', '*')
+                        # Replace landing page with Telegram VIP bot for Discord
+                        discord_text = discord_text.replace(landing, 'https://t.me/CryptoPulseVIPAccessBot')
                         await self.discord.post_marketing(
                             title="💬 Community Update",
                             message=discord_text,

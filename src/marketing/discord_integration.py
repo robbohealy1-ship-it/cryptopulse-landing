@@ -113,7 +113,7 @@ class DiscordPublisher:
                 }
             ],
             "footer": {
-                "text": f"Signal ID: {signal.id[:8]} | Join t.me/cryptopulse_signals_free1"
+                "text": f"Signal ID: {signal.id[:8]} | Join VIP: t.me/CryptoPulseVIPAccessBot"
             },
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -171,7 +171,7 @@ class DiscordPublisher:
             "description": message,
             "color": color,
             "footer": {
-                "text": "CryptoPulse Signals | t.me/cryptopulse_signals_free1"
+                "text": "CryptoPulse Signals | Join VIP: t.me/CryptoPulseVIPAccessBot"
             }
         }
         
@@ -219,8 +219,7 @@ class DiscordPublisher:
             "• Entry, stop loss, and 3 take profits\n"
             "• 90%+ confidence setups only\n"
             "• Real-time market analysis\n\n"
-            "🔥 **Free Channel:** t.me/cryptopulse_signals_free1\n"
-            "💎 **VIP Access:** t.me/CryptoPulseVIPAccessBot\n\n"
+            "� **Join VIP:** t.me/CryptoPulseVIPAccessBot\n\n"
             "Let's trade smarter together! 🚀"
         )
         
