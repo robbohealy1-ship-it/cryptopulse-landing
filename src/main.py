@@ -744,13 +744,23 @@ class CryptoPulseOrchestrator:
     
     async def handle_tp_hit(self, signal, tp_level, current_price):
         """Handle TP hit - send updates to VIP and Free channels"""
+        
+        # Check if already hit (prevent duplicates on bot restart)
+        tp_hit_attr = f'tp{tp_level}_hit'
+        if hasattr(signal, tp_hit_attr) and getattr(signal, tp_hit_attr):
+            logger.info(f"⏭️  TP{tp_level} already hit for {signal.symbol} - skipping duplicate")
+            return
+        
         logger.info(f"🎯 TP{tp_level} hit for {signal.symbol}")
         
-        # Mark TP as hit in database
-        await self.db.mark_tp_hit(signal.id, tp_level)
+        # Mark TP as hit in database (may fail if columns don't exist yet)
+        try:
+            await self.db.mark_tp_hit(signal.id, tp_level)
+        except Exception as e:
+            logger.warning(f"Could not mark TP{tp_level} in database (run migration): {e}")
         
         # Update in-memory signal object to prevent duplicate messages
-        setattr(signal, f'tp{tp_level}_hit', True)
+        setattr(signal, tp_hit_attr, True)
         
         # Send update to VIP channel (includes TP1 marketing to Free)
         await self.channel_publisher.send_tp_hit(signal, tp_level)
@@ -761,10 +771,16 @@ class CryptoPulseOrchestrator:
         
         # Move SL to breakeven after TP1 (only once)
         if tp_level == 1:
-            await self.channel_publisher.send_stop_moved(signal, signal.entry_price)
-            await self.db.update_stop_loss(signal.id, signal.entry_price)
-            # Mark that we've sent the breakeven message
-            signal.stop_moved_to_breakeven = True
+            if not getattr(signal, 'stop_moved_to_breakeven', False):
+                await self.channel_publisher.send_stop_moved(signal, signal.entry_price)
+                try:
+                    await self.db.update_stop_loss(signal.id, signal.entry_price)
+                except Exception as e:
+                    logger.warning(f"Could not update SL in database (run migration): {e}")
+                # Mark that we've sent the breakeven message
+                signal.stop_moved_to_breakeven = True
+            else:
+                logger.info(f"⏭️  SL already moved to breakeven for {signal.symbol} - skipping duplicate")
         
         # Close trade if TP3 hit
         if tp_level == 3:
