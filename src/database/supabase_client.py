@@ -359,20 +359,58 @@ class SupabaseClient:
             approved = [s for s in signals if s.get('admin_approved')]
             rejected = [s for s in signals if s.get('admin_rejected')]
             closed = [s for s in signals if s.get('status') == 'closed']
+            active = [s for s in signals if s.get('status') == 'active']
             
             wins = len([s for s in closed if s.get('pnl_percent', 0) > 0])
+            
+            # TP Hit tracking
+            tp1_hits = sum(1 for s in signals if s.get('tp1_hit'))
+            tp2_hits = sum(1 for s in signals if s.get('tp2_hit'))
+            tp3_hits = sum(1 for s in signals if s.get('tp3_hit'))
+            breakeven_moves = sum(1 for s in signals if s.get('stop_moved_to_breakeven'))
+            
+            # Entry type breakdown
+            limit_count = sum(1 for s in approved if s.get('is_limit_order'))
+            market_count = len(approved) - limit_count
+            
+            # Setup type breakdown
+            setup_types = {}
+            for s in approved:
+                st = s.get('setup_type', 'unknown')
+                setup_types[st] = setup_types.get(st, 0) + 1
+            
+            # Close reason breakdown
+            manual_closes = sum(1 for s in closed if 'manual' in (s.get('cancellation_reason') or ''))
+            tp_closes = sum(1 for s in closed if 'tp' in (s.get('cancellation_reason') or ''))
+            sl_closes = sum(1 for s in closed if 'sl' in (s.get('cancellation_reason') or ''))
             
             return {
                 'date': start.strftime('%Y-%m-%d'),
                 'total_scanned': len(signals),
                 'approved': len(approved),
                 'rejected': len(rejected),
+                'active': len(active),
                 'closed': len(closed),
                 'wins': wins,
                 'losses': len(closed) - wins,
                 'win_rate': (wins / len(closed) * 100) if closed else 0,
                 'total_pnl': sum(s.get('pnl_percent', 0) for s in closed),
-                'avg_confidence': sum(s.get('confidence', 0) for s in approved) / len(approved) if approved else 0
+                'avg_confidence': sum(s.get('confidence', 0) for s in approved) / len(approved) if approved else 0,
+                # TP/SL tracking
+                'tp1_hits': tp1_hits,
+                'tp2_hits': tp2_hits,
+                'tp3_hits': tp3_hits,
+                'total_tp_hits': tp1_hits + tp2_hits + tp3_hits,
+                'breakeven_moves': breakeven_moves,
+                # Entry types
+                'limit_orders': limit_count,
+                'market_orders': market_count,
+                # Setup types
+                'setup_types': setup_types,
+                # Close reasons
+                'manual_closes': manual_closes,
+                'tp_closes': tp_closes,
+                'sl_closes': sl_closes
             }
         except Exception as e:
             logger.error(f"Error getting daily stats: {e}")

@@ -50,6 +50,33 @@ class ReportingEngine:
                 avg_conf = stats.get('avg_confidence', 0)
                 vip_value = f"\n💎 VIP Quality: {avg_conf:.0f}% avg confidence | Elite setups only\n"
             
+            # TP/SL tracking stats
+            tp1_hits = stats.get('tp1_hits', 0)
+            tp2_hits = stats.get('tp2_hits', 0)
+            tp3_hits = stats.get('tp3_hits', 0)
+            total_tp_hits = stats.get('total_tp_hits', 0)
+            breakeven_moves = stats.get('breakeven_moves', 0)
+            
+            # Entry type stats
+            limit_orders = stats.get('limit_orders', 0)
+            market_orders = stats.get('market_orders', 0)
+            
+            # Setup type breakdown
+            setup_types = stats.get('setup_types', {})
+            top_setup = max(setup_types.items(), key=lambda x: x[1])[0] if setup_types else 'N/A'
+            
+            # Build TP summary
+            tp_summary = ""
+            if total_tp_hits > 0:
+                tp_summary = f"\n🎯 TP Hits: TP1({tp1_hits}) | TP2({tp2_hits}) | TP3({tp3_hits})"
+                if breakeven_moves > 0:
+                    tp_summary += f"\n🔒 Breakeven Moves: {breakeven_moves}"
+            
+            # Build entry type summary
+            entry_summary = ""
+            if approved > 0:
+                entry_summary = f"\n⚡ Entry Types: {market_orders} MARKET | {limit_orders} LIMIT"
+            
             # Admin report (full details)
             admin_report = f"""📊 <b>DAILY REPORT - {date_str}</b>
 
@@ -57,19 +84,31 @@ class ReportingEngine:
 📡 Scanned: {stats.get('total_scanned', 0)} setups
 ✅ Approved: {approved}
 🔒 Closed: {stats.get('closed', 0)}
+🔄 Active: {stats.get('active', 0)}
 
 <b>Performance:</b>
 🏆 Winners: {wins}
-� Managed: {losses} (stopped per plan)
+📊 Managed: {losses} (stopped per plan)
 📈 Win Rate: {win_rate:.1f}%
 {pnl_emoji} Result: {pnl_text}
-{streak_text}
+{streak_text}{tp_summary}{entry_summary}
+
+<b>Top Setup:</b>
+🎯 {top_setup.replace('_', ' ').title()}
+
 <b>System Status:</b>
 ✅ Operational | 🎯 Quality-first approach
 ⏰ Next scan: ~5 minutes
 
 Ready for tomorrow! 🚀"""
 
+            # VIP TP summary
+            vip_tp_summary = ""
+            if total_tp_hits > 0:
+                vip_tp_summary = f"\n🎯 TP Hits Today: {total_tp_hits} targets reached"
+                if breakeven_moves > 0:
+                    vip_tp_summary += f" | {breakeven_moves} moved to breakeven"
+            
             # VIP report (summary) — ALWAYS positive, focuses on discipline
             vip_report = f"""📊 <b>END OF DAY SUMMARY</b>
 
@@ -78,7 +117,7 @@ Ready for tomorrow! 🚀"""
 🏆 {wins} hit profit targets
 📈 Win Rate: {win_rate:.1f}%
 {pnl_emoji} {pnl_text}
-{streak_text}{vip_value}
+{streak_text}{vip_tp_summary}{vip_value}
 <b>What This Means:</b>
 Every signal had 85%+ confidence, strict risk management, and clear targets.
 That's professional trading. That's why VIP wins.
