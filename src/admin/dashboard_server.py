@@ -80,6 +80,28 @@ class SettingsUpdate(BaseModel):
     value: Any
 
 
+class SignalUpdate(BaseModel):
+    """Model for updating signal prices"""
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit_1: Optional[float] = None
+    take_profit_2: Optional[float] = None
+    take_profit_3: Optional[float] = None
+
+
+class CloseSignal(BaseModel):
+    """Model for manually closing a signal"""
+    signal_id: str
+    close_price: float
+    reason: str  # "manual", "tp_hit", "sl_hit", "expired"
+
+
+class MarkTPHit(BaseModel):
+    """Model for manually marking TP as hit"""
+    signal_id: str
+    tp_level: int  # 1, 2, or 3
+
+
 # ==================== Helper ====================
 
 def require_orch():
@@ -195,6 +217,8 @@ async def active_signals():
                 "symbol": s.symbol,
                 "direction": s.direction.value if hasattr(s.direction, 'value') else str(s.direction),
                 "timeframe": s.timeframe,
+                "setup_type": s.setup_type.value if hasattr(s.setup_type, 'value') else str(s.setup_type),
+                "is_limit_order": getattr(s, 'is_limit_order', False),
                 "confidence": s.confidence,
                 "risk_reward": s.risk_reward,
                 "entry_price": entry,
@@ -206,6 +230,7 @@ async def active_signals():
                 "tp1_hit": getattr(s, 'tp1_hit', False),
                 "tp2_hit": getattr(s, 'tp2_hit', False),
                 "tp3_hit": getattr(s, 'tp3_hit', False),
+                "stop_moved_to_breakeven": getattr(s, 'stop_moved_to_breakeven', False),
                 "pnl_percent": round(pnl, 2),
                 "created_at": s.created_at.isoformat() if s.created_at else None,
                 "approved_at": s.approved_at.isoformat() if hasattr(s, 'approved_at') and s.approved_at else None,
@@ -378,6 +403,136 @@ async def signal_action(action: SignalAction):
         return {"success": True, "message": f"Signal {action.signal_id} rejected"}
     else:
         raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
+
+
+@app.put("/api/signals/{signal_id}/update")
+async def update_signal_prices(signal_id: str, update: SignalUpdate):
+    """Update signal entry, SL, or TP prices manually"""
+    orch = require_orch()
+    try:
+        # Get the signal
+        signal = await orch.db.get_signal_by_id(signal_id)
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        
+        # Build update dict with only provided fields
+        updates = {}
+        if update.entry_price is not None:
+            updates['entry_price'] = update.entry_price
+        if update.stop_loss is not None:
+            updates['stop_loss'] = update.stop_loss
+        if update.take_profit_1 is not None:
+            updates['take_profit_1'] = update.take_profit_1
+        if update.take_profit_2 is not None:
+            updates['take_profit_2'] = update.take_profit_2
+        if update.take_profit_3 is not None:
+            updates['take_profit_3'] = update.take_profit_3
+        
+        if not updates:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        # Update in database
+        success = await orch.db.update_signal(signal_id, updates)
+        
+        if success:
+            logger.info(f"Signal {signal_id} updated from dashboard: {updates}")
+            return {"success": True, "message": "Signal updated successfully", "updates": updates}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update signal")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating signal: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/signals/{signal_id}/close")
+async def close_signal_manually(signal_id: str, close_data: CloseSignal):
+    """Manually close an active signal"""
+    orch = require_orch()
+    try:
+        # Get the signal
+        signal = await orch.db.get_signal_by_id(signal_id)
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        
+        # Calculate P&L
+        entry = signal.actual_entry or signal.entry_price
+        pnl = 0
+        if entry and entry != 0:
+            pnl = ((close_data.close_price - entry) / entry) * 100
+            if signal.direction.value == "SHORT":
+                pnl = -pnl
+        
+        # Update signal status
+        updates = {
+            'status': 'closed',
+            'actual_exit': close_data.close_price,
+            'pnl_percent': pnl,
+            'cancellation_reason': f"Manual close: {close_data.reason}"
+        }
+        
+        success = await orch.db.update_signal(signal_id, updates)
+        
+        if success:
+            # Send notification to VIP channel
+            await orch.channel_publisher.send_trade_closed(
+                signal, 
+                f"Manually closed ({close_data.reason})",
+                pnl
+            )
+            
+            logger.info(f"Signal {signal_id} manually closed at {close_data.close_price}, P&L: {pnl:.2f}%")
+            return {
+                "success": True, 
+                "message": "Signal closed successfully",
+                "pnl_percent": round(pnl, 2),
+                "close_price": close_data.close_price
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to close signal")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error closing signal: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/signals/{signal_id}/mark-tp")
+async def mark_tp_hit_manually(signal_id: str, tp_data: MarkTPHit):
+    """Manually mark a TP level as hit"""
+    orch = require_orch()
+    try:
+        if tp_data.tp_level not in [1, 2, 3]:
+            raise HTTPException(status_code=400, detail="TP level must be 1, 2, or 3")
+        
+        # Get the signal
+        signal = await orch.db.get_signal_by_id(signal_id)
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        
+        # Get current price for the TP level
+        tp_price = getattr(signal, f'take_profit_{tp_data.tp_level}')
+        if not tp_price:
+            raise HTTPException(status_code=400, detail=f"TP{tp_data.tp_level} not set for this signal")
+        
+        # Use the orchestrator's handle_tp_hit method (includes cache and notifications)
+        await orch.handle_tp_hit(signal, tp_data.tp_level, tp_price)
+        
+        logger.info(f"TP{tp_data.tp_level} manually marked as hit for {signal.symbol}")
+        return {
+            "success": True,
+            "message": f"TP{tp_data.tp_level} marked as hit",
+            "tp_price": tp_price
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error marking TP hit: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/signals/history")

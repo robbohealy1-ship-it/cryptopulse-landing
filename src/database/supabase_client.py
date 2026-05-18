@@ -191,6 +191,27 @@ class SupabaseClient:
             logger.error(f"Error getting signals by date: {e}")
             return []
     
+    async def get_signal_by_id(self, signal_id: str):
+        """Get a single signal by ID"""
+        try:
+            response = self.client.table('signals').select('*').eq('id', signal_id).execute()
+            if response.data and len(response.data) > 0:
+                return self._dict_to_signal(response.data[0])
+            return None
+        except Exception as e:
+            logger.error(f"Error getting signal by ID: {e}")
+            return None
+    
+    async def update_signal(self, signal_id: str, updates: dict) -> bool:
+        """Update signal fields (generic update method)"""
+        try:
+            self.client.table('signals').update(updates).eq('id', signal_id).execute()
+            logger.info(f"Signal {signal_id} updated: {list(updates.keys())}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating signal: {e}")
+            return False
+    
     async def update_signal_status(self, signal_id: str, status: SignalStatus) -> bool:
         try:
             self.client.table('signals').update({'status': status.value}).eq('id', signal_id).execute()
