@@ -80,6 +80,10 @@ class CryptoPulseOrchestrator:
         self.scheduler = AsyncIOScheduler()
         self.running = False
         self.pending_delayed_signals = {}  # Track signals waiting for free channel delay
+        
+        # In-memory TP hit tracking (workaround until DB migration is run)
+        # Format: {signal_id: {tp1_hit: True, tp2_hit: False, stop_moved: True}}
+        self.tp_hit_cache = {}
     
     async def initialize(self):
         logger.info("🚀 Initializing CRYPTO PULSE SIGNALS...")
@@ -745,10 +749,20 @@ class CryptoPulseOrchestrator:
     async def handle_tp_hit(self, signal, tp_level, current_price):
         """Handle TP hit - send updates to VIP and Free channels"""
         
-        # Check if already hit (prevent duplicates on bot restart)
-        tp_hit_attr = f'tp{tp_level}_hit'
-        if hasattr(signal, tp_hit_attr) and getattr(signal, tp_hit_attr):
-            logger.info(f"⏭️  TP{tp_level} already hit for {signal.symbol} - skipping duplicate")
+        # Initialize cache entry if not exists
+        if signal.id not in self.tp_hit_cache:
+            self.tp_hit_cache[signal.id] = {}
+        
+        # Check cache first (persists across bot restarts in this session)
+        tp_key = f'tp{tp_level}_hit'
+        if self.tp_hit_cache[signal.id].get(tp_key, False):
+            logger.info(f"⏭️  TP{tp_level} already hit for {signal.symbol} (cache) - skipping duplicate")
+            return
+        
+        # Also check signal object (in case loaded from DB with columns)
+        if hasattr(signal, tp_key) and getattr(signal, tp_key):
+            logger.info(f"⏭️  TP{tp_level} already hit for {signal.symbol} (DB) - skipping duplicate")
+            self.tp_hit_cache[signal.id][tp_key] = True  # Update cache
             return
         
         logger.info(f"🎯 TP{tp_level} hit for {signal.symbol}")
@@ -759,8 +773,9 @@ class CryptoPulseOrchestrator:
         except Exception as e:
             logger.warning(f"Could not mark TP{tp_level} in database (run migration): {e}")
         
-        # Update in-memory signal object to prevent duplicate messages
-        setattr(signal, tp_hit_attr, True)
+        # Update cache and signal object to prevent duplicate messages
+        self.tp_hit_cache[signal.id][tp_key] = True
+        setattr(signal, tp_key, True)
         
         # Send update to VIP channel (includes TP1 marketing to Free)
         await self.channel_publisher.send_tp_hit(signal, tp_level)
@@ -771,16 +786,18 @@ class CryptoPulseOrchestrator:
         
         # Move SL to breakeven after TP1 (only once)
         if tp_level == 1:
-            if not getattr(signal, 'stop_moved_to_breakeven', False):
+            # Check cache for breakeven status
+            if not self.tp_hit_cache[signal.id].get('stop_moved', False):
                 await self.channel_publisher.send_stop_moved(signal, signal.entry_price)
                 try:
                     await self.db.update_stop_loss(signal.id, signal.entry_price)
                 except Exception as e:
                     logger.warning(f"Could not update SL in database (run migration): {e}")
-                # Mark that we've sent the breakeven message
+                # Mark in cache and signal object
+                self.tp_hit_cache[signal.id]['stop_moved'] = True
                 signal.stop_moved_to_breakeven = True
             else:
-                logger.info(f"⏭️  SL already moved to breakeven for {signal.symbol} - skipping duplicate")
+                logger.info(f"⏭️  SL already moved to breakeven for {signal.symbol} (cache) - skipping duplicate")
         
         # Close trade if TP3 hit
         if tp_level == 3:
