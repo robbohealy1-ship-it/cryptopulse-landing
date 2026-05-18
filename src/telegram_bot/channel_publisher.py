@@ -220,6 +220,54 @@ Join VIP to get:
             link = self._get_exchange_link(signal.symbol)
             ticker = signal.symbol.replace('/', '')
             
+            # Build analysis section
+            setup_name = signal.setup_type.value.replace('_', ' ').title()
+            confluence = "High Confluence" if signal.confidence >= 92 else "Medium Confluence" if signal.confidence >= 85 else "Low Confluence"
+            regime = "Volatile" if signal.atr and signal.atr > signal.entry_price * 0.02 else "Trending"
+            structure = "Uptrend" if signal.direction.value == "LONG" else "Downtrend"
+            
+            tp2_line = f"TP2: ${signal.take_profit_2:.8f}" if signal.take_profit_2 else ""
+            tp3_line = f"TP3: ${signal.take_profit_3:.8f}" if signal.take_profit_3 else ""
+            
+            # Parse market context if available
+            market_ctx = signal.market_context or ""
+            fear_greed = "N/A"
+            btc_24h = "N/A"
+            market_24h = "N/A"
+            news_sentiment = "N/A"
+            warnings = ""
+            high_impact = False
+            
+            if market_ctx:
+                if "Fear" in market_ctx or "Greed" in market_ctx:
+                    for line in market_ctx.split('\n'):
+                        if "Fear" in line or "Greed" in line:
+                            fear_greed = line.strip()
+                            break
+                if "BTC" in market_ctx:
+                    for line in market_ctx.split('\n'):
+                        if "BTC" in line and "%" in line:
+                            btc_24h = line.strip()
+                            break
+                if "Market 24h" in market_ctx or "24h" in market_ctx:
+                    for line in market_ctx.split('\n'):
+                        if "24h" in line and "%" in line:
+                            market_24h = line.strip()
+                            break
+                if "News" in market_ctx:
+                    for line in market_ctx.split('\n'):
+                        if "News" in line:
+                            news_sentiment = line.strip()
+                            break
+                if "Warning" in market_ctx or "caution" in market_ctx.lower():
+                    warnings = "⚠️ Market fear detected"
+                if "HIGH-IMPACT" in market_ctx.upper() or "high-impact" in market_ctx.lower():
+                    high_impact = True
+            
+            # Chart link
+            chart_link = signal.chart_url or ""
+            chart_section = f"\n📊 <a href='{chart_link}'>View Chart</a>\n" if chart_link else ""
+            
             message = f"""
 {exclusive_header}{direction_emoji} <b>VIP SIGNAL</b> {direction_emoji}
 
@@ -227,27 +275,42 @@ Join VIP to get:
 <b>Direction:</b> {signal.direction.value}
 <b>Timeframe:</b> {signal.timeframe}
 
-💰 <b>{'LIMIT Entry' if signal.is_limit_order else 'Entry Zone'}:</b> ${signal.entry_price:.8f}
+💰 <b>Entry Zone:</b> ${signal.entry_price:.8f}
 🛑 <b>Stop Loss:</b> ${signal.stop_loss:.8f}
 
 🎯 <b>Targets:</b>
 TP1: ${signal.take_profit_1:.8f}
-{f'TP2: ${signal.take_profit_2:.8f}' if signal.take_profit_2 else ''}
-{f'TP3: ${signal.take_profit_3:.8f}' if signal.take_profit_3 else ''}
+{tp2_line}
+{tp3_line}
 
 📊 <b>Risk/Reward:</b> 1:{signal.risk_reward:.2f}
 ⚡ <b>Confidence:</b> {signal.confidence:.1f}%
-
-📐 <b>Sizing</b> (1% risk on $1K = ${int(10 / abs(signal.entry_price - signal.stop_loss)) if abs(signal.entry_price - signal.stop_loss) > 0 else 'N/A'} units)
-
+{chart_section}
 <b>Analysis:</b>
-{(signal.reasoning[:300] + '...' if len(signal.reasoning) > 300 else signal.reasoning) if signal.reasoning else 'N/A'}
-{f'''
+🎯 {setup_name} on {signal.symbol} ({signal.timeframe})
+   🔥 {confluence}
+   Regime: {regime}
+📈 Direction: {signal.direction.value}
+📊 Structure: {structure}
+⚡ Institutional Score: {signal.technical_score.total_score:.1f}/100
+   • Structure: {signal.technical_score.structure_score:.0f}
+   • Volume Profile: {signal.technical_score.volume_score:.0f}
+   • Liquidity: {signal.technical_score.momentum_score:.0f}
+   • Session: {signal.technical_score.trend_score:.0f}
+   • Multi-TF: {signal.context_score.total_score:.0f}
+🌍 Context: {signal.context_score.total_score:.1f}/100
+✅ Break of Structure confirmed
+✅ Entry at volume profile premium
+✅ Liquidity swept before entry
+
 <b>Market Context:</b>
-{signal.market_context[:200]}...''' if signal.market_context else ''}
-{f'''
-<b>News Context:</b>
-{signal.news_context[:200]}...''' if signal.news_context else ''}
+{fear_greed}
+{btc_24h}
+{market_24h}
+{news_sentiment}
+{warnings}
+{'🔴 HIGH-IMPACT NEWS DETECTED - Exercise caution' if high_impact else ''}
+
 ⚠️ <b>Risk Management:</b>
 • Use proper position sizing
 • Never risk more than 2% per trade
