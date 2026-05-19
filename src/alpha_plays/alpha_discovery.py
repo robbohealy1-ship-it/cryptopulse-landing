@@ -871,22 +871,22 @@ class AlphaDiscovery:
         """Generate DEX trading links for the token"""
         
         if chain == 'sol':
-            dex_url = f"https://dexscreener.com/solana/{pair_address}" if pair_address else "https://dexscreener.com/solana"
-            chart_url = dex_url
+            dex_url = f"https://dexscreener.com/solana/{pair_address}" if pair_address else f"https://dexscreener.com/solana/{token_address}" if token_address else "https://dexscreener.com/solana"
+            chart_url = f"https://www.geckoterminal.com/solana/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/so/pools/{token_address}" if token_address else "https://www.geckoterminal.com"
             buy_url = self._generate_buy_link('sol', token_address, symbol)
                 
         elif chain == 'eth':
-            dex_url = f"https://dexscreener.com/ethereum/{pair_address}" if pair_address else "https://dexscreener.com/ethereum"
-            chart_url = dex_url
+            dex_url = f"https://dexscreener.com/ethereum/{pair_address}" if pair_address else f"https://dexscreener.com/ethereum/{token_address}" if token_address else "https://dexscreener.com/ethereum"
+            chart_url = f"https://www.geckoterminal.com/eth/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/eth/pools/{token_address}" if token_address else "https://www.geckoterminal.com"
             buy_url = self._generate_buy_link('eth', token_address, symbol)
                 
         elif chain == 'base':
-            dex_url = f"https://dexscreener.com/base/{pair_address}" if pair_address else "https://dexscreener.com/base"
-            chart_url = dex_url
+            dex_url = f"https://dexscreener.com/base/{pair_address}" if pair_address else f"https://dexscreener.com/base/{token_address}" if token_address else "https://dexscreener.com/base"
+            chart_url = f"https://www.geckoterminal.com/base/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/base/pools/{token_address}" if token_address else "https://www.geckoterminal.com"
             buy_url = self._generate_buy_link('base', token_address, symbol)
         else:
             dex_url = "https://dexscreener.com"
-            chart_url = dex_url
+            chart_url = "https://www.geckoterminal.com"
             buy_url = "https://jup.ag"
         
         return dex_url, chart_url, buy_url

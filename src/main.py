@@ -178,10 +178,6 @@ class CryptoPulseOrchestrator:
                 self.autopilot.payment_orchestrator = self.vip_bot.payment_orchestrator
                 logger.info("🤖 AutoPilot payment orchestrator linked to VIP bot")
             
-            # Share custom alert system with VIP bot so /alert commands work
-            if self.vip_bot and self.custom_alerts:
-                self.vip_bot.custom_alerts = self.custom_alerts
-                logger.info("🔔 Custom alert system linked to VIP bot")
             logger.info("🤖 AutoPilot System initialized — full automation active")
             
             # Initialize Pro Features
@@ -206,6 +202,11 @@ class CryptoPulseOrchestrator:
             )
             self.priority_support = PrioritySupport(db=self.db)
             logger.info("💎 Pro Features initialized — whale alerts, education, custom alerts, giveaways, bonus reports")
+            
+            # Share custom alert system with VIP bot so /alert commands work
+            if self.vip_bot and self.custom_alerts:
+                self.vip_bot.custom_alerts = self.custom_alerts
+                logger.info("🔔 Custom alert system linked to VIP bot")
             
             # Initialize Alpha/Degen Plays Engine
             self.alpha_publisher = AlphaPublisher(bot=self.channel_publisher.bot)
@@ -1126,6 +1127,22 @@ P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
 """
             
+            # Get active alpha plays
+            alpha_plays_text = ""
+            if self.alpha_engine and self.alpha_engine.active_plays:
+                alpha_plays_text = "\n\n<b>🎰 ALPHA PLAYS:</b>\n"
+                for play in self.alpha_engine.active_plays.values():
+                    pnl = play.current_pnl
+                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                    tp1_status = "✅" if play.tp1_hit_at else "⏳"
+                    tp2_status = "✅" if play.tp2_hit_at else "⏳"
+                    sl_status = "🛑" if play.sl_hit_at else "🛡"
+                    alpha_plays_text += f"""{play.candidate.symbol} ({play.candidate.chain.upper()})
+Entry: ${play.entry_price:.6f} | Current: ${play.current_price:.6f}
+P&L: {pnl_emoji} {pnl:+.2f}%
+Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
+"""
+            
             # Key levels from real data
             key_levels = self._get_key_levels(btc_price, btc_24h)
             session = self._get_next_session()
@@ -1141,7 +1158,7 @@ Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
 BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
 BTC Dominance: <b>{btc_dominance:.1f}%</b>
 Funding Rate: <b>{funding_rate*100:.4f}%</b>
-{active_trades_text}
+{active_trades_text}{alpha_plays_text}
 <b>🔮 Tomorrow's Focus:</b>
 • {key_levels}
 • {session}

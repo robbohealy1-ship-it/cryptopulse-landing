@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from telegram import Bot
 from telegram.error import NetworkError
 from typing import Optional
@@ -461,9 +462,58 @@ Join VIP for premium signals!
     
     async def send_trade_closed(self, signal: TradingSignal, result: str, pnl: float):
         emoji = "✅" if pnl > 0 else "❌"
+        pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
         
-        update_text = f"{emoji} <b>TRADE CLOSED</b>\n\n"
-        update_text += f"Result: {result}\n"
-        update_text += f"P&L: {pnl:+.2f}%\n"
+        # VIP gets full result message
+        vip_text = f"""{emoji} <b>TRADE CLOSED</b> {emoji}
+
+📊 <b>{signal.symbol}</b> {signal.direction.value}
+<b>{result}</b>
+
+💰 <b>Performance:</b>
+• Entry: ${signal.actual_entry or signal.entry_price:.4f}
+• Exit: ${signal.actual_exit or signal.entry_price:.4f}
+• P&L: {pnl_emoji} {pnl:+.2f}%
+
+⏰ Closed: {datetime.utcnow().strftime('%H:%M UTC')}
+"""
         
-        await self.update_signal(signal, update_text)
+        # Free gets teaser
+        free_text = f"""{emoji} <b>TRADE CLOSED</b>
+
+📊 <b>{signal.symbol}</b> {signal.direction.value}
+Result: {result}
+P&L: {pnl_emoji} {pnl:+.2f}%
+
+💎 VIP members saw this live.
+Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot'}
+"""
+        
+        try:
+            # Send to VIP channel
+            if self.vip_channel_id:
+                await self.bot.send_message(
+                    chat_id=self.vip_channel_id,
+                    text=vip_text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                logger.info(f"Trade closed result sent to VIP: {signal.symbol} ({pnl:+.2f}%)")
+        except Exception as e:
+            logger.error(f"Error sending trade close to VIP: {e}")
+        
+        try:
+            # Send to Free channel
+            if self.free_channel_id:
+                await self.bot.send_message(
+                    chat_id=self.free_channel_id,
+                    text=free_text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                logger.info(f"Trade closed teaser sent to Free: {signal.symbol} ({pnl:+.2f}%)")
+        except Exception as e:
+            logger.error(f"Error sending trade close to Free: {e}")
+        
+        # Also update original messages as reply
+        await self.update_signal(signal, f"{emoji} <b>TRADE CLOSED</b>\nResult: {result}\nP&L: {pnl:+.2f}%")

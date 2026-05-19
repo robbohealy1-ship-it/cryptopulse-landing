@@ -71,27 +71,32 @@ class AlphaContentFormatter:
             upside_2_str = "🚀 Higher"
         
         # Build the message
-        message = f"""🎰 <b>ALPHA PLAY ALERT</b> 🎰
+        message = f"""🎰 <b>ALPHA ALERT</b> 🎰
 
 {chain_emoji} <b>{play.symbol}</b> - {play.name}
 {trade_label} | {risk_level} | ⏱️ {play.time_frame}
 
-📊 <b>Metrics:</b>
+📊 <b>DEXScreener Data:</b>
 • Price: ${play.price_usd:.6f}
 • Market Cap: ${play.market_cap_usd/1e6:.2f}M
+• FDV: ${play.fdv/1e6:.2f}M
 • Liquidity: ${play.liquidity_usd/1e3:.0f}K
 • Volume 24h: ${play.volume_24h/1e3:.0f}K
+• Volume/Liquidity: {(play.volume_24h/play.liquidity_usd) if play.liquidity_usd > 0 else 0:.1f}x
 • 24h Change: {play.price_change_24h:+.1f}%
 • 1h Change: {play.price_change_1h:+.1f}%
 • 5min Change: {play.price_change_5min:+.1f}%
-• Buy/Sell Ratio: {play.buy_sell_ratio:.2f}x
 """
         
-        # Add FDV if available
-        if play.fdv > 0:
-            message += f"• FDV: ${play.fdv/1e6:.2f}M\n"
-        
         message += f"""
+👥 <b>Holders Data:</b>
+• Holders: {play.holders:,}
+• Holder Growth 24h: {play.holder_growth_24h:+.1f}%
+• Top 10 Concentration: {play.top_holder_concentration:.1f}%
+• Transactions 24h: {play.transactions_24h:,}
+• Buys: {play.buys_24h:,} | Sells: {play.sells_24h:,}
+• Buy/Sell Ratio: {play.buy_sell_ratio:.2f}x
+
 🎯 <b>Trade Setup:</b>
 """
         
@@ -115,27 +120,29 @@ class AlphaContentFormatter:
 🔥 <b>Catalyst:</b>
 {play.catalyst}
 
-📈 <b>Scores:</b>
+📈 <b>Analysis Scores:</b>
 • Technical: {play.technical_score:.0f}/100
 • Community: {play.community_score:.0f}/100
 • Social: {play.social_score:.0f}/100
 • Fundamental: {play.fundamental_score:.0f}/100
 • Overall: {play.overall_score:.0f}/100
+
+📋 <b>Technical Analysis:</b>
+{play.short_term_potential if play.short_term_potential else 'Technical data pending...'}
+
+📋 <b>Fundamental Analysis:</b>
+{play.long_term_potential if play.long_term_potential else 'Fundamental data pending...'}
 """
         
-        # Fundamental Mini-Report
+        # Narrative & Why Trending
         if play.narrative or play.why_trending:
             message += f"""
-📋 <b>Fundamental Mini-Report:</b>
+📣 <b>Why Trending:</b>
 """
             if play.narrative:
                 message += f"🏷️ Narrative: {play.narrative}\n"
             if play.why_trending:
-                message += f"\n📣 Why Trending:\n{play.why_trending}\n"
-            if play.short_term_potential:
-                message += f"\n⏱️ Short Term (1-3d): {play.short_term_potential}\n"
-            if play.long_term_potential:
-                message += f"\n🗓️ Long Term (1-4w): {play.long_term_potential}\n"
+                message += f"{play.why_trending}\n"
         
         # Add red flags if any
         if play.red_flags:
@@ -146,9 +153,9 @@ class AlphaContentFormatter:
         # Add DEX links
         message += f"""
 🔗 <b>Quick Links:</b>
-📊 <a href='{play.chart_url}'>Chart</a>
-💱 <a href='{play.buy_url}'>Buy on DEX</a>
-📋 <a href='{play.dex_url}'>Token Info</a>
+📊 <a href='{play.chart_url}'>Chart (GeckoTerminal)</a>
+💱 <a href='{play.buy_url}'>Buy</a>
+📋 <a href='{play.dex_url}'>Token Info (DexScreener)</a>
 """
         # Always show contract address for manual copy-paste
         if play.token_address:
@@ -158,7 +165,7 @@ class AlphaContentFormatter:
         
         message += f"""
 
-⚡ <b>Act fast - alpha plays move quickly!</b>
+⚡ <b>Act fast - alpha moves quickly!</b>
 ⏰ Posted: {datetime.utcnow().strftime('%H:%M UTC')}
 """
         
@@ -183,7 +190,7 @@ class AlphaContentFormatter:
         else:
             fomo_text = "💎 Early entry opportunity!"
         
-        message = f"""🎰 <b>ALPHA PLAY TEASER</b> 🎰
+        message = f"""🎰 <b>ALPHA TEASER</b> 🎰
 
 {chain_emoji} <b>{play.symbol}</b> | {trade_label}
 {risk_level} | ⏱️ {play.time_frame}
@@ -200,17 +207,19 @@ class AlphaContentFormatter:
 ✅ Stop loss level
 ✅ 2 take profit targets
 ✅ Position size recommendation
-✅ Fundamental mini-report
+✅ Holders & community analysis
+✅ DexScreener live data
+✅ Technical & fundamental report
 ✅ Risk warnings & red flags
-✅ Direct DEX buy link
+✅ Direct buy link (Jupiter/Uniswap)
 
-🔒 <b>This alpha play is VIP EXCLUSIVE!</b>
+🔒 <b>This alpha is VIP EXCLUSIVE!</b>
 
 👉 <b>Want the full signal?</b>
 DM @{cls._get_vip_bot_username()} for instant access
 
-💰 <b>VIP gets 1 alpha play per day</b>
-🆓 <b>Free gets 1 alpha play per week</b>
+💰 <b>VIP gets 1 alpha per day</b>
+🆓 <b>Free gets 1 alpha per week</b>
 
 ⏰ Next free alpha: Coming this Sunday!
 """
@@ -245,7 +254,7 @@ DM @{cls._get_vip_bot_username()} for instant access
         
         pnl_emoji = "🟢" if pnl_percent > 0 else "🔴"
         
-        message = f"""{emoji} <b>ALPHA PLAY RESULT</b> {emoji}
+        message = f"""{emoji} <b>ALPHA RESULT</b> {emoji}
 
 🎰 <b>{play.symbol}</b> ({play.chain.upper()})
 <b>{result_text}</b>
@@ -255,7 +264,7 @@ DM @{cls._get_vip_bot_username()} for instant access
 • Exit: ${exit_price:.6f}
 • P&L: {pnl_emoji} {pnl_percent:+.1f}%
 
-💎 <b>Want more alpha plays like this?</b>
+💎 <b>Want more alpha like this?</b>
 VIP members get 1 per day!
 
 👉 DM @{cls._get_vip_bot_username()} for access

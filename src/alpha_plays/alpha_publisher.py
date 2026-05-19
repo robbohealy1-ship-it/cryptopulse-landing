@@ -32,9 +32,9 @@ class AlphaPublisher:
         logger.info(f"AlphaPublisher init — bot={'YES' if bot else 'NO'} | vip_channel={'YES' if self.vip_channel_id else 'NO'} (degen={degen_vip}, main={main_vip}) | free_channel={'YES' if self.free_channel_id else 'NO'} (degen={degen_free}, main={main_free})")
         
         if not self.vip_channel_id:
-            logger.warning("No VIP channel configured for alpha plays (set TELEGRAM_DEGEN_VIP_CHANNEL_ID or TELEGRAM_VIP_CHANNEL_ID)")
+            logger.warning("No VIP channel configured for alpha (set TELEGRAM_DEGEN_VIP_CHANNEL_ID or TELEGRAM_VIP_CHANNEL_ID)")
         if not self.free_channel_id:
-            logger.warning("No FREE channel configured for alpha plays (set TELEGRAM_DEGEN_CHANNEL_ID or TELEGRAM_FREE_CHANNEL_ID)")
+            logger.warning("No FREE channel configured for alpha (set TELEGRAM_DEGEN_CHANNEL_ID or TELEGRAM_FREE_CHANNEL_ID)")
     
     async def publish_alpha_vip(self, message: str) -> Optional[int]:
         """

@@ -1471,7 +1471,7 @@ async def add_beta_tester(tester: AddBetaTester):
                 f"You now have <b>FREE VIP access</b> for {tester.days} days.\n\n"
                 f"✅ Full signal access\n"
                 f"✅ Real-time updates\n"
-                f"✅ Alpha plays (when available)\n\n"
+                f"✅ Alpha alerts (when available)\n\n"
                 f"⏰ Expires: {expiry.strftime('%Y-%m-%d')}\n\n"
                 f"👇 <b>Tap below to open the VIP bot and join the channel:</b>\n"
                 f"https://t.me/{vip_bot_username}?start=access"

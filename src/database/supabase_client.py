@@ -77,6 +77,33 @@ class SupabaseClient:
             if signal.pnl_percent is not None:
                 data['pnl_percent'] = signal.pnl_percent
             
+            # Admin workflow fields (critical for reporting accuracy)
+            data['admin_approved'] = signal.admin_approved
+            data['admin_rejected'] = signal.admin_rejected
+            if signal.rejection_reason:
+                data['rejection_reason'] = signal.rejection_reason
+            
+            # TP/SL hit tracking
+            data['tp1_hit'] = signal.tp1_hit
+            data['tp2_hit'] = signal.tp2_hit
+            data['tp3_hit'] = signal.tp3_hit
+            data['stop_hit'] = signal.stop_hit
+            data['stop_moved_to_breakeven'] = signal.stop_moved_to_breakeven
+            
+            # Channel posting tracking
+            data['free_channel_posted'] = signal.free_channel_posted
+            data['vip_channel_posted'] = signal.vip_channel_posted
+            data['is_limit_order'] = signal.is_limit_order
+            data['cancelled'] = signal.cancelled
+            if signal.cancellation_reason:
+                data['cancellation_reason'] = signal.cancellation_reason
+            
+            # Chart assets
+            if signal.chart_url:
+                data['chart_url'] = signal.chart_url
+            if signal.chart_path:
+                data['chart_path'] = signal.chart_path
+            
             # Try to save with progressive column stripping
             # If a column doesn't exist in the DB, we extract its name from the error
             # and retry without it — up to 10 times to avoid infinite loops
@@ -736,6 +763,9 @@ class SupabaseClient:
             cancellation_reason=data.get('cancellation_reason'),
             free_channel_delayed=data.get('free_channel_delayed', False),
             free_channel_scheduled_at=_parse_dt('free_channel_scheduled_at'),
+            is_limit_order=data.get('is_limit_order', False),
+            chart_url=data.get('chart_url'),
+            chart_path=data.get('chart_path'),
         )
 
     # ==================== ALPHA/DEGEN PLAYS ====================
@@ -814,14 +844,13 @@ class SupabaseClient:
             else:
                 candidate_data = None
             
-            # Build raw data dict with ALL possible fields
+            # Only use top-level columns that exist in the DB schema.
+            # Everything else lives inside candidate_data JSONB.
             raw_data = {
                 'id': _get('id', str(uuid.uuid4())),
                 'symbol': _get('symbol'),
                 'name': _get('name'),
                 'chain': _get('chain'),
-                'token_address': _get('token_address'),
-                'pair_address': _get('pair_address'),
                 'play_type': 'alpha',
                 'status': _get('status', 'active'),
                 'entry_price': _get('entry_price'),
@@ -830,37 +859,17 @@ class SupabaseClient:
                 'take_profit_2': _get('take_profit_2'),
                 'current_price': _get('current_price'),
                 'current_pnl': _get('current_pnl'),
-                'price_usd': _get('price_usd'),
-                'market_cap': _get('market_cap'),
-                'volume_24h': _get('volume_24h'),
-                'liquidity_usd': _get('liquidity_usd'),
-                'price_change_24h': _get('price_change_24h'),
-                'price_change_1h': _get('price_change_1h'),
-                'price_change_5min': _get('price_change_5min'),
-                'holders': _get('holders'),
-                'transactions_24h': _get('transactions_24h'),
-                'buy_sell_ratio': _get('buy_sell_ratio'),
-                'overall_score': _get('overall_score'),
-                'trade_type': _get('trade_type'),
-                'time_frame': _get('time_frame'),
-                'risk_level': _get('risk_level'),
-                'narrative': _get('narrative'),
-                'why_trending': _get('why_trending'),
-                'short_term_potential': _get('short_term_potential'),
-                'long_term_potential': _get('long_term_potential'),
-                'catalyst': _get('catalyst'),
-                'dex_url': _get('dex_url'),
-                'chart_url': _get('chart_url'),
-                'buy_url': _get('buy_url'),
                 'position_size': _get('position_size'),
-                'red_flags': _get('red_flags'),
-                'dex_source': _get('dex_source'),
+                'approved_at': _get('approved_at'),
+                'tp1_hit_at': _get('tp1_hit_at'),
+                'tp2_hit_at': _get('tp2_hit_at'),
+                'sl_hit_at': _get('sl_hit_at'),
+                'closed_at': _get('closed_at'),
                 'created_at': _get('created_at') or datetime.utcnow().isoformat(),
-                'vip_message_id': _get('vip_message_id'),
-                'free_message_id': _get('free_message_id'),
+                'updated_at': datetime.utcnow().isoformat(),
             }
             
-            # Deep serialize everything and strip None values to avoid missing-column errors
+            # Deep serialize and strip None values
             def _deep_serialize(obj):
                 if isinstance(obj, datetime):
                     return obj.isoformat()
@@ -878,6 +887,7 @@ class SupabaseClient:
                 if sv is not None:
                     data[k] = sv
             
+            # Always include candidate_data (JSONB) — holds ALL extra fields
             if candidate_data:
                 data['candidate_data'] = candidate_data
             
@@ -891,6 +901,7 @@ class SupabaseClient:
             # If ANY column is missing, fallback to minimal safe fields
             if 'column' in err_str or 'pgrst204' in err_str:
                 logger.warning(f"DB column error ({e}) — retrying with minimal fields")
+                # Retry 1: basic fields without candidate_data
                 try:
                     minimal = {
                         'id': data.get('id', str(uuid.uuid4())),
@@ -898,16 +909,30 @@ class SupabaseClient:
                         'name': data.get('name'),
                         'chain': data.get('chain'),
                         'status': data.get('status', 'active'),
-                        'candidate_data': data.get('candidate_data'),
                         'created_at': data.get('created_at', datetime.utcnow().isoformat()),
                     }
-                    # Strip None values from minimal
                     minimal = {k: v for k, v in minimal.items() if v is not None}
                     self.client.table('alpha_plays').upsert(minimal).execute()
-                    logger.info(f"✅ Alpha play {minimal.get('symbol')} saved with minimal fields")
+                    logger.info(f"✅ Alpha play {minimal.get('symbol')} saved with basic fields (no candidate_data)")
                     return True
                 except Exception as e2:
-                    logger.error(f"Error saving alpha play (minimal retry): {e2}")
+                    err2 = str(e2).lower()
+                    # Retry 2: ultra-minimal (guaranteed to work with any table)
+                    if 'column' in err2 or 'pgrst204' in err2:
+                        try:
+                            ultra = {
+                                'id': data.get('id', str(uuid.uuid4())),
+                                'symbol': data.get('symbol'),
+                                'status': data.get('status', 'active'),
+                            }
+                            ultra = {k: v for k, v in ultra.items() if v is not None}
+                            self.client.table('alpha_plays').upsert(ultra).execute()
+                            logger.info(f"✅ Alpha play {ultra.get('symbol')} saved with ultra-minimal fields")
+                            return True
+                        except Exception as e3:
+                            logger.error(f"Error saving alpha play (ultra-minimal retry): {e3}")
+                    else:
+                        logger.error(f"Error saving alpha play (minimal retry): {e2}")
             else:
                 logger.error(f"Error saving alpha play: {e}")
             return False

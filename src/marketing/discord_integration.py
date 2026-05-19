@@ -286,7 +286,7 @@ class DiscordPublisher:
         ticker = signal.symbol
         
         embed = {
-            "title": f"🎰 ALPHA PLAY - {ticker}",
+            "title": f"🎰 ALPHA - {ticker}",
             "description": (
                 f"Chain: {getattr(signal, 'chain', 'Unknown').upper()}\n"
                 f"Score: {getattr(signal, 'overall_score', 0):.1f}/100\n"
@@ -298,9 +298,9 @@ class DiscordPublisher:
                 {"name": "⚠️ Risk", "value": "High risk - Low cap gem", "inline": True},
                 {"name": "💎 Potential", "value": "10x-100x on approval", "inline": True}
             ],
-            "footer": {"text": "Alpha Plays | High Risk High Reward"},
+            "footer": {"text": "Alpha | High Risk High Reward"},
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        payload = {"content": f"🎰 New Alpha Play detected: {ticker}", "embeds": [embed]}
+        payload = {"content": f"🎰 New Alpha detected: {ticker}", "embeds": [embed]}
         return await self._send_to_webhook(self.alpha_webhook_url, payload)
