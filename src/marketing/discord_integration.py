@@ -18,17 +18,30 @@ class DiscordPublisher:
     """Publish signals and content to Discord servers via webhooks"""
     
     def __init__(self):
+        # Main signals channel (all approved signals)
         self.webhook_url = getattr(settings, 'DISCORD_WEBHOOK_URL', None)
+        # VIP lounge (full signals for VIP members)
+        self.vip_webhook_url = getattr(settings, 'DISCORD_VIP_WEBHOOK_URL', None)
+        # Alpha plays channel (low-cap gem signals)
+        self.alpha_webhook_url = getattr(settings, 'DISCORD_ALPHA_WEBHOOK_URL', None)
+        
         self.enabled = bool(self.webhook_url)
+        self.vip_enabled = bool(self.vip_webhook_url)
+        self.alpha_enabled = bool(self.alpha_webhook_url)
         
         if self.enabled:
             logger.info("Discord publisher initialized")
+            if self.vip_enabled:
+                logger.info("Discord VIP webhook configured")
+            if self.alpha_enabled:
+                logger.info("Discord Alpha webhook configured")
         else:
             logger.info("Discord webhook not configured - Discord posting disabled")
     
-    async def _send_webhook(self, payload: dict, image_path: Optional[str] = None) -> bool:
+    async def _send_webhook(self, payload: dict, image_path: Optional[str] = None, webhook_url: Optional[str] = None) -> bool:
         """Send payload to Discord webhook"""
-        if not self.enabled:
+        url = webhook_url or self.webhook_url
+        if not url:
             return False
         
         try:
@@ -46,7 +59,7 @@ class DiscordPublisher:
                     form_data.add_field('file', f, filename=Path(image_path).name)
             
             async with aiohttp.ClientSession() as session:
-                async with session.post(self.webhook_url, data=form_data) as resp:
+                async with session.post(url, data=form_data) as resp:
                     if resp.status in (200, 204):
                         logger.info("Discord webhook sent successfully")
                         return True
@@ -56,6 +69,12 @@ class DiscordPublisher:
         except Exception as e:
             logger.error(f"Discord webhook failed: {e}")
             return False
+    
+    async def _send_to_webhook(self, webhook_url: str, payload: dict, image_path: Optional[str] = None) -> bool:
+        """Send payload to a specific webhook URL"""
+        if not webhook_url:
+            return False
+        return await self._send_webhook(payload, image_path, webhook_url)
     
     def _get_tradingview_link(self, symbol: str, timeframe: str = '15') -> str:
         """Generate a professional TradingView chart link"""
@@ -228,3 +247,60 @@ class DiscordPublisher:
             message,
             color=0xFFD700
         )
+    
+    async def post_vip_signal(self, signal) -> bool:
+        """Post full signal to VIP Discord channel"""
+        if not self.vip_enabled:
+            return False
+        
+        direction_color = 0x00ff00 if signal.direction.value == "LONG" else 0xff0000
+        ticker = signal.symbol.replace('/', '')
+        tv_link = self._get_tradingview_link(signal.symbol, getattr(signal, 'timeframe', '15m'))
+        
+        embed = {
+            "title": f"💎 VIP SIGNAL - #{ticker} {signal.direction.value}",
+            "description": f"Confidence: {signal.confidence:.1f}% | Timeframe: {signal.timeframe}",
+            "color": direction_color,
+            "fields": [
+                {"name": "💰 Entry", "value": f"${signal.entry_price:.8f}", "inline": True},
+                {"name": "🛑 Stop Loss", "value": f"${signal.stop_loss:.8f}", "inline": True},
+                {"name": "🎯 Target 1", "value": f"${signal.take_profit_1:.8f}", "inline": True},
+                {"name": "🎯 Target 2", "value": f"${signal.take_profit_2:.8f}" if signal.take_profit_2 else "N/A", "inline": True},
+                {"name": "🎯 Target 3", "value": f"${signal.take_profit_3:.8f}" if signal.take_profit_3 else "N/A", "inline": True},
+                {"name": "📊 R/R", "value": f"1:{signal.risk_reward:.2f}", "inline": True},
+                {"name": "📈 Chart", "value": f"[TradingView]({tv_link})", "inline": False}
+            ],
+            "footer": {"text": f"VIP Signal | ID: {str(signal.id)[:8]}"},
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        payload = {"content": f"💎 New VIP signal: {ticker}", "embeds": [embed]}
+        return await self._send_to_webhook(self.vip_webhook_url, payload)
+    
+    async def post_alpha_signal(self, signal) -> bool:
+        """Post alpha/degen play to Discord"""
+        if not self.alpha_enabled:
+            return False
+        
+        color = 0x9b59b6  # Purple for alpha plays
+        ticker = signal.symbol
+        
+        embed = {
+            "title": f"🎰 ALPHA PLAY - {ticker}",
+            "description": (
+                f"Chain: {getattr(signal, 'chain', 'Unknown').upper()}\n"
+                f"Score: {getattr(signal, 'overall_score', 0):.1f}/100\n"
+                f"Market Cap: ${getattr(signal, 'market_cap_usd', 0)/1e6:.2f}M"
+            ),
+            "color": color,
+            "fields": [
+                {"name": "🎯 Catalyst", "value": getattr(signal, 'catalyst', 'No catalyst')[:250], "inline": False},
+                {"name": "⚠️ Risk", "value": "High risk - Low cap gem", "inline": True},
+                {"name": "💎 Potential", "value": "10x-100x on approval", "inline": True}
+            ],
+            "footer": {"text": "Alpha Plays | High Risk High Reward"},
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        payload = {"content": f"🎰 New Alpha Play detected: {ticker}", "embeds": [embed]}
+        return await self._send_to_webhook(self.alpha_webhook_url, payload)

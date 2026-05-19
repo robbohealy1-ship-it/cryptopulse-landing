@@ -93,8 +93,82 @@ class VIPBot:
         logger.info(f"VIP bot @{self.bot_username} initialized and running")
         return True
     
+    async def _create_vip_invite(self) -> str:
+        """Create a VIP channel invite link.
+        Tries single-use first, then falls back to a regular link."""
+        if not self.app or not self.app.bot or not settings.TELEGRAM_VIP_CHANNEL_ID:
+            logger.warning("VIP invite: bot or TELEGRAM_VIP_CHANNEL_ID not configured")
+            return None
+        
+        chat_id = settings.TELEGRAM_VIP_CHANNEL_ID
+        
+        # 1. Try single-use invite link
+        try:
+            invite = await self.app.bot.create_chat_invite_link(
+                chat_id=chat_id,
+                member_limit=1,
+                expire_date=datetime.utcnow() + timedelta(hours=24)
+            )
+            logger.info(f"Created single-use VIP invite: {invite.invite_link}")
+            return invite.invite_link
+        except Exception as e:
+            logger.warning(f"Single-use VIP invite failed: {e}")
+        
+        # 2. Fallback: try regular invite link (no member limit)
+        try:
+            invite = await self.app.bot.create_chat_invite_link(
+                chat_id=chat_id,
+                expire_date=datetime.utcnow() + timedelta(hours=24)
+            )
+            logger.info(f"Created regular VIP invite: {invite.invite_link}")
+            return invite.invite_link
+        except Exception as e:
+            logger.warning(f"Regular VIP invite failed: {e}")
+        
+        # 3. Last resort: try to get an existing invite link from the chat
+        try:
+            chat = await self.app.bot.get_chat(chat_id)
+            if chat.invite_link:
+                logger.info(f"Using existing VIP chat invite link")
+                return chat.invite_link
+        except Exception as e:
+            logger.warning(f"Could not get existing VIP chat invite: {e}")
+        
+        logger.error(
+            "VIP invite creation FAILED. "
+            "Make sure the bot is an ADMIN in the VIP channel with 'Add Members' permission."
+        )
+        return None
+    
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Welcome message for users DMing the VIP bot"""
+        """Welcome message — shows member menu if already subscribed/trial."""
+        user = update.effective_user
+        access = await self._get_user_access(str(user.id))
+        
+        if access:
+            # Existing member / trial user
+            if access['type'] == 'trial':
+                header = (
+                    f"🚀 <b>Welcome back!</b>\n\n"
+                    f"✅ You have <b>VIP access</b> until {access['expires'][:10]}\n"
+                    f"🎁 Active Trial\n\n"
+                    f"All signals are delivered instantly to your VIP channel."
+                )
+            else:
+                header = (
+                    f"🚀 <b>Welcome back!</b>\n\n"
+                    f"✅ You have <b>{access['tier'].title()} VIP</b> access\n\n"
+                    f"All signals are delivered instantly to your VIP channel."
+                )
+            keyboard = [
+                [InlineKeyboardButton("🔗 Join VIP Channel", callback_data="join_vip_channel")],
+                [InlineKeyboardButton("📊 My Status", callback_data="my_status")],
+                [InlineKeyboardButton("💬 Contact Support", callback_data="contact_support")]
+            ]
+            await update.message.reply_text(header, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+            return
+        
+        # New visitor — onboarding menu
         keyboard = [
             [InlineKeyboardButton("💎 Join VIP", callback_data="vip_menu")],
             [InlineKeyboardButton("📊 See Plans", callback_data="vip_plans")],
@@ -115,12 +189,67 @@ class VIPBot:
             parse_mode='HTML'
         )
     
+    async def _get_user_access(self, user_id: str) -> dict:
+        """Check if user has active trial or VIP subscription."""
+        from src.database.supabase_client import SupabaseClient
+        db = SupabaseClient()
+        sub = await db.get_subscriber(user_id)
+        if not sub:
+            return None
+        tier = sub.get('tier', '')
+        status = sub.get('status', '')
+        trial_ends = sub.get('trial_ends_at')
+        now = datetime.utcnow().isoformat()
+        
+        # Beta testers: tier='beta', status='trial' (from dashboard)
+        if tier == 'beta' and status == 'trial' and trial_ends and trial_ends > now:
+            return {'type': 'trial', 'expires': trial_ends, 'tier': 'beta'}
+        
+        # Trial users: tier='trial' with future expiry
+        if tier == 'trial' and trial_ends and trial_ends > now:
+            return {'type': 'trial', 'expires': trial_ends, 'tier': tier}
+        
+        # Paid subscribers: any recognized tier with active status (or missing status = assume active)
+        is_active = status == 'active' or not status
+        if tier in ('monthly', 'quarterly', 'lifetime', 'vip') and is_active:
+            return {'type': 'vip', 'tier': tier}
+        
+        # Legacy: tier='beta' without trial_ends — treat as active beta
+        if tier == 'beta' and is_active and not trial_ends:
+            return {'type': 'trial', 'expires': '2099-12-31', 'tier': 'beta'}
+        
+        return None
+    
     async def vip_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show VIP plan selection first"""
+        """Show VIP plan selection, or existing access info if already subscribed/trial."""
+        user = update.effective_user
+        access = await self._get_user_access(str(user.id))
+        
+        if access:
+            if access['type'] == 'trial':
+                text = (
+                    f"✅ <b>You already have VIP access!</b>\n\n"
+                    f"🎁 <b>Active Trial</b> until {access['expires'][:10]}\n\n"
+                    f"You're receiving all VIP signals right now.\n"
+                    f"No payment needed until your trial ends.\n\n"
+                    f"Want to upgrade early and lock in a plan? 👇"
+                )
+            else:
+                text = (
+                    f"✅ <b>You already have VIP access!</b>\n\n"
+                    f"Plan: {access['tier'].title()}\n"
+                    f"Enjoy the signals 💎"
+                )
+            keyboard = [
+                [InlineKeyboardButton("📊 See Plans Anyway", callback_data="vip_plans")],
+                [InlineKeyboardButton("💬 Contact Support", callback_data="contact_support")]
+            ]
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+            return
+        
         await self._show_plan_selection(update.message)
         
         # Notify admin
-        user = update.effective_user
         await self._notify_admin(
             f"📩 <b>New VIP Interest!</b>\n"
             f"User: @{user.username or 'N/A'}\n"
@@ -184,7 +313,7 @@ class VIPBot:
             )
             return
         
-        if sub.get('active'):
+        if sub.get('status') == 'active':
             tier = sub.get('tier', 'monthly').title()
             sub_date = sub.get('subscribed_at', 'Unknown')
             status_text = (
@@ -193,7 +322,7 @@ class VIPBot:
                 f"Started: {sub_date[:10] if sub_date else 'Unknown'}\n\n"
                 f"You have full VIP access."
             )
-            if tier.lower() in ['monthly', 'quarterly']:
+            if tier.lower() != 'lifetime':
                 status_text += "\n\nUse /cancel to stop renewal."
         else:
             status_text = (
@@ -299,7 +428,7 @@ class VIPBot:
         
         sub = await db.get_subscriber(str(user.id))
         
-        if not sub or not sub.get('active'):
+        if not sub or sub.get('status') != 'active':
             await update.message.reply_text(
                 "❌ No active subscription found.\n\n"
                 "Use /vip to start one!",
@@ -347,6 +476,28 @@ class VIPBot:
         
         try:
             if data == "vip_menu":
+                access = await self._get_user_access(str(user.id))
+                if access:
+                    if access['type'] == 'trial':
+                        text = (
+                            f"✅ <b>You already have VIP access!</b>\n\n"
+                            f"🎁 <b>Active Trial</b> until {access['expires'][:10]}\n\n"
+                            f"You're receiving all VIP signals right now.\n"
+                            f"No payment needed until your trial ends.\n\n"
+                            f"Want to upgrade early and lock in a plan? 👇"
+                        )
+                    else:
+                        text = (
+                            f"✅ <b>You already have VIP access!</b>\n\n"
+                            f"Plan: {access['tier'].title()}\n"
+                            f"Enjoy the signals 💎"
+                        )
+                    keyboard = [
+                        [InlineKeyboardButton("📊 See Plans Anyway", callback_data="vip_plans")],
+                        [InlineKeyboardButton("💬 Contact Support", callback_data="contact_support")]
+                    ]
+                    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+                    return
                 await self._show_plan_selection(query)
             elif data == "vip_plans":
                 await self._show_plans(query)
@@ -372,6 +523,64 @@ class VIPBot:
                 await self._show_plan_selection(query)
             elif data == "confirm_sent":
                 await self._prompt_txid(query)
+            elif data == "join_vip_channel":
+                vip_link = await self._create_vip_invite()
+                if vip_link:
+                    await query.edit_message_text(
+                        f"🔗 <b>Your VIP Channel Invite</b>\n\n"
+                        f"Click below to join the VIP channel:\n"
+                        f"<a href=\"{vip_link}\">🚀 Join VIP Channel</a>\n\n"
+                        f"⏰ This link expires in 24 hours and is single-use.",
+                        parse_mode='HTML',
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("⬅️ Back", callback_data="back_menu")]
+                        ])
+                    )
+                else:
+                    await query.edit_message_text(
+                        "❌ <b>VIP Channel Invite Error</b>\n\n"
+                        "The bot couldn't create an invite link. This usually means:\n"
+                        "1. The bot isn't an <b>admin</b> in the VIP channel\n"
+                        "2. The channel ID in .env is wrong\n\n"
+                        "<b>Fix:</b> Make the bot an admin in your VIP channel, then try again.",
+                        parse_mode='HTML',
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 Try Again", callback_data="join_vip_channel")],
+                            [InlineKeyboardButton("💬 Contact Support", callback_data="contact_support")]
+                        ])
+                    )
+            elif data == "my_status":
+                access = await self._get_user_access(str(user.id))
+                if access:
+                    if access['type'] == 'trial':
+                        text = (
+                            f"📊 <b>Your Status</b>\n\n"
+                            f"Plan: 🎁 Free Trial\n"
+                            f"Expires: {access['expires'][:10]}\n"
+                            f"Status: ✅ Active\n\n"
+                            f"You're receiving all VIP signals.\n"
+                            f"No payment required until trial ends."
+                        )
+                    else:
+                        text = (
+                            f"📊 <b>Your Status</b>\n\n"
+                            f"Plan: {access['tier'].title()}\n"
+                            f"Status: ✅ Active\n\n"
+                            f"Enjoy the signals 💎"
+                        )
+                else:
+                    text = (
+                        f"📊 <b>Your Status</b>\n\n"
+                        f"Status: ❌ No active subscription\n\n"
+                        f"Use /vip to join."
+                    )
+                await query.edit_message_text(
+                    text,
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⬅️ Back", callback_data="back_menu")]
+                    ])
+                )
             else:
                 logger.warning(f"Unknown callback: {data}")
                 await query.edit_message_text(
@@ -566,25 +775,47 @@ class VIPBot:
             )
     
     async def _show_main_menu(self, query):
-        """Show main welcome menu (used by Back button)"""
-        keyboard = [
-            [InlineKeyboardButton("💎 Join VIP", callback_data="vip_menu")],
-            [InlineKeyboardButton("📊 See Plans", callback_data="vip_plans")],
-            [InlineKeyboardButton("💬 Contact Support", callback_data="contact_support")]
-        ]
+        """Show main welcome menu (used by Back button) — member-aware."""
+        user = query.from_user
+        access = await self._get_user_access(str(user.id))
+        
+        if access:
+            if access['type'] == 'trial':
+                text = (
+                    f"🚀 <b>Welcome back!</b>\n\n"
+                    f"✅ You have <b>VIP access</b> until {access['expires'][:10]}\n"
+                    f"🎁 Active Trial\n\n"
+                    f"All signals are delivered instantly to your VIP channel."
+                )
+            else:
+                text = (
+                    f"🚀 <b>Welcome back!</b>\n\n"
+                    f"✅ You have <b>{access['tier'].title()} VIP</b> access\n\n"
+                    f"All signals are delivered instantly to your VIP channel."
+                )
+            keyboard = [
+                [InlineKeyboardButton("� Join VIP Channel", callback_data="join_vip_channel")],
+                [InlineKeyboardButton("📊 My Status", callback_data="my_status")],
+                [InlineKeyboardButton("💬 Contact Support", callback_data="contact_support")]
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("💎 Join VIP", callback_data="vip_menu")],
+                [InlineKeyboardButton("📊 See Plans", callback_data="vip_plans")],
+                [InlineKeyboardButton("💬 Contact Support", callback_data="contact_support")]
+            ]
+            text = (
+                "🚀 <b>Welcome to Crypto Pulse VIP!</b>\n\n"
+                "Get elite trading signals delivered straight to your VIP channel.\n\n"
+                "✅ 90%+ confidence signals\n"
+                "✅ 1-3 elite setups per day\n"
+                "✅ Entry, Stop Loss, 3 Take Profits\n"
+                "✅ Real-time trade updates\n"
+                "✅ Weekly performance reports\n\n"
+                "<b>Ready to level up your trading?</b>"
+            )
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        text = (
-            "🚀 <b>Welcome to Crypto Pulse VIP!</b>\n\n"
-            "Get elite trading signals delivered straight to your VIP channel.\n\n"
-            "✅ 90%+ confidence signals\n"
-            "✅ 1-3 elite setups per day\n"
-            "✅ Entry, Stop Loss, 3 Take Profits\n"
-            "✅ Real-time trade updates\n"
-            "✅ Weekly performance reports\n\n"
-            "<b>Ready to level up your trading?</b>"
-        )
-        
         try:
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
         except Exception:
@@ -735,20 +966,8 @@ class VIPBot:
             stripe_customer_id=f"crypto:{text[:20]}"  # Store TXID prefix
         )
         
-        # Try to create VIP channel invite link
-        vip_link = None
-        try:
-            if self.app and self.app.bot:
-                # Create a single-use invite link that expires in 1 day
-                chat = await self.app.bot.get_chat(settings.TELEGRAM_VIP_CHANNEL_ID)
-                invite = await self.app.bot.create_chat_invite_link(
-                    chat_id=settings.TELEGRAM_VIP_CHANNEL_ID,
-                    member_limit=1,
-                    expire_date=datetime.utcnow() + timedelta(hours=24)
-                )
-                vip_link = invite.invite_link
-        except Exception as e:
-            logger.error(f"Could not create invite link: {e}")
+        # Try to create VIP channel invite link (uses robust fallback logic)
+        vip_link = await self._create_vip_invite()
         
         # Send user confirmation
         if vip_link:

@@ -192,7 +192,7 @@ tr:hover { background: #0f172a; }
   <div class="tab" onclick="switchTab('schedule')">Schedule</div>
   <div class="tab" onclick="switchTab('history')">History</div>
   <div class="tab" onclick="switchTab('settings')">Settings</div>
-  <div class="tab" onclick="switchTab('alpha')">🎰 Alpha</div>
+  <div class="tab" onclick="switchTab('alpha')">� DEX</div>
 </div>
 
 <!-- Signals Tab -->
@@ -210,8 +210,13 @@ tr:hover { background: #0f172a; }
     </div>
     <div class="section">
       <h2>Quick Scan</h2>
-      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Trigger an instant market scan.</p>
-      <button class="btn" onclick="triggerJob('scan')">Run 15m Scan Now</button>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Trigger an instant market scan on any timeframe.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn" onclick="triggerJob('scan_15m')">⚡ 15m Scan</button>
+        <button class="btn" onclick="triggerJob('scan_1h')">📊 1h Scan</button>
+        <button class="btn" onclick="triggerJob('scan_4h')">🎯 4h Scan</button>
+        <button class="btn" onclick="triggerJob('scan_1d')">📈 Daily Scan</button>
+      </div>
     </div>
   </div>
   <div class="sub-panel" id="sig-active">
@@ -248,13 +253,16 @@ tr:hover { background: #0f172a; }
   <div class="sub-panel" id="sig-performance">
     <div class="section">
       <h2>Performance Analytics</h2>
-      <div style="display:flex;gap:10px;margin-bottom:12px;align-items:center;">
+      <div style="display:flex;gap:10px;margin-bottom:12px;align-items:center;flex-wrap:wrap;">
         <label style="color:#94a3b8;font-size:13px;">Period:</label>
         <select id="perfDays" onchange="loadPerformance()">
           <option value="7">Last 7 Days</option>
           <option value="30" selected>Last 30 Days</option>
           <option value="90">Last 90 Days</option>
         </select>
+        <div style="flex:1"></div>
+        <button class="btn" style="font-size:12px;padding:6px 12px;background:#3b82f6;color:#fff;" onclick="sendPerformance('free')">📢 Send to Free</button>
+        <button class="btn" style="font-size:12px;padding:6px 12px;background:#10b981;color:#fff;" onclick="sendPerformance('vip')">💎 Send to VIP</button>
       </div>
       <div class="grid" id="perfCards" style="margin-bottom:16px;">
         <div class="card"><h3>Total Signals</h3><div class="value" id="perfTotal">--</div></div>
@@ -308,7 +316,7 @@ tr:hover { background: #0f172a; }
     <div class="compact-grid">
       <div class="card" style="padding:16px;">
         <h3>FOMO Alert</h3>
-        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post "VIP just hit targets" to free channel.</p>
+        <p style="font-size:12px;color:#64748b;margin:8px 0;">Post live stats — active signals + recent wins to free channel.</p>
         <button class="btn" onclick="triggerCampaign('fomo')" style="width:100%;justify-content:center;">Trigger FOMO</button>
       </div>
       <div class="card" style="padding:16px;">
@@ -344,8 +352,72 @@ tr:hover { background: #0f172a; }
       <div class="card"><h3>Monthly Revenue</h3><div class="value" id="subRevenue">$--</div></div>
     </div>
     <div class="table-wrap">
-      <table><thead><tr><th>User</th><th>Status</th><th>Plan</th><th>Joined</th><th>Expires</th></tr></thead><tbody id="subTable"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody></table>
+      <table><thead><tr><th>User</th><th>Status</th><th>Plan</th><th>Joined</th><th>Expires</th><th>Actions</th></tr></thead><tbody id="subTable"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody></table>
     </div>
+  </div>
+
+  <!-- Edit Subscriber Modal -->
+  <div id="editSubModal" class="modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center;">
+    <div class="modal-content" style="background:#1e293b;padding:24px;border-radius:12px;max-width:400px;width:90%;box-shadow:0 20px 25px -5px rgba(0,0,0,0.3);">
+      <h3 style="margin-bottom:16px;">Edit Subscriber</h3>
+      <input type="hidden" id="editSubUserId">
+      <div class="form-group">
+        <label>Tier</label>
+        <select id="editSubTier">
+          <option value="monthly">Monthly</option>
+          <option value="quarterly">Quarterly</option>
+          <option value="lifetime">Lifetime</option>
+          <option value="beta">Beta</option>
+          <option value="trial">Trial</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Status</label>
+        <select id="editSubStatus">
+          <option value="active">Active</option>
+          <option value="trial">Trial</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="expired">Expired</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Extend Trial (days from now)</label>
+        <input type="number" id="editSubDays" placeholder="Leave blank to keep current" min="1" max="365">
+      </div>
+      <div class="form-group">
+        <label>Notes</label>
+        <input type="text" id="editSubNotes" placeholder="Subscriber notes...">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn success" onclick="saveSubscriberEdit()" style="flex:1;">Save Changes</button>
+        <button class="btn" onclick="closeEditModal()" style="flex:1;background:#475569;">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <h2>🎁 Add Beta Tester</h2>
+    <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Give a user free VIP access for a limited time.</p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Telegram User ID</label>
+        <input type="text" id="betaUserId" placeholder="123456789">
+      </div>
+      <div class="form-group">
+        <label>Username (optional)</label>
+        <input type="text" id="betaUsername" placeholder="@username">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Free Days</label>
+        <input type="number" id="betaDays" value="30" min="1" max="90">
+      </div>
+      <div class="form-group">
+        <label>Notes</label>
+        <input type="text" id="betaNotes" placeholder="Beta tester - friend referral">
+      </div>
+    </div>
+    <button class="btn success" onclick="addBetaTester()">Give Free VIP Access</button>
   </div>
   <div class="section">
     <h2>VIP DM Blast</h2>
@@ -443,18 +515,58 @@ tr:hover { background: #0f172a; }
 
 </div>
 
-<!-- Alpha/Degen Plays Tab -->
+<!-- DEX / Alpha Plays Tab -->
 <div class="tab-panel" id="tab-alpha">
   <div class="sub-nav">
-    <button class="active" onclick="switchAlphaSubTab(this,'alpha-active')">Active Plays</button>
-    <button onclick="switchAlphaSubTab(this,'alpha-pending')">Pending Discovery</button>
+    <button class="active" onclick="switchAlphaSubTab(this,'dex-opportunities')">🎯 DEX Opportunities</button>
+    <button onclick="switchAlphaSubTab(this,'alpha-active')">Active Plays</button>
+    <button onclick="switchAlphaSubTab(this,'alpha-pending')">Pending</button>
     <button onclick="switchAlphaSubTab(this,'alpha-stats')">Stats</button>
+    <button onclick="switchAlphaSubTab(this,'alpha-performance')">Performance</button>
   </div>
-  
-  <div class="sub-panel active" id="alpha-active">
+
+  <!-- DEX OPPORTUNITIES -->
+  <div class="sub-panel active" id="dex-opportunities">
+    <div class="section">
+      <h2>🎯 DEX Opportunities</h2>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Low-cap & early breakout plays from Jupiter, Uniswap, DexScreener & GeckoTerminal</p>
+
+      <!-- Scan Controls -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
+        <button class="btn" onclick="triggerAlphaScan()">🔍 Scan All Chains</button>
+        <button class="btn ghost" onclick="triggerAlphaScan('sol')">☀️ Solana</button>
+        <button class="btn ghost" onclick="triggerAlphaScan('eth')">💎 ETH</button>
+        <button class="btn ghost" onclick="triggerAlphaScan('base')">🔵 Base</button>
+        <button class="btn ghost" onclick="loadDexOpportunities()">🔄 Refresh</button>
+      </div>
+
+      <!-- Filters -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
+        <label style="font-size:13px;color:#64748b;">Filter:</label>
+        <select id="dexFilterChain" onchange="loadDexOpportunities()" style="padding:6px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:13px;">
+          <option value="">All Chains</option>
+          <option value="sol">Solana</option>
+          <option value="eth">Ethereum</option>
+          <option value="base">Base</option>
+        </select>
+        <select id="dexFilterType" onchange="loadDexOpportunities()" style="padding:6px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:13px;">
+          <option value="">All Types</option>
+          <option value="day_trade">Day Trade</option>
+          <option value="swing">Swing Trade</option>
+          <option value="fundamental">Fundamental</option>
+        </select>
+        <span id="dexOppsCount" style="font-size:13px;color:#64748b;margin-left:auto;"></span>
+      </div>
+
+      <div id="dexOpportunitiesList"><div class="empty-state">Loading DEX opportunities...</div></div>
+    </div>
+  </div>
+
+  <!-- ACTIVE PLAYS -->
+  <div class="sub-panel" id="alpha-active">
     <div class="section">
       <h2>🎰 Active Alpha Plays</h2>
-      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Low-cap degen plays being tracked. VIP: 1/day | Free: 1/week</p>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Approved plays being tracked. VIP: 1/day | Free: 1/week</p>
       <div style="display:flex;gap:10px;margin-bottom:16px;">
         <button class="btn" onclick="triggerAlphaScan()">🔍 Scan Now</button>
         <button class="btn ghost" onclick="loadAlphaPlays()">🔄 Refresh</button>
@@ -462,23 +574,75 @@ tr:hover { background: #0f172a; }
       <div id="alphaActiveList"><div class="empty-state">Loading...</div></div>
     </div>
   </div>
-  
+
+  <!-- PENDING DISCOVERY -->
   <div class="sub-panel" id="alpha-pending">
     <div class="section">
-      <h2>⏳ Pending Alpha Discovery</h2>
+      <h2>⏳ Pending Discovery</h2>
       <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Discovered plays waiting for admin approval.</p>
       <div id="alphaPendingList"><div class="empty-state">Loading...</div></div>
     </div>
   </div>
-  
+
+  <!-- STATS -->
   <div class="sub-panel" id="alpha-stats">
     <div class="section">
-      <h2>📊 Alpha Play Statistics</h2>
+      <h2>📊 DEX Play Statistics</h2>
       <div class="grid" style="margin-bottom:16px;">
         <div class="card"><h3>VIP Today</h3><div class="value" id="alphaVipToday">--</div><div class="change" id="alphaVipLimit">/--</div></div>
         <div class="card"><h3>Free This Week</h3><div class="value" id="alphaFreeWeek">--</div><div class="change" id="alphaFreeLimit">/--</div></div>
         <div class="card"><h3>Active Plays</h3><div class="value" id="alphaActiveCount">--</div></div>
         <div class="card"><h3>Pending</h3><div class="value" id="alphaPendingCount">--</div></div>
+      </div>
+      <div id="alphaTradeTypeBreakdown" style="margin-top:12px;"></div>
+    </div>
+  </div>
+
+  <!-- PERFORMANCE -->
+  <div class="sub-panel" id="alpha-performance">
+    <div class="section">
+      <h2>🏆 Alpha Play Performance</h2>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Historical win/loss, PnL analytics & hold times from database</p>
+      <div style="display:flex;gap:10px;margin-bottom:16px;">
+        <button class="btn" onclick="loadAlphaPerformance()">🔄 Refresh</button>
+      </div>
+
+      <!-- KPI Cards -->
+      <div class="grid" style="margin-bottom:20px;">
+        <div class="card"><h3>Win Rate</h3><div class="value" id="perfWinRate">--</div><div class="change" id="perfWinRateDetail" style="font-size:12px;color:#64748b;"></div></div>
+        <div class="card"><h3>Big Win Rate</h3><div class="value" id="perfBigWinRate">--</div><div class="change" style="font-size:12px;color:#64748b;">TP2 hits</div></div>
+        <div class="card"><h3>Avg PnL</h3><div class="value" id="perfAvgPnl">--</div><div class="change" id="perfAvgPnlDetail" style="font-size:12px;color:#64748b;"></div></div>
+        <div class="card"><h3>Avg Hold</h3><div class="value" id="perfAvgHold">--</div><div class="change" style="font-size:12px;color:#64748b;">hours</div></div>
+        <div class="card"><h3>Total Plays</h3><div class="value" id="perfTotal">--</div><div class="change" id="perfTotalDetail" style="font-size:12px;color:#64748b;"></div></div>
+        <div class="card"><h3>Best Play</h3><div class="value" id="perfBest" style="font-size:20px;">--</div><div class="change" id="perfBestDetail" style="font-size:12px;color:#64748b;"></div></div>
+      </div>
+
+      <!-- Breakdown Tables -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:20px;">
+        <div class="card">
+          <h3>By Chain</h3>
+          <div id="perfByChain" style="font-size:13px;"></div>
+        </div>
+        <div class="card">
+          <h3>By Trade Type</h3>
+          <div id="perfByTradeType" style="font-size:13px;"></div>
+        </div>
+        <div class="card">
+          <h3>By Risk Level</h3>
+          <div id="perfByRisk" style="font-size:13px;"></div>
+        </div>
+      </div>
+
+      <!-- Active Plays -->
+      <div class="section" style="padding:0;">
+        <h3 style="margin-bottom:10px;">🎰 Currently Active</h3>
+        <div id="perfActivePlays"><div class="empty-state">No active plays in database</div></div>
+      </div>
+
+      <!-- History Table -->
+      <div class="section" style="padding:0;margin-top:20px;">
+        <h3 style="margin-bottom:10px;">📜 Play History</h3>
+        <div id="perfHistory"><div class="empty-state">No historical plays yet</div></div>
       </div>
     </div>
   </div>
@@ -509,7 +673,7 @@ function switchTab(name) {
   if (name === 'settings') loadSettings();
   if (name === 'subscribers') loadSubscribers();
   if (name === 'signals') { loadStats(); loadPerformance(); }
-  if (name === 'alpha') { loadAlphaPlays(); loadAlphaStats(); }
+  if (name === 'alpha') { loadDexOpportunities(); loadAlphaPlays(); loadAlphaStats(); }
 }
 
 async function fetchJSON(url, opts) {
@@ -607,6 +771,20 @@ function renderActiveSignals(signals) {
     const entryColor = s.is_limit_order ? '#fbbf24' : '#22c55e';
     const slMoved = s.stop_moved_to_breakeven ? '🔒 Breakeven' : 'Active';
     
+    // For limit orders, show fill status
+    let fillStatus = '';
+    if (s.is_limit_order) {
+      const isLong = s.direction === 'LONG';
+      const current = s.current_price || 0;
+      const entry = s.entry_price || 0;
+      const filled = isLong ? (current <= entry) : (current >= entry);
+      if (!filled) {
+        fillStatus = '<div style="background:#451a03;border:1px solid #92400e;color:#fbbf24;padding:6px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;text-align:center;">⏳ Waiting for limit fill — TP/SL tracking paused until entry is hit</div>';
+      } else {
+        fillStatus = '<div style="background:#064e3b;border:1px solid #059669;color:#34d399;padding:6px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;text-align:center;">✅ Limit filled — now tracking TP/SL</div>';
+      }
+    }
+    
     // TP Progress Bar
     let tpProgress = 0;
     if (s.tp3_hit) tpProgress = 100;
@@ -615,6 +793,7 @@ function renderActiveSignals(signals) {
     
     html += `
     <div class="card" style="position:relative;">
+      ${fillStatus}
       <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:12px;">
         <div>
           <h3 style="font-size:18px;color:#f8fafc;margin-bottom:4px;">${s.symbol}</h3>
@@ -827,6 +1006,21 @@ async function loadPerformance() {
   } catch (e) {}
 }
 
+async function sendPerformance(channel) {
+  const days = document.getElementById('perfDays').value;
+  const total = document.getElementById('perfTotal').textContent;
+  if (total === '--' || total === '0') {
+    showToast('No performance data to send', 'error');
+    return;
+  }
+  try {
+    await fetchJSON('/api/marketing/send-performance?days=' + days + '&channel=' + channel, {method: 'POST'});
+    showToast('Stats sent to ' + channel + ' channel');
+  } catch (e) {
+    showToast('Failed to send stats', 'error');
+  }
+}
+
 async function loadSubscribers() {
   try {
     const d = await fetchJSON('/api/subscribers/detailed');
@@ -842,16 +1036,121 @@ async function loadSubscribers() {
     const d = await fetchJSON('/api/subscribers/detailed');
     const tbody = document.getElementById('subTable');
     if (!d.subscribers || d.subscribers.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No subscribers found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No subscribers found.</td></tr>';
       return;
     }
     tbody.innerHTML = d.subscribers.map(s => {
       const joined = s.created_at ? new Date(s.created_at).toLocaleDateString() : 'N/A';
-      const expires = s.expires_at ? new Date(s.expires_at).toLocaleDateString() : 'N/A';
-      const statusClass = s.status === 'active' ? 'approved' : (s.status === 'expired' ? 'closed' : 'pending');
-      return `<tr><td>${s.username || s.user_id || 'Unknown'}</td><td><span class="badge ${statusClass}">${s.status || 'unknown'}</span></td><td>${s.plan || '--'}</td><td>${joined}</td><td>${expires}</td></tr>`;
+      const expires = s.trial_ends_at ? new Date(s.trial_ends_at).toLocaleDateString() : (s.expires_at ? new Date(s.expires_at).toLocaleDateString() : 'N/A');
+      const statusClass = s.status === 'active' ? 'approved' : (s.status === 'expired' || s.status === 'cancelled' ? 'closed' : 'pending');
+      const notes = s.notes ? `title="${s.notes.replace(/"/g, '&quot;')}"` : '';
+      return `<tr ${notes}><td>${s.username || s.user_id || 'Unknown'}</td><td><span class="badge ${statusClass}">${s.status || 'unknown'}</span></td><td>${s.tier || s.plan || '--'}</td><td>${joined}</td><td>${expires}</td><td><button class="btn" style="padding:4px 8px;font-size:11px;margin-right:4px;" onclick="openEditModal('${s.user_id}', '${s.tier || s.plan || 'monthly'}', '${s.status || 'active'}', '${(s.notes || '').replace(/'/g, "\\'")}')">Edit</button><button class="btn" style="padding:4px 8px;font-size:11px;background:#dc2626;" onclick="cancelSubscriber('${s.user_id}')">Cancel</button></td></tr>`;
     }).join('');
   } catch (e) {}
+}
+
+function openEditModal(userId, tier, status, notes) {
+  document.getElementById('editSubUserId').value = userId;
+  document.getElementById('editSubTier').value = tier || 'monthly';
+  document.getElementById('editSubStatus').value = status || 'active';
+  document.getElementById('editSubNotes').value = notes || '';
+  document.getElementById('editSubDays').value = '';
+  document.getElementById('editSubModal').style.display = 'flex';
+}
+
+function closeEditModal() {
+  document.getElementById('editSubModal').style.display = 'none';
+}
+
+async function saveSubscriberEdit() {
+  const userId = document.getElementById('editSubUserId').value;
+  const tier = document.getElementById('editSubTier').value;
+  const status = document.getElementById('editSubStatus').value;
+  const notes = document.getElementById('editSubNotes').value.trim();
+  const days = parseInt(document.getElementById('editSubDays').value);
+  
+  const updateData = { tier, status };
+  if (notes) updateData.notes = notes;
+  
+  // If days specified, calculate new trial_ends_at
+  if (days && days > 0) {
+    const expiry = new Date();
+    expiry.setDate(expiry.getDate() + days);
+    updateData.trial_ends_at = expiry.toISOString();
+  }
+  
+  try {
+    const result = await fetchJSON(`/api/subscribers/${userId}/update`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updateData)
+    });
+    
+    if (result.success) {
+      showToast('Subscriber updated!');
+      closeEditModal();
+      loadSubscribers();
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Failed to update subscriber', 'error');
+  }
+}
+
+async function cancelSubscriber(userId) {
+  if (!confirm('Cancel this subscriber? They will lose VIP access.')) return;
+  
+  try {
+    const result = await fetchJSON(`/api/subscribers/${userId}/cancel`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'}
+    });
+    
+    if (result.success) {
+      showToast('Subscriber cancelled');
+      loadSubscribers();
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Failed to cancel subscriber', 'error');
+  }
+}
+
+async function addBetaTester() {
+  const userId = document.getElementById('betaUserId').value.trim();
+  const username = document.getElementById('betaUsername').value.trim();
+  const days = parseInt(document.getElementById('betaDays').value) || 30;
+  const notes = document.getElementById('betaNotes').value.trim();
+  
+  if (!userId) return showToast('Enter Telegram User ID', 'error');
+  if (!/^\d+$/.test(userId)) return showToast('User ID must be numbers only', 'error');
+  
+  try {
+    const result = await fetchJSON('/api/subscribers/beta', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        telegram_user_id: userId,
+        username: username || null,
+        days: days,
+        notes: notes || null
+      })
+    });
+    
+    if (result.success) {
+      showToast(`Beta access granted for ${days} days!`);
+      document.getElementById('betaUserId').value = '';
+      document.getElementById('betaUsername').value = '';
+      document.getElementById('betaNotes').value = '';
+      loadSubscribers();
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Failed to add beta tester', 'error');
+  }
 }
 
 async function sendDmBlast() {
@@ -901,7 +1200,47 @@ switchSubTab = function(btn, panelId) {
   }
 };
 
-// ==================== ALPHA/DEGEN PLAYS ====================
+// ==================== DEX / ALPHA PLAYS ====================
+
+function getTradeTypeBadge(type) {
+  const map = {
+    'day_trade': '<span class="badge" style="background:#f59e0b;color:#fff;">⚡ DAY</span>',
+    'swing': '<span class="badge" style="background:#3b82f6;color:#fff;">📊 SWING</span>',
+    'fundamental': '<span class="badge" style="background:#10b981;color:#fff;">🏗️ FUND</span>',
+  };
+  return map[type] || '<span class="badge pending">SWING</span>';
+}
+
+function getRiskBadge(level) {
+  const map = {
+    'low': '<span class="badge approved" style="font-size:11px;">🟢 Low</span>',
+    'medium': '<span class="badge" style="background:#f59e0b;color:#fff;font-size:11px;">🟡 Med</span>',
+    'high': '<span class="badge rejected" style="font-size:11px;">🔴 High</span>',
+    'degen': '<span class="badge" style="background:#7c3aed;color:#fff;font-size:11px;">💀 DEGEN</span>',
+  };
+  return map[level] || '';
+}
+
+function getChainEmoji(chain) {
+  const map = { 'sol': '☀️', 'eth': '💎', 'base': '🔵' };
+  return map[chain] || '🪙';
+}
+
+function formatUSD(val) {
+  if (!val || val === 0) return '$0';
+  if (val >= 1_000_000_000) return '$' + (val / 1e9).toFixed(2) + 'B';
+  if (val >= 1_000_000) return '$' + (val / 1e6).toFixed(2) + 'M';
+  if (val >= 1_000) return '$' + (val / 1e3).toFixed(1) + 'K';
+  return '$' + val.toFixed(0);
+}
+
+function getTokenLogoUrl(chain, tokenAddress) {
+  if (!chain || !tokenAddress) return null;
+  // DexScreener token image endpoint
+  const chainMap = { 'sol': 'solana', 'eth': 'ethereum', 'base': 'base' };
+  const c = chainMap[chain] || chain;
+  return `https://dd.dexscreener.com/ds-data/tokens/${c}/${tokenAddress}/header.png`;
+}
 
 function switchAlphaSubTab(btn, panelId) {
   const parent = document.getElementById('tab-alpha');
@@ -909,11 +1248,122 @@ function switchAlphaSubTab(btn, panelId) {
   parent.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById(panelId).classList.add('active');
+  if (panelId === 'dex-opportunities') loadDexOpportunities();
   if (panelId === 'alpha-active' || panelId === 'alpha-stats') {
     loadAlphaPlays();
     loadAlphaStats();
   }
+  if (panelId === 'alpha-performance') loadAlphaPerformance();
 }
+
+// ---------- DEX OPPORTUNITIES ----------
+
+async function loadDexOpportunities() {
+  const el = document.getElementById('dexOpportunitiesList');
+  try {
+    const chain = document.getElementById('dexFilterChain').value;
+    const tradeType = document.getElementById('dexFilterType').value;
+    let url = '/api/dex/opportunities';
+    const params = [];
+    if (chain) params.push('chain=' + encodeURIComponent(chain));
+    if (tradeType) params.push('trade_type=' + encodeURIComponent(tradeType));
+    if (params.length) url += '?' + params.join('&');
+    
+    const data = await fetchJSON(url);
+    document.getElementById('dexOppsCount').textContent = (data.count || 0) + ' opportunities found';
+    renderDexOpportunities(data.opportunities);
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Error loading DEX opportunities</div>';
+  }
+}
+
+function renderDexOpportunities(opps) {
+  const el = document.getElementById('dexOpportunitiesList');
+  if (!opps || opps.length === 0) {
+    el.innerHTML = '<div class="empty-state">No DEX opportunities found.<br><small style="color:#64748b;">Run a scan to discover low-cap gems on Jupiter, Uniswap, DexScreener & GeckoTerminal.</small></div>';
+    return;
+  }
+
+  let html = '';
+  for (const p of opps) {
+    const chainEmoji = getChainEmoji(p.chain);
+    const changeClass = p.price_change_24h >= 0 ? 'up' : 'down';
+    const change1hClass = (p.price_change_1h || 0) >= 0 ? 'up' : 'down';
+    const redFlagsHtml = p.red_flags && p.red_flags.length
+      ? `<div style="margin-top:10px;padding:8px 12px;background:#7f1d1d;border-radius:8px;font-size:12px;color:#fca5a5;"><b>⚠️ Red Flags:</b><br>${p.red_flags.map(f => '• ' + f).join('<br>')}</div>`
+      : '';
+    const logoUrl = getTokenLogoUrl(p.chain, p.token_address);
+    const logoHtml = logoUrl
+      ? `<img src="${logoUrl}" onerror="this.style.display='none'" style="width:44px;height:44px;border-radius:50%;object-fit:cover;border:2px solid #1e293b;" alt="">`
+      : `<div style="width:44px;height:44px;border-radius:50%;background:#1e293b;display:flex;align-items:center;justify-content:center;font-size:20px;">${chainEmoji}</div>`;
+    const txns = p.transactions_24h || Math.round(p.volume_24h / p.price_usd) || 0;
+    
+    html += `<div style="background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:16px;margin-bottom:12px;">
+      <div style="display:flex;gap:12px;align-items:flex-start;">
+        ${logoHtml}
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+            <div>
+              <div style="font-size:18px;font-weight:700;"><b>${p.symbol}</b> <span style="font-size:13px;color:#64748b;font-weight:400;">${p.name || ''}</span></div>
+              <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                ${getTradeTypeBadge(p.trade_type)}
+                ${getRiskBadge(p.risk_level)}
+                <span style="font-size:12px;color:#64748b;">⏱️ ${p.time_frame || '4-24h'}</span>
+                <span style="font-size:12px;color:#64748b;">📊 Score: <b>${p.overall_score.toFixed(0)}</b></span>
+                ${p.dex_source ? '<span style="font-size:11px;color:#475569;background:#1e293b;padding:2px 6px;border-radius:4px;">' + p.dex_source + '</span>' : ''}
+              </div>
+            </div>
+            <div style="text-align:right;min-width:110px;">
+              <div style="font-size:18px;font-weight:700;">$${p.price_usd ? p.price_usd.toFixed(6) : 'N/A'}</div>
+              <div class="change ${changeClass}" style="font-size:13px;">${p.price_change_24h >= 0 ? '+' : ''}${p.price_change_24h.toFixed(1)}% 24h</div>
+              <div class="change ${change1hClass}" style="font-size:12px;">${(p.price_change_1h || 0) >= 0 ? '+' : ''}${(p.price_change_1h || 0).toFixed(1)}% 1h</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(100px, 1fr));gap:10px;margin-top:12px;padding:10px;background:#1e293b;border-radius:8px;">
+        <div><div style="font-size:11px;color:#64748b;">Market Cap</div><div style="font-weight:600;font-size:13px;">${formatUSD(p.market_cap)}</div></div>
+        <div><div style="font-size:11px;color:#64748b;">Liquidity</div><div style="font-weight:600;font-size:13px;">${formatUSD(p.liquidity)}</div></div>
+        <div><div style="font-size:11px;color:#64748b;">Volume 24h</div><div style="font-weight:600;font-size:13px;">${formatUSD(p.volume_24h)}</div></div>
+        <div><div style="font-size:11px;color:#64748b;">Buy/Sell</div><div style="font-weight:600;font-size:13px;color:${p.buy_sell_ratio >= 1 ? '#22c55e' : '#ef4444'};">${p.buy_sell_ratio.toFixed(2)}x</div></div>
+        <div><div style="font-size:11px;color:#64748b;">Chain</div><div style="font-weight:600;font-size:13px;">${chainEmoji} ${p.chain.toUpperCase()}</div></div>
+      </div>
+      
+      <div style="margin-top:12px;font-size:13px;">
+        <div style="color:#94a3b8;"><b>🔥 Catalyst:</b> ${p.catalyst || 'N/A'}</div>
+        ${p.why_trending ? `<div style="color:#64748b;margin-top:4px;"><b>📈 Why Trending:</b> ${p.why_trending.replace(/\n/g, '<br>')}</div>` : ''}
+        ${p.narrative ? `<div style="color:#64748b;margin-top:4px;"><b>🏷️ Narrative:</b> ${p.narrative}</div>` : ''}
+      </div>
+      
+      <div style="margin-top:10px;padding:10px 12px;background:#0b1121;border-radius:8px;border-left:3px solid #3b82f6;">
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:4px;"><b>📋 Mini Report</b></div>
+        ${p.short_term_potential ? `<div style="font-size:12px;color:#64748b;margin-top:3px;"><b>⏱️ Short Term (1-3d):</b> ${p.short_term_potential}</div>` : ''}
+        ${p.long_term_potential ? `<div style="font-size:12px;color:#64748b;margin-top:3px;"><b>🗓️ Long Term (1-4w):</b> ${p.long_term_potential}</div>` : ''}
+      </div>
+      
+      ${redFlagsHtml}
+      
+      <div style="margin-top:10px;padding:8px 12px;background:#0f172a;border:1px dashed #334155;border-radius:8px;font-family:monospace;font-size:12px;color:#94a3b8;">
+        ${p.token_address ? `<div>🏷️ Contract: <span style="color:#e2e8f0;">${p.token_address}</span></div>` : ''}
+        ${p.pair_address ? `<div style="margin-top:4px;">🔗 Pair: <span style="color:#e2e8f0;">${p.pair_address}</span></div>` : ''}
+      </div>
+      
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
+        <a href="${p.buy_url}" target="_blank" class="btn success" style="text-decoration:none;font-size:13px;padding:6px 12px;">💱 Buy on DEX</a>
+        <a href="${p.chart_url}" target="_blank" class="btn ghost" style="text-decoration:none;font-size:13px;padding:6px 12px;">📊 Chart</a>
+        <a href="${p.dex_url}" target="_blank" class="btn ghost" style="text-decoration:none;font-size:13px;padding:6px 12px;">📋 Info</a>
+        <div style="margin-left:auto;display:flex;gap:6px;">
+          <button class="btn" style="font-size:13px;padding:6px 12px;background:#ef4444;color:#fff;" onclick="rejectAlpha('${p.symbol}', this)">❌ Reject</button>
+          <button class="btn" style="font-size:13px;padding:6px 12px;" onclick="approveAlpha('${p.symbol}')">✅ Approve & Publish</button>
+        </div>
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+// ---------- ACTIVE & PENDING ----------
 
 async function loadAlphaPlays() {
   try {
@@ -932,15 +1382,15 @@ function renderAlphaActive(plays) {
     return;
   }
   
-  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Chain</th><th>Entry</th><th>Current</th><th>P&L</th><th>SL</th><th>TP1</th><th>TP2</th><th>Status</th><th>MC</th></tr></thead><tbody>';
+  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>SL</th><th>TP1</th><th>TP2</th><th>Status</th><th>MC</th><th>Actions</th></tr></thead><tbody>';
   for (const p of plays) {
     const pnlClass = p.current_pnl >= 0 ? 'up' : 'down';
     const pnlEmoji = p.current_pnl >= 0 ? '🟢' : '🔴';
-    const chainEmoji = p.chain === 'sol' ? '☀️' : (p.chain === 'eth' ? '💎' : '🔵');
+    const chainEmoji = getChainEmoji(p.chain);
     
     html += `<tr>
-      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${p.name}</small></td>
-      <td>${chainEmoji} ${p.chain.toUpperCase()}</td>
+      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${chainEmoji} ${p.chain.toUpperCase()}</small></td>
+      <td>${getTradeTypeBadge(p.trade_type)}<br><small style="color:#64748b;">${p.time_frame}</small></td>
       <td>$${p.entry_price ? p.entry_price.toFixed(6) : 'N/A'}</td>
       <td>$${p.current_price ? p.current_price.toFixed(6) : 'N/A'}</td>
       <td><span class="change ${pnlClass}">${pnlEmoji} ${p.current_pnl >= 0 ? '+' : ''}${p.current_pnl}%</span></td>
@@ -949,6 +1399,12 @@ function renderAlphaActive(plays) {
       <td style="color:#22c55e;">$${p.take_profit_2 ? p.take_profit_2.toFixed(6) : 'N/A'}</td>
       <td><span class="badge ${p.status}">${p.status.toUpperCase()}</span></td>
       <td>$${(p.market_cap / 1e6).toFixed(2)}M</td>
+      <td>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+          <button class="btn" style="font-size:11px;padding:3px 8px;background:#3b82f6;color:#fff;" onclick="editAlpha('${p.id}', '${p.symbol}', ${p.entry_price || 0}, ${p.stop_loss || 0}, ${p.take_profit_1 || 0}, ${p.take_profit_2 || 0}, '${p.position_size || ''}')">✏️ Edit</button>
+          <button class="btn" style="font-size:11px;padding:3px 8px;background:#ef4444;color:#fff;" onclick="closeAlpha('${p.id}', '${p.symbol}', this)">❌ Close</button>
+        </div>
+      </td>
     </tr>`;
   }
   html += '</tbody></table></div>';
@@ -958,23 +1414,30 @@ function renderAlphaActive(plays) {
 function renderAlphaPending(plays) {
   const el = document.getElementById('alphaPendingList');
   if (!plays || plays.length === 0) {
-    el.innerHTML = '<div class="empty-state">No pending alpha plays.<br><small style="color:#64748b;">Run a scan to discover low-cap gems.</small></div>';
+    el.innerHTML = '<div class="empty-state">No pending plays.<br><small style="color:#64748b;">Run a scan to discover low-cap gems.</small></div>';
     return;
   }
   
-  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Chain</th><th>Score</th><th>MC</th><th>24h Change</th><th>Catalyst</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Type</th><th>Score</th><th>MC</th><th>24h</th><th>1h</th><th>Catalyst</th><th>Actions</th></tr></thead><tbody>';
   for (const p of plays) {
-    const chainEmoji = p.chain === 'sol' ? '☀️' : (p.chain === 'eth' ? '💎' : '🔵');
+    const chainEmoji = getChainEmoji(p.chain);
     const changeClass = p.price_change_24h >= 0 ? 'up' : 'down';
+    const change1hClass = (p.price_change_1h || 0) >= 0 ? 'up' : 'down';
     
     html += `<tr>
-      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${p.name}</small></td>
-      <td>${chainEmoji} ${p.chain.toUpperCase()}</td>
+      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${chainEmoji} ${p.chain.toUpperCase()}</small></td>
+      <td>${getTradeTypeBadge(p.trade_type)}<br><small style="color:#64748b;">${p.time_frame || ''}</small></td>
       <td><span class="badge ${p.overall_score >= 80 ? 'approved' : 'pending'}">${p.overall_score.toFixed(0)}</span></td>
       <td>$${(p.market_cap / 1e6).toFixed(2)}M</td>
       <td><span class="change ${changeClass}">${p.price_change_24h >= 0 ? '+' : ''}${p.price_change_24h.toFixed(1)}%</span></td>
-      <td style="max-width:200px;font-size:12px;">${p.catalyst}</td>
-      <td><button class="btn success" onclick="approveAlpha('${p.symbol}')">Approve</button></td>
+      <td><span class="change ${change1hClass}">${(p.price_change_1h || 0) >= 0 ? '+' : ''}${(p.price_change_1h || 0).toFixed(1)}%</span></td>
+      <td style="max-width:180px;font-size:12px;">${p.catalyst}</td>
+      <td>
+        <div style="display:flex;gap:6px;">
+          <button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff;" onclick="rejectAlpha('${p.symbol}', this)">❌ Reject</button>
+          <button class="btn success" style="font-size:12px;padding:4px 10px;" onclick="approveAlpha('${p.symbol}')">✅ Approve</button>
+        </div>
+      </td>
     </tr>`;
   }
   html += '</tbody></table></div>';
@@ -986,8 +1449,9 @@ async function approveAlpha(symbol) {
     showToast('Approving ' + symbol + '...');
     const result = await fetchJSON('/api/alpha/approve?symbol=' + encodeURIComponent(symbol), {method: 'POST'});
     if (result.success) {
-      showToast(symbol + ' approved and published!');
+      showToast(symbol + ' approved and published! (' + result.trade_type + ')');
       loadAlphaPlays();
+      loadDexOpportunities();
     } else {
       showToast('Error: ' + result.error, 'error');
     }
@@ -996,14 +1460,107 @@ async function approveAlpha(symbol) {
   }
 }
 
-async function triggerAlphaScan() {
+async function rejectAlpha(symbol, btn) {
   try {
-    showToast('Scanning for alpha plays...');
-    const result = await fetchJSON('/api/alpha/trigger', {method: 'POST'});
+    showToast('Rejecting ' + symbol + '...');
+    const result = await fetchJSON('/api/alpha/reject?symbol=' + encodeURIComponent(symbol), {method: 'POST'});
+    if (result.success) {
+      showToast(symbol + ' rejected');
+      // Remove the card visually
+      const card = btn.closest('div[style*="background:#0f172a"]');
+      if (card) card.style.opacity = '0.3';
+      setTimeout(() => { loadAlphaPlays(); loadDexOpportunities(); }, 500);
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Error rejecting alpha: ' + e.message, 'error');
+  }
+}
+
+async function closeAlpha(playId, symbol, btn) {
+  try {
+    showToast('Closing ' + symbol + '...');
+    const result = await fetchJSON('/api/alpha/close?play_id=' + encodeURIComponent(playId), {method: 'POST'});
+    if (result.success) {
+      showToast(symbol + ' closed');
+      // Fade out the row
+      const row = btn.closest('tr');
+      if (row) row.style.opacity = '0.3';
+      setTimeout(() => { loadAlphaPlays(); }, 500);
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Error closing alpha: ' + e.message, 'error');
+  }
+}
+
+function editAlpha(playId, symbol, entry, sl, tp1, tp2, size) {
+  // Inline prompt-based edit (simple, no modal needed)
+  const newEntry = prompt('Entry price for ' + symbol + ':', entry);
+  if (newEntry === null) return; // cancelled
+  
+  const newSL = prompt('Stop loss for ' + symbol + ':', sl);
+  if (newSL === null) return;
+  
+  const newTP1 = prompt('Take Profit 1 for ' + symbol + ':', tp1);
+  if (newTP1 === null) return;
+  
+  const newTP2 = prompt('Take Profit 2 for ' + symbol + ':', tp2);
+  if (newTP2 === null) return;
+  
+  const newSize = prompt('Position size for ' + symbol + ':', size);
+  if (newSize === null) return;
+  
+  const updates = {};
+  const entryVal = parseFloat(newEntry);
+  const slVal = parseFloat(newSL);
+  const tp1Val = parseFloat(newTP1);
+  const tp2Val = parseFloat(newTP2);
+  
+  if (!isNaN(entryVal) && entryVal > 0) updates.entry_price = entryVal;
+  if (!isNaN(slVal) && slVal > 0) updates.stop_loss = slVal;
+  if (!isNaN(tp1Val) && tp1Val > 0) updates.take_profit_1 = tp1Val;
+  if (!isNaN(tp2Val) && tp2Val > 0) updates.take_profit_2 = tp2Val;
+  if (newSize.trim()) updates.position_size = newSize.trim();
+  
+  if (Object.keys(updates).length === 0) {
+    showToast('No valid changes entered', 'error');
+    return;
+  }
+  
+  submitAlphaEdit(playId, symbol, updates);
+}
+
+async function submitAlphaEdit(playId, symbol, updates) {
+  try {
+    showToast('Updating ' + symbol + '...');
+    const result = await fetchJSON('/api/alpha/update?play_id=' + encodeURIComponent(playId), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updates)
+    });
+    if (result.success) {
+      showToast(symbol + ' updated');
+      setTimeout(() => { loadAlphaPlays(); }, 500);
+    } else {
+      showToast('Error: ' + result.error, 'error');
+    }
+  } catch (e) {
+    showToast('Error updating alpha: ' + e.message, 'error');
+  }
+}
+
+async function triggerAlphaScan(chain) {
+  try {
+    showToast('Scanning DEXs' + (chain ? ' (' + chain.toUpperCase() + ')' : ' (all chains)') + '...');
+    let url = '/api/alpha/trigger';
+    if (chain) url += '?chain=' + encodeURIComponent(chain);
+    const result = await fetchJSON(url, {method: 'POST'});
     if (result.success) {
       showToast(result.message);
-      // Refresh after a few seconds to show results
-      setTimeout(loadAlphaPlays, 5000);
+      setTimeout(() => { loadAlphaPlays(); loadDexOpportunities(); }, 5000);
     } else {
       showToast('Error: ' + result.error, 'error');
     }
@@ -1021,7 +1578,116 @@ async function loadAlphaStats() {
     document.getElementById('alphaFreeLimit').textContent = '/' + (stats.free_weekly_limit || 1);
     document.getElementById('alphaActiveCount').textContent = stats.active_plays || 0;
     document.getElementById('alphaPendingCount').textContent = stats.pending_plays || 0;
+    
+    // Trade type breakdown
+    const breakdown = stats.trade_type_breakdown || {};
+    let breakdownHtml = '';
+    if (Object.keys(breakdown).length > 0) {
+      breakdownHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">';
+      for (const [tt, count] of Object.entries(breakdown)) {
+        breakdownHtml += `<span style="background:#1e293b;padding:4px 10px;border-radius:6px;font-size:12px;">${getTradeTypeBadge(tt).replace(/<[^>]*>/g, '')}: ${count}</span>`;
+      }
+      breakdownHtml += '</div>';
+    }
+    document.getElementById('alphaTradeTypeBreakdown').innerHTML = breakdownHtml;
   } catch (e) {}
+}
+
+// ==================== ALPHA PERFORMANCE ====================
+
+async function loadAlphaPerformance() {
+  try {
+    const data = await fetchJSON('/api/alpha/performance');
+    if (data.error) throw new Error(data.error);
+
+    // KPI Cards
+    document.getElementById('perfWinRate').textContent = (data.win_rate || 0) + '%';
+    document.getElementById('perfWinRateDetail').textContent = `${data.closed_count || 0} closed plays`;
+    document.getElementById('perfBigWinRate').textContent = (data.big_win_rate || 0) + '%';
+    document.getElementById('perfAvgPnl').textContent = (data.avg_pnl || 0).toFixed(1) + '%';
+    document.getElementById('perfAvgPnlDetail').textContent = data.avg_pnl >= 0 ? '🟢 Net Positive' : '🔴 Net Negative';
+    document.getElementById('perfAvgHold').textContent = (data.avg_hold_hours || 0).toFixed(1);
+    document.getElementById('perfTotal').textContent = data.total_plays || 0;
+    document.getElementById('perfTotalDetail').textContent = `${data.active ? data.active.length : 0} active now`;
+
+    if (data.best_play) {
+      document.getElementById('perfBest').textContent = data.best_play.symbol;
+      document.getElementById('perfBestDetail').textContent = `+${data.best_play.pnl}% on ${data.best_play.chain.toUpperCase()}`;
+      document.getElementById('perfBest').style.color = '#22c55e';
+    } else {
+      document.getElementById('perfBest').textContent = '--';
+      document.getElementById('perfBestDetail').textContent = '';
+    }
+
+    // By Chain
+    renderPerfBreakdown('perfByChain', data.by_chain);
+    // By Trade Type
+    renderPerfBreakdown('perfByTradeType', data.by_trade_type);
+    // By Risk
+    renderPerfBreakdown('perfByRisk', data.by_risk);
+
+    // Active Plays
+    renderPerfActive(data.active || []);
+
+    // History
+    renderPerfHistory(data.history || []);
+  } catch (e) {
+    console.error('Alpha performance error:', e);
+  }
+}
+
+function renderPerfBreakdown(elementId, bucket) {
+  const el = document.getElementById(elementId);
+  if (!bucket || Object.keys(bucket).length === 0) {
+    el.innerHTML = '<div class="empty-state" style="padding:12px;">No data yet</div>';
+    return;
+  }
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  html += '<tr style="color:#64748b;font-size:11px;text-align:left;"><th style="padding:6px 0;">Category</th><th style="padding:6px 0;">Plays</th><th style="padding:6px 0;">Win%</th><th style="padding:6px 0;">Avg PnL</th></tr>';
+  for (const [key, v] of Object.entries(bucket)) {
+    const color = v.avg_pnl >= 0 ? '#22c55e' : '#ef4444';
+    html += `<tr style="border-top:1px solid #1e293b;"><td style="padding:8px 0;text-transform:capitalize;">${key}</td><td style="padding:8px 0;">${v.count}</td><td style="padding:8px 0;">${v.win_rate}%</td><td style="padding:8px 0;color:${color};font-weight:600;">${v.avg_pnl >= 0 ? '+' : ''}${v.avg_pnl}%</td></tr>`;
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function renderPerfActive(active) {
+  const el = document.getElementById('perfActivePlays');
+  if (!active || active.length === 0) {
+    el.innerHTML = '<div class="empty-state" style="padding:12px;">No active plays in database</div>';
+    return;
+  }
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  html += '<tr style="color:#64748b;font-size:11px;text-align:left;"><th>Symbol</th><th>Chain</th><th>Entry</th><th>PnL</th><th>Type</th><th>Risk</th></tr>';
+  for (const p of active) {
+    const pnlColor = (p.current_pnl || 0) >= 0 ? '#22c55e' : '#ef4444';
+    html += `<tr style="border-top:1px solid #1e293b;"><td style="padding:8px 0;font-weight:600;">${p.symbol}</td><td style="padding:8px 0;text-transform:uppercase;">${p.chain}</td><td style="padding:8px 0;">$${p.entry_price ? p.entry_price.toFixed(6) : 'N/A'}</td><td style="padding:8px 0;color:${pnlColor};font-weight:600;">${p.current_pnl >= 0 ? '+' : ''}${(p.current_pnl || 0).toFixed(2)}%</td><td style="padding:8px 0;text-transform:capitalize;">${p.trade_type || '-'}</td><td style="padding:8px 0;text-transform:capitalize;">${p.risk_level || '-'}</td></tr>`;
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function renderPerfHistory(history) {
+  const el = document.getElementById('perfHistory');
+  if (!history || history.length === 0) {
+    el.innerHTML = '<div class="empty-state" style="padding:12px;">No historical plays yet. Plays will appear here once they close (hit TP/SL or are manually closed).</div>';
+    return;
+  }
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  html += '<tr style="color:#64748b;font-size:11px;text-align:left;"><th>Symbol</th><th>Chain</th><th>Outcome</th><th>PnL</th><th>Hold</th><th>Type</th></tr>';
+  for (const p of history) {
+    let badge = '';
+    let pnlColor = '#64748b';
+    if (p.outcome === 'tp2_hit') { badge = '<span style="background:#22c55e;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">TP2</span>'; pnlColor = '#22c55e'; }
+    else if (p.outcome === 'tp1_hit') { badge = '<span style="background:#3b82f6;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">TP1</span>'; pnlColor = '#3b82f6'; }
+    else if (p.outcome === 'win') { badge = '<span style="background:#22c55e;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">WIN</span>'; pnlColor = '#22c55e'; }
+    else if (p.outcome === 'sl_hit') { badge = '<span style="background:#ef4444;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">SL</span>'; pnlColor = '#ef4444'; }
+    else if (p.outcome === 'loss') { badge = '<span style="background:#ef4444;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">LOSS</span>'; pnlColor = '#ef4444'; }
+    html += `<tr style="border-top:1px solid #1e293b;"><td style="padding:8px 0;font-weight:600;">${p.symbol}</td><td style="padding:8px 0;text-transform:uppercase;">${p.chain}</td><td style="padding:8px 0;">${badge}</td><td style="padding:8px 0;color:${pnlColor};font-weight:600;">${p.pnl >= 0 ? '+' : ''}${p.pnl}%</td><td style="padding:8px 0;">${p.hold_hours !== null && p.hold_hours !== undefined ? p.hold_hours + 'h' : '-'}</td><td style="padding:8px 0;text-transform:capitalize;">${p.trade_type || '-'}</td></tr>`;
+  }
+  html += '</table>';
+  el.innerHTML = html;
 }
 
 // ==================== MANUAL TRADE MANAGEMENT ====================

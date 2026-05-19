@@ -35,6 +35,13 @@ class AlphaContentFormatter:
         'degen': '💀 DEGEN MODE',
     }
     
+    # Trade type labels
+    TRADE_TYPE_LABELS = {
+        'day_trade': '⚡ DAY TRADE',
+        'swing': '📊 SWING TRADE',
+        'fundamental': '🏗️ FUNDAMENTAL',
+    }
+    
     @classmethod
     def format_vip_alpha(cls, play: AlphaPlayCandidate, 
                          entry_price: float = None,
@@ -43,28 +50,12 @@ class AlphaContentFormatter:
                          take_profit_2: float = None,
                          position_size: str = "2-5%") -> str:
         """
-        Format a full alpha play for VIP channel.
-        
-        Args:
-            play: The alpha play candidate
-            entry_price: Recommended entry price (optional)
-            stop_loss: Stop loss price (optional)
-            take_profit_1: First take profit (optional)
-            take_profit_2: Second take profit (optional)
-            position_size: Recommended position size
+        Format a full alpha play for VIP channel with trade classification and fundamental report.
         """
         
         chain_emoji = cls.CHAIN_EMOJIS.get(play.chain, '🪙')
-        
-        # Determine risk level
-        if play.market_cap_usd < 5_000_000:
-            risk_level = cls.RISK_LEVELS['degen']
-        elif play.market_cap_usd < 20_000_000:
-            risk_level = cls.RISK_LEVELS['high']
-        elif play.market_cap_usd < 50_000_000:
-            risk_level = cls.RISK_LEVELS['medium']
-        else:
-            risk_level = cls.RISK_LEVELS['low']
+        risk_level = cls.RISK_LEVELS.get(play.risk_level, cls.RISK_LEVELS['medium'])
+        trade_label = cls.TRADE_TYPE_LABELS.get(play.trade_type, '📊 SWING TRADE')
         
         # Calculate potential upside
         if entry_price and take_profit_1:
@@ -83,7 +74,7 @@ class AlphaContentFormatter:
         message = f"""🎰 <b>ALPHA PLAY ALERT</b> 🎰
 
 {chain_emoji} <b>{play.symbol}</b> - {play.name}
-{risk_level}
+{trade_label} | {risk_level} | ⏱️ {play.time_frame}
 
 📊 <b>Metrics:</b>
 • Price: ${play.price_usd:.6f}
@@ -92,7 +83,15 @@ class AlphaContentFormatter:
 • Volume 24h: ${play.volume_24h/1e3:.0f}K
 • 24h Change: {play.price_change_24h:+.1f}%
 • 1h Change: {play.price_change_1h:+.1f}%
-
+• 5min Change: {play.price_change_5min:+.1f}%
+• Buy/Sell Ratio: {play.buy_sell_ratio:.2f}x
+"""
+        
+        # Add FDV if available
+        if play.fdv > 0:
+            message += f"• FDV: ${play.fdv/1e6:.2f}M\n"
+        
+        message += f"""
 🎯 <b>Trade Setup:</b>
 """
         
@@ -116,11 +115,27 @@ class AlphaContentFormatter:
 🔥 <b>Catalyst:</b>
 {play.catalyst}
 
-📈 <b>Technical Score:</b> {play.technical_score:.0f}/100
-👥 <b>Community Score:</b> {play.community_score:.0f}/100
-📣 <b>Social Score:</b> {play.social_score:.0f}/100
-⭐ <b>Overall:</b> {play.overall_score:.0f}/100
+📈 <b>Scores:</b>
+• Technical: {play.technical_score:.0f}/100
+• Community: {play.community_score:.0f}/100
+• Social: {play.social_score:.0f}/100
+• Fundamental: {play.fundamental_score:.0f}/100
+• Overall: {play.overall_score:.0f}/100
 """
+        
+        # Fundamental Mini-Report
+        if play.narrative or play.why_trending:
+            message += f"""
+📋 <b>Fundamental Mini-Report:</b>
+"""
+            if play.narrative:
+                message += f"🏷️ Narrative: {play.narrative}\n"
+            if play.why_trending:
+                message += f"\n📣 Why Trending:\n{play.why_trending}\n"
+            if play.short_term_potential:
+                message += f"\n⏱️ Short Term (1-3d): {play.short_term_potential}\n"
+            if play.long_term_potential:
+                message += f"\n🗓️ Long Term (1-4w): {play.long_term_potential}\n"
         
         # Add red flags if any
         if play.red_flags:
@@ -134,6 +149,14 @@ class AlphaContentFormatter:
 📊 <a href='{play.chart_url}'>Chart</a>
 💱 <a href='{play.buy_url}'>Buy on DEX</a>
 📋 <a href='{play.dex_url}'>Token Info</a>
+"""
+        # Always show contract address for manual copy-paste
+        if play.token_address:
+            message += f"\n🏷️ <b>Contract:</b> <code>{play.token_address}</code>"
+        if play.pair_address:
+            message += f"\n🔗 <b>Pair:</b> <code>{play.pair_address}</code>"
+        
+        message += f"""
 
 ⚡ <b>Act fast - alpha plays move quickly!</b>
 ⏰ Posted: {datetime.utcnow().strftime('%H:%M UTC')}
@@ -149,6 +172,8 @@ class AlphaContentFormatter:
         """
         
         chain_emoji = cls.CHAIN_EMOJIS.get(play.chain, '🪙')
+        trade_label = cls.TRADE_TYPE_LABELS.get(play.trade_type, '📊 SWING TRADE')
+        risk_level = cls.RISK_LEVELS.get(play.risk_level, cls.RISK_LEVELS['medium'])
         
         # Determine teaser text based on performance
         if play.price_change_24h > 50:
@@ -160,19 +185,22 @@ class AlphaContentFormatter:
         
         message = f"""🎰 <b>ALPHA PLAY TEASER</b> 🎰
 
-{chain_emoji} <b>{play.symbol}</b>
+{chain_emoji} <b>{play.symbol}</b> | {trade_label}
+{risk_level} | ⏱️ {play.time_frame}
 {fomo_text}
 
 📊 <b>What we know:</b>
 • Market Cap: ${play.market_cap_usd/1e6:.1f}M
 • Volume 24h: ${play.volume_24h/1e3:.0f}K
 • Chain: {play.chain.upper()}
+• 24h: {play.price_change_24h:+.1f}% | 1h: {play.price_change_1h:+.1f}%
 
 💎 <b>VIP Members just got:</b>
 ✅ Exact entry price
 ✅ Stop loss level
 ✅ 2 take profit targets
 ✅ Position size recommendation
+✅ Fundamental mini-report
 ✅ Risk warnings & red flags
 ✅ Direct DEX buy link
 

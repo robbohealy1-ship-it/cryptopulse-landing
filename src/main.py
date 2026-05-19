@@ -96,6 +96,27 @@ class CryptoPulseOrchestrator:
             await self.signal_engine.initialize()
             await self.admin_bot.initialize()
             
+            # 🔄 Restore pending signals from database (survives restarts)
+            try:
+                pending_from_db = await self.db.get_pending_signals()
+                restored_count = 0
+                resent_count = 0
+                for signal in pending_from_db:
+                    self.admin_bot.pending_signals[signal.id] = signal
+                    restored_count += 1
+                    # Re-send approval request to admin Telegram
+                    try:
+                        await self.admin_bot.send_signal_for_approval(signal)
+                        resent_count += 1
+                    except Exception as send_err:
+                        logger.warning(f"Could not resend {signal.symbol} to admin: {send_err}")
+                if restored_count > 0:
+                    logger.info(f"🔄 Restored {restored_count} pending signals from database")
+                    if resent_count > 0:
+                        logger.info(f"📩 Resent {resent_count} pending signals to admin for approval")
+            except Exception as e:
+                logger.warning(f"Could not restore pending signals from DB: {e}")
+            
             # Initialize community engagement (needs bot instance)
             if self.admin_bot.app and self.admin_bot.app.bot:
                 self.community_engagement = CommunityEngagement(
@@ -497,13 +518,21 @@ class CryptoPulseOrchestrator:
                         # Publish teaser to FREE channel (if weekly limit allows)
                         await self.alpha_engine.publish_teaser_to_free(play)
                         
+                        # Discord Alpha channel
+                        if self.discord_publisher.alpha_enabled:
+                            try:
+                                await self.discord_publisher.post_alpha_signal(candidate)
+                                logger.info(f"🎰 Discord Alpha posted: {candidate.symbol}")
+                            except Exception as e:
+                                logger.error(f"❌ Discord Alpha post failed: {e}")
+                        
                         # Notify admin
                         await self.admin_bot.send_notification(
                             f"🎰 <b>Alpha Play Published</b>\n\n"
                             f"{candidate.symbol} on {candidate.chain.upper()}\n"
                             f"Score: {candidate.overall_score:.1f}/100\n"
                             f"MC: ${candidate.market_cap_usd/1e6:.2f}M\n"
-                            f"Posted to VIP + FREE channels"
+                            f"Posted to VIP + FREE + Discord channels"
                         )
                         
                 except Exception as e:
@@ -540,15 +569,12 @@ class CryptoPulseOrchestrator:
                     await self.db.save_signal(candidate)
                     continue
                 
-                # Quality check using configured minimum (85%)
-                # 90%+ = VIP-only routing, 85-89% = dual-channel routing
-                # Both go to admin - routing decided after approval
-                if not self.signal_validator.check_signal_quality(candidate, min_confidence=settings.MIN_CONFIDENCE_SCORE):
-                    logger.info(f"⏭️  Signal {candidate.symbol} filtered by quality check")
-                    candidate.admin_rejected = True
-                    candidate.rejection_reason = f"Did not meet quality standards (below {settings.MIN_CONFIDENCE_SCORE}% confidence)"
-                    await self.db.save_signal(candidate)
-                    continue
+                # Log quality score but DON'T auto-reject - admin decides approve/reject
+                quality_passed = self.signal_validator.check_signal_quality(candidate, min_confidence=settings.MIN_CONFIDENCE_SCORE)
+                if not quality_passed:
+                    logger.info(f"⚠️  Signal {candidate.symbol} below auto-quality threshold ({candidate.confidence:.1f}%), sending to admin for manual review")
+                else:
+                    logger.info(f"✅ Signal {candidate.symbol} passed quality check ({candidate.confidence:.1f}%)")
                 
                 # Check for duplicate symbol (DB-level, catches restarts)
                 existing = await self.db.get_active_signal_for_symbol(candidate.symbol)
@@ -581,6 +607,11 @@ class CryptoPulseOrchestrator:
     
     async def on_signal_approved(self, signal):
         try:
+            # Guard against duplicate approvals
+            if signal.status in (SignalStatus.APPROVED, SignalStatus.ACTIVE):
+                logger.warning(f"Signal {signal.symbol} already approved/active — skipping duplicate publish")
+                return
+            
             # Check if signal has expired before approval
             if signal.expires_at and datetime.utcnow() > signal.expires_at:
                 signal.cancelled = True
@@ -639,6 +670,9 @@ class CryptoPulseOrchestrator:
                     f"📢 Marketing teaser sent to free channel"
                 )
             
+            # 📣 Cross-post to Discord, Twitter/X, Webhook (independent error handling)
+            await self._crosspost_signal(signal)
+            
             signal.published_at = datetime.utcnow()
             await self.db.save_signal(signal)
             
@@ -683,19 +717,24 @@ class CryptoPulseOrchestrator:
         """Check for pending signals that have expired before admin approval"""
         try:
             pending_signals = await self.db.get_pending_signals()
-            now = datetime.utcnow()
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
             
             for signal in pending_signals:
-                if signal.expires_at and now > signal.expires_at:
-                    signal.status = SignalStatus.EXPIRED
-                    signal.cancelled = True
-                    signal.cancellation_reason = "Auto-cancelled: expired before admin approval"
-                    await self.db.save_signal(signal)
-                    
-                    await self.admin_bot.send_notification(
-                        f"⏰ Signal {signal.symbol} auto-cancelled - expired before approval"
-                    )
-                    logger.info(f"Signal {signal.symbol} auto-cancelled (expired)")
+                expires = signal.expires_at
+                if expires:
+                    if expires.tzinfo is None:
+                        expires = expires.replace(tzinfo=timezone.utc)
+                    if now > expires:
+                        signal.status = SignalStatus.EXPIRED
+                        signal.cancelled = True
+                        signal.cancellation_reason = "Auto-cancelled: expired before admin approval"
+                        await self.db.save_signal(signal)
+                        
+                        await self.admin_bot.send_notification(
+                            f"⏰ Signal {signal.symbol} auto-cancelled - expired before approval"
+                        )
+                        logger.info(f"Signal {signal.symbol} auto-cancelled (expired)")
                     
         except Exception as e:
             logger.error(f"Error checking expired signals: {e}")
@@ -710,6 +749,22 @@ class CryptoPulseOrchestrator:
                 
                 if not current_price:
                     continue
+                
+                # --- LIMIT ORDER FIX ---
+                # For limit orders, only check TP/SL after the entry has been filled
+                is_limit = getattr(signal, 'is_limit_order', False)
+                if is_limit:
+                    # LONG limit: filled when price drops TO entry (current <= entry)
+                    # SHORT limit: filled when price rises TO entry (current >= entry)
+                    if signal.direction.value == "LONG":
+                        if current_price > signal.entry_price:
+                            # Limit not filled yet — price hasn't dropped to entry
+                            continue
+                    else:  # SHORT
+                        if current_price < signal.entry_price:
+                            # Limit not filled yet — price hasn't risen to entry
+                            continue
+                    # If we reach here, limit is filled — proceed with TP/SL checks
                 
                 # Track which TPs have been hit
                 tp1_hit = getattr(signal, 'tp1_hit', False)
@@ -895,9 +950,11 @@ class CryptoPulseOrchestrator:
         """Cross-post approved signal to all enabled marketing channels.
         Each channel has independent error handling so one failure doesn't block others."""
         
-        chart_path = None
-        if signal.chart_path and os.path.exists(signal.chart_path):
-            chart_path = signal.chart_path
+        chart_path = getattr(signal, 'chart_path', None)
+        if chart_path and os.path.exists(chart_path):
+            pass  # chart_path is valid
+        else:
+            chart_path = None
         
         # Twitter/X
         if self.social_media.twitter_enabled:
@@ -907,7 +964,7 @@ class CryptoPulseOrchestrator:
             except Exception as e:
                 logger.error(f"❌ Twitter post failed: {e}")
         
-        # Discord
+        # Discord - Main signals channel
         if self.discord_publisher.enabled:
             try:
                 success = await self.discord_publisher.post_signal(signal)
@@ -917,6 +974,15 @@ class CryptoPulseOrchestrator:
                     logger.warning(f"⚠️ Discord post returned False for {signal.symbol}")
             except Exception as e:
                 logger.error(f"❌ Discord post failed: {e}")
+        
+        # Discord - VIP lounge (full signals for VIP members)
+        if self.discord_publisher.vip_enabled:
+            try:
+                success = await self.discord_publisher.post_vip_signal(signal)
+                if success:
+                    logger.info(f"💎 Discord VIP posted: {signal.symbol}")
+            except Exception as e:
+                logger.error(f"❌ Discord VIP post failed: {e}")
         
         # Generic webhook
         if settings.MARKETING_WEBHOOK_URL:
@@ -1021,14 +1087,18 @@ Good luck today! 🎯"""
             logger.error(f"Morning outlook error: {e}")
     
     async def _post_evening_recap(self):
-        """Post evening MARKET OUTLOOK (not performance - that's at 23:55). Focus on tomorrow's setup."""
+        """Post evening MARKET OUTLOOK with real data. Focus on tomorrow's setup."""
         try:
-            # EOD = Market outlook for tomorrow, NOT performance review
-            ctx = self.signal_engine.context_engine
+            # Fetch real market context
+            mctx = await self._get_real_market_context()
             
-            # Get market data for tomorrow's outlook
-            fear = await ctx.get_fear_greed_index()
-            funding = await ctx.get_funding_rates()
+            fear_class = mctx.get('fear_class', 'Neutral')
+            fear_value = mctx.get('fear_value', 50)
+            btc_price = mctx.get('btc_price', 0)
+            btc_24h = mctx.get('btc_24h', 0)
+            funding_rate = mctx.get('funding_rate', 0)
+            market_change = mctx.get('market_change', 0)
+            btc_dominance = mctx.get('btc_dominance', 0)
             
             # Get active trades
             active_signals = await self.db.get_active_signals()
@@ -1056,21 +1126,29 @@ P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
 """
             
+            # Key levels from real data
+            key_levels = self._get_key_levels(btc_price, btc_24h)
+            session = self._get_next_session()
+            volatility = self._assess_volatility(btc_24h, market_change)
+            bias = self._generate_tomorrow_bias(mctx)
+            
             # Build tomorrow's market outlook
             outlook = f"""🌙 <b>EVENING MARKET OUTLOOK</b>
-📅 {datetime.utcnow().strftime('%B %d, %Y')}
+📅 {datetime.utcnow().strftime('%A, %B %d, %Y')}
 
 <b>📊 Market Sentiment:</b>
-Fear & Greed: {fear.get('classification', 'Neutral')} ({fear.get('value', 50)})
-BTC Funding: {funding.get('funding_rate', 0)*100:.4f}%
+Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
+BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
+BTC Dominance: <b>{btc_dominance:.1f}%</b>
+Funding Rate: <b>{funding_rate*100:.4f}%</b>
 {active_trades_text}
 <b>🔮 Tomorrow's Focus:</b>
-• Watch for {self._get_key_levels()}
-• Session: {self._get_next_session()}
-• Volatility: {self._assess_volatility()}
+• {key_levels}
+• {session}
+• {volatility}
 
 <b>⚡ What to Expect:</b>
-{self._generate_tomorrow_bias()}
+{bias}
 
 💎 Stay alert for high-confidence setups!
 """
@@ -1082,20 +1160,23 @@ BTC Funding: {funding.get('funding_rate', 0)*100:.4f}%
                 parse_mode='HTML'
             )
             
-            # Free gets teaser
+            # Free gets teaser with more value
             free_teaser = f"""🌙 <b>MARKET OUTLOOK</b>
 
-Fear & Greed: {fear.get('classification', 'Neutral')}
+<b>📊 Current Conditions:</b>
+Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
+BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
 
-💎 VIP members get full tomorrow's bias + key levels.
+<b>⚡ Tomorrow's Bias:</b>
+{self._generate_tomorrow_bias(mctx)[:120]}...
+
+💎 VIP members get:
+✅ Exact support/resistance levels
+✅ Active trade updates
+✅ Full daily bias + session timing
+
 🔗 Join: t.me/CryptoPulseVIPAccessBot
 """
-            
-            await self.channel_publisher.bot.send_message(
-                chat_id=settings.TELEGRAM_FREE_CHANNEL_ID,
-                text=free_teaser,
-                parse_mode='HTML'
-            )
             
             # Discord
             if self.discord_publisher.enabled:
@@ -1108,42 +1189,109 @@ Fear & Greed: {fear.get('classification', 'Neutral')}
         except Exception as e:
             logger.error(f"Evening outlook error: {e}")
     
-    def _get_key_levels(self) -> str:
-        """Get key support/resistance levels for tomorrow"""
-        # Simplified - you can enhance with real TA
-        return "BTC $66.5k support, $68.2k resistance"
+    async def _get_real_market_context(self) -> dict:
+        """Fetch real market data for evening outlook."""
+        ctx = self.signal_engine.context_engine
+        try:
+            btc = await ctx.fetch_btc_trend()
+            fear = await ctx.fetch_fear_greed_index()
+            funding = await ctx.fetch_funding_rates('BTCUSDT')
+            market = await ctx.fetch_market_data()
+            
+            return {
+                'btc_price': btc.get('current_price', 0),
+                'btc_24h': btc.get('change_24h', 0),
+                'btc_7d': btc.get('change_7d', 0),
+                'btc_trend': btc.get('trend', 'neutral'),
+                'fear_value': fear.get('value', 50),
+                'fear_class': fear.get('classification', 'Neutral'),
+                'funding_rate': funding.get('funding_rate', 0),
+                'global_mcap': market.get('total_market_cap', 0),
+                'btc_dominance': market.get('btc_dominance', 0),
+                'market_change': market.get('market_cap_change_24h', 0)
+            }
+        except Exception as e:
+            logger.warning(f"Could not fetch full market context: {e}")
+            return {}
+    
+    def _get_key_levels(self, btc_price: float = 0, btc_24h: float = 0) -> str:
+        """Calculate key support/resistance from real BTC price data"""
+        if btc_price <= 0:
+            return "Monitor BTC for key level breaks"
+        
+        # Calculate rough S/R based on current price and 24h change
+        # Support = today's low estimate, Resistance = today's high estimate
+        price_range = abs(btc_price * (btc_24h / 100)) if btc_24h != 0 else btc_price * 0.02
+        support = btc_price - price_range * 1.2
+        resistance = btc_price + price_range * 0.8
+        
+        # Round to clean levels
+        if btc_price > 10000:
+            support = round(support / 100) * 100
+            resistance = round(resistance / 100) * 100
+        
+        return f"BTC ${support:,.0f} support, ${resistance:,.0f} resistance (current: ${btc_price:,.2f})"
     
     def _get_next_session(self) -> str:
-        """Determine next major trading session"""
+        """Determine next major trading session based on actual UTC time"""
         hour = datetime.utcnow().hour
-        if hour < 8:
-            return "Asia session (low volatility)"
-        elif hour < 12:
-            return "London open (high volatility)"
-        elif hour < 16:
-            return "NY open (peak liquidity)"
+        if 0 <= hour < 6:
+            return "Asia session (Tokyo) - watch for yen pairs & BTC"
+        elif 6 <= hour < 14:
+            return "London open - forex majors & crypto volatility"
+        elif 14 <= hour < 22:
+            return "NY session - peak liquidity & institutional moves"
         else:
-            return "Asia session tomorrow"
+            return "Asia session approaching - lower volatility expected"
     
-    def _assess_volatility(self) -> str:
-        """Quick volatility assessment"""
-        return random.choice([
-            "Moderate - good for swing trades",
-            "High - scalping opportunities",
-            "Low - wait for breakouts",
-            "Increasing - watch for momentum"
-        ])
+    def _assess_volatility(self, btc_24h: float = 0, market_change: float = 0) -> str:
+        """Assess volatility from real market data"""
+        vol_score = abs(btc_24h) + abs(market_change)
+        
+        if vol_score > 8:
+            return f"High volatility ({vol_score:.1f}% combined) - wide stops recommended"
+        elif vol_score > 4:
+            return f"Moderate volatility ({vol_score:.1f}% combined) - standard risk management"
+        elif vol_score > 1:
+            return f"Low volatility ({vol_score:.1f}% combined) - tighter entries, smaller positions"
+        else:
+            return "Very low volatility - expect range-bound action"
     
-    def _generate_tomorrow_bias(self) -> str:
-        """Generate market bias for tomorrow"""
-        biases = [
-            "Bullish continuation if BTC holds support. Watch for altcoin rotation.",
-            "Consolidation expected. Wait for clear breakout direction.",
-            "Bearish pressure building. Defensive positioning recommended.",
-            "Range-bound action likely. Focus on mean reversion plays.",
-            "Breakout imminent. High-confidence setups will be prioritized."
-        ]
-        return random.choice(biases)
+    def _generate_tomorrow_bias(self, ctx: dict) -> str:
+        """Generate market bias from real data (not random)"""
+        fear_value = ctx.get('fear_value', 50)
+        btc_24h = ctx.get('btc_24h', 0)
+        btc_7d = ctx.get('btc_7d', 0)
+        funding = ctx.get('funding_rate', 0)
+        trend = ctx.get('btc_trend', 'neutral')
+        
+        parts = []
+        
+        # Trend bias
+        if btc_24h > 3 and btc_7d > 5:
+            parts.append("Strong bullish momentum. Favor LONG setups on pullbacks.")
+        elif btc_24h > 1.5:
+            parts.append("Bullish bias. Look for continuation on dips to support.")
+        elif btc_24h < -3 and btc_7d < -5:
+            parts.append("Bearish trend. Favor SHORT setups on rallies to resistance.")
+        elif btc_24h < -1.5:
+            parts.append("Bearish bias. Defensive positioning. Breakdown shorts preferred.")
+        else:
+            parts.append("Neutral/choppy. Range trading between key levels until breakout.")
+        
+        # Fear/greed insight
+        if fear_value < 25:
+            parts.append("Extreme fear = contrarian buying opportunity for patient traders.")
+        elif fear_value > 75:
+            parts.append("Extreme greed = take profits. Reversal risk elevated.")
+        
+        # Funding insight
+        if funding > 0.0003:
+            parts.append("High funding = longs overleveraged. Caution on fresh longs.")
+        elif funding < -0.0003:
+            parts.append("Negative funding = shorts overleveraged. Squeeze potential.")
+        
+        return " ".join(parts)
     
     async def _post_weekly_report(self):
         """Post weekly performance report to VIP channel."""

@@ -233,19 +233,43 @@ class PublicStatsPoster:
     - Monthly summary to free Telegram channel
     """
     
-    def __init__(self, social_media=None, discord=None, channel_publisher=None, performance_tracker=None):
+    def __init__(self, social_media=None, discord=None, channel_publisher=None, performance_tracker=None, db=None):
         self.social_media = social_media
         self.discord = discord
         self.channel_publisher = channel_publisher
         self.performance_tracker = performance_tracker
+        self.db = db
         
+    async def _get_db_stats(self, days: int = 7) -> dict:
+        """Query DB for stats — survives restarts unlike in-memory tracker."""
+        if not self.db:
+            return self.performance_tracker.get_stats(days=days) if self.performance_tracker else {'total': 0}
+        try:
+            since = datetime.utcnow() - timedelta(days=days)
+            result = self.db.client.table('signals').select('*').gte('created_at', since.isoformat()).execute()
+            rows = result.data if hasattr(result, 'data') else []
+            total = len(rows)
+            if total == 0:
+                return {'total': 0}
+            wins = sum(1 for r in rows if (r.get('pnl_percent') or 0) > 0)
+            losses = sum(1 for r in rows if (r.get('pnl_percent') or 0) < 0)
+            win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+            total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in rows)
+            return {
+                'total': total,
+                'wins': wins,
+                'losses': losses,
+                'win_rate': win_rate,
+                'total_pnl': total_pnl,
+                'avg_pnl': total_pnl / total if total > 0 else 0,
+            }
+        except Exception as e:
+            logger.warning(f"DB stats query failed, falling back to memory: {e}")
+            return self.performance_tracker.get_stats(days=days) if self.performance_tracker else {'total': 0}
+    
     async def post_weekly_stats(self):
         """Auto-post weekly performance to all public channels"""
-        if not self.performance_tracker:
-            logger.warning("No performance tracker — skipping public stats")
-            return
-        
-        stats = self.performance_tracker.get_stats(days=7)
+        stats = await self._get_db_stats(days=7)
         
         if stats['total'] == 0:
             logger.info("No trades this week — skipping public stats")
@@ -264,15 +288,7 @@ class PublicStatsPoster:
             f"{pnl_emoji} Total P&L: <b>{total_pnl:+.2f}%</b>\n"
             f"🏆 Winners: {stats['wins']} | 🛑 Losses: {stats['losses']}\n"
             f"📊 Avg per trade: {stats['avg_pnl']:+.2f}%\n\n"
-        )
-        
-        # Add timeframe breakdown
-        for tf, data in stats.get('by_timeframe', {}).items():
-            tf_winrate = (data['wins'] / data['total']) * 100 if data['total'] > 0 else 0
-            message += f"⏱ {tf}: {tf_winrate:.0f}% WR ({data['total']} trades)\n"
-        
-        message += (
-            f"\n💎 Every signal had 85%+ confidence + strict risk management.\n"
+            f"💎 Every signal had 85%+ confidence + strict risk management.\n"
             f"That's why professionals use systems, not guesswork.\n\n"
             f"Join VIP: t.me/cryptopulse_signals_free1"
         )
@@ -349,9 +365,9 @@ class FreeTrialManager:
                 'user_id': user_id,
                 'username': username,
                 'tier': 'trial',
+                'status': 'active',
                 'trial_started_at': datetime.utcnow().isoformat(),
                 'trial_ends_at': trial_end.isoformat(),
-                'active': True,
                 'had_trial': True
             })
             
@@ -433,7 +449,7 @@ class FreeTrialManager:
             username = trial.get('username', 'User')
             
             await self.db.update_subscriber(user_id, {
-                'active': False,
+                'status': 'expired',
                 'tier': 'expired_trial',
                 'trial_ended_at': datetime.utcnow().isoformat()
             })
@@ -484,7 +500,7 @@ class AutoPilotSystem:
         
         # Sub-systems
         self.performance = PerformanceTracker(scanner, db)
-        self.public_stats = PublicStatsPoster(social_media, discord, channel_publisher, self.performance)
+        self.public_stats = PublicStatsPoster(social_media, discord, channel_publisher, self.performance, db)
         self.trial_manager = FreeTrialManager(db, channel_publisher, self.payment_orchestrator)
         
         logger.info("🤖 AutoPilot System initialized")

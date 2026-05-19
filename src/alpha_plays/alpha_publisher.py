@@ -20,13 +20,21 @@ class AlphaPublisher:
     
     def __init__(self, bot=None):
         self.bot = bot
-        self.vip_channel_id = getattr(settings, 'TELEGRAM_DEGEN_VIP_CHANNEL_ID', None)
-        self.free_channel_id = getattr(settings, 'TELEGRAM_DEGEN_CHANNEL_ID', None)
+        # Use dedicated alpha channels if set, otherwise fall back to main signal channels
+        degen_vip = getattr(settings, 'TELEGRAM_DEGEN_VIP_CHANNEL_ID', None)
+        main_vip = getattr(settings, 'TELEGRAM_VIP_CHANNEL_ID', None)
+        degen_free = getattr(settings, 'TELEGRAM_DEGEN_CHANNEL_ID', None)
+        main_free = getattr(settings, 'TELEGRAM_FREE_CHANNEL_ID', None)
+        
+        self.vip_channel_id = degen_vip or main_vip
+        self.free_channel_id = degen_free or main_free
+        
+        logger.info(f"AlphaPublisher init — bot={'YES' if bot else 'NO'} | vip_channel={'YES' if self.vip_channel_id else 'NO'} (degen={degen_vip}, main={main_vip}) | free_channel={'YES' if self.free_channel_id else 'NO'} (degen={degen_free}, main={main_free})")
         
         if not self.vip_channel_id:
-            logger.warning("TELEGRAM_DEGEN_VIP_CHANNEL_ID not set - alpha VIP publishing disabled")
+            logger.warning("No VIP channel configured for alpha plays (set TELEGRAM_DEGEN_VIP_CHANNEL_ID or TELEGRAM_VIP_CHANNEL_ID)")
         if not self.free_channel_id:
-            logger.warning("TELEGRAM_DEGEN_CHANNEL_ID not set - alpha FREE publishing disabled")
+            logger.warning("No FREE channel configured for alpha plays (set TELEGRAM_DEGEN_CHANNEL_ID or TELEGRAM_FREE_CHANNEL_ID)")
     
     async def publish_alpha_vip(self, message: str) -> Optional[int]:
         """
@@ -38,8 +46,11 @@ class AlphaPublisher:
         Returns:
             Message ID if sent, None otherwise
         """
-        if not self.bot or not self.vip_channel_id:
-            logger.warning("Cannot publish alpha VIP - bot or channel ID missing")
+        if not self.bot:
+            logger.warning("Cannot publish alpha VIP - bot is None (was ChannelPublisher.bot passed to AlphaPublisher init?)")
+            return None
+        if not self.vip_channel_id:
+            logger.warning("Cannot publish alpha VIP - vip_channel_id is None")
             return None
         
         try:
@@ -69,8 +80,11 @@ class AlphaPublisher:
         Returns:
             Message ID if sent, None otherwise
         """
-        if not self.bot or not self.free_channel_id:
-            logger.warning("Cannot publish alpha FREE - bot or channel ID missing")
+        if not self.bot:
+            logger.warning("Cannot publish alpha FREE - bot is None")
+            return None
+        if not self.free_channel_id:
+            logger.warning("Cannot publish alpha FREE - free_channel_id is None")
             return None
         
         try:

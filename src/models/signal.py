@@ -80,6 +80,7 @@ class TradingSignal(BaseModel):
     
     reasoning: str
     chart_url: Optional[str] = None
+    chart_path: Optional[str] = None
     
     status: SignalStatus = SignalStatus.PENDING
     created_at: datetime = Field(default_factory=datetime.utcnow)

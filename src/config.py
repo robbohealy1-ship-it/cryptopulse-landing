@@ -98,8 +98,10 @@ class Settings(BaseSettings):
     REDDIT_USERNAME: Optional[str] = None
     REDDIT_PASSWORD: Optional[str] = None
     
-    # Discord Webhook (optional - for cross-posting to Discord servers)
-    DISCORD_WEBHOOK_URL: Optional[str] = None
+    # Discord Webhooks (optional - for cross-posting to Discord servers)
+    DISCORD_WEBHOOK_URL: Optional[str] = None        # Main signals channel
+    DISCORD_VIP_WEBHOOK_URL: Optional[str] = None    # VIP lounge channel
+    DISCORD_ALPHA_WEBHOOK_URL: Optional[str] = None  # Alpha plays channel
     
     # Generic webhook for IFTTT/Zapier/custom integrations
     MARKETING_WEBHOOK_URL: Optional[str] = None
@@ -156,6 +158,11 @@ class Settings(BaseSettings):
     DEXSCREENER_API_KEY: Optional[str] = None
     BIRDEYE_API_KEY: Optional[str] = None  # For SOL token analytics
     MORALIS_API_KEY: Optional[str] = None  # For ETH on-chain data
+    
+    # DEX Referral Codes (earn % of swap fees when users trade through your links)
+    # Jupiter (Solana): Create at referral.jup.ag - your code = your Solana wallet address
+    # NOTE: Uniswap and 1inch have NO swap referral programs. Only Jupiter works.
+    JUPITER_REFERRAL_CODE: Optional[str] = None
     
     model_config = {
         "env_file": ".env",

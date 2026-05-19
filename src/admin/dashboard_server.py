@@ -8,8 +8,8 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Body
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from src.config import settings
@@ -245,17 +245,16 @@ async def active_signals():
         return {"count": 0, "signals": [], "error": str(e)}
 
 
-# ==================== ALPHA/DEGEN PLAYS ENDPOINTS ====================
+# ==================== ALPHA/DEX PLAYS ENDPOINTS ====================
 
 @app.get("/api/alpha/plays")
 async def alpha_plays():
-    """Get alpha plays (pending, active, or completed)."""
+    """Get alpha/DEX plays (pending, active, or completed)."""
     orch = require_orch()
     try:
         active = []
         pending = []
         
-        # Get active plays from engine
         if orch.alpha_engine:
             for play_id, play in orch.alpha_engine.active_plays.items():
                 active.append({
@@ -264,6 +263,9 @@ async def alpha_plays():
                     "name": play.candidate.name,
                     "chain": play.candidate.chain,
                     "status": play.status,
+                    "trade_type": play.candidate.trade_type,
+                    "risk_level": play.candidate.risk_level,
+                    "time_frame": play.candidate.time_frame,
                     "entry_price": play.entry_price,
                     "current_price": play.current_price,
                     "current_pnl": round(play.current_pnl, 2),
@@ -272,28 +274,53 @@ async def alpha_plays():
                     "take_profit_2": play.take_profit_2,
                     "market_cap": play.candidate.market_cap_usd,
                     "volume_24h": play.candidate.volume_24h,
+                    "liquidity": play.candidate.liquidity_usd,
                     "price_change_24h": round(play.candidate.price_change_24h, 1),
+                    "price_change_1h": round(play.candidate.price_change_1h, 1),
+                    "price_change_5min": round(play.candidate.price_change_5min, 1),
+                    "buy_sell_ratio": round(play.candidate.buy_sell_ratio, 2),
                     "overall_score": round(play.candidate.overall_score, 1),
                     "catalyst": play.candidate.catalyst,
+                    "narrative": play.candidate.narrative,
+                    "why_trending": play.candidate.why_trending,
+                    "short_term_potential": play.candidate.short_term_potential,
+                    "long_term_potential": play.candidate.long_term_potential,
                     "dex_url": play.candidate.dex_url,
                     "chart_url": play.candidate.chart_url,
                     "buy_url": play.candidate.buy_url,
                     "red_flags": play.candidate.red_flags,
+                    "dex_source": play.candidate.dex_source,
                     "approved_at": play.approved_at.isoformat() if play.approved_at else None,
                     "position_size": play.position_size,
                 })
             
-            # Get pending plays
             for symbol, candidate in orch.alpha_engine.pending_plays.items():
                 pending.append({
                     "symbol": symbol,
                     "name": candidate.name,
                     "chain": candidate.chain,
+                    "token_address": candidate.token_address,
+                    "price_usd": candidate.price_usd,
+                    "trade_type": candidate.trade_type,
+                    "risk_level": candidate.risk_level,
+                    "time_frame": candidate.time_frame,
                     "market_cap": candidate.market_cap_usd,
                     "volume_24h": candidate.volume_24h,
+                    "liquidity": candidate.liquidity_usd,
                     "price_change_24h": round(candidate.price_change_24h, 1),
+                    "price_change_1h": round(candidate.price_change_1h, 1),
+                    "buy_sell_ratio": round(candidate.buy_sell_ratio, 2),
                     "overall_score": round(candidate.overall_score, 1),
                     "catalyst": candidate.catalyst,
+                    "narrative": candidate.narrative,
+                    "why_trending": candidate.why_trending,
+                    "short_term_potential": candidate.short_term_potential,
+                    "long_term_potential": candidate.long_term_potential,
+                    "red_flags": candidate.red_flags,
+                    "dex_url": candidate.dex_url,
+                    "chart_url": candidate.chart_url,
+                    "buy_url": candidate.buy_url,
+                    "dex_source": candidate.dex_source,
                 })
         
         return {
@@ -309,7 +336,7 @@ async def alpha_plays():
 
 @app.post("/api/alpha/approve")
 async def approve_alpha(symbol: str):
-    """Approve a pending alpha play from dashboard."""
+    """Approve a pending alpha/DEX play from dashboard."""
     orch = require_orch()
     try:
         if not orch.alpha_engine:
@@ -317,15 +344,15 @@ async def approve_alpha(symbol: str):
         
         play = await orch.alpha_engine.approve_play(symbol)
         if play:
-            # Publish to VIP
             await orch.alpha_engine.publish_to_vip(play)
-            # Try to publish teaser to free
             await orch.alpha_engine.publish_teaser_to_free(play)
             
             return {
                 "success": True,
                 "play_id": play.id,
                 "symbol": symbol,
+                "trade_type": play.candidate.trade_type,
+                "risk_level": play.candidate.risk_level,
                 "entry": play.entry_price,
                 "tp1": play.take_profit_1,
                 "tp2": play.take_profit_2,
@@ -338,18 +365,77 @@ async def approve_alpha(symbol: str):
         return {"success": False, "error": str(e)}
 
 
-@app.post("/api/alpha/trigger")
-async def trigger_alpha_scan():
-    """Manually trigger an alpha play discovery scan."""
+@app.post("/api/alpha/reject")
+async def reject_alpha(symbol: str):
+    """Reject (discard) a pending alpha/DEX play from dashboard."""
     orch = require_orch()
     try:
         if not orch.alpha_engine:
             return {"success": False, "error": "Alpha engine not initialized"}
         
-        # Run scan in background
-        asyncio.create_task(orch._scan_alpha_plays())
+        candidate = orch.alpha_engine.pending_plays.pop(symbol, None)
+        if candidate:
+            # Also mark DB row as rejected so it doesn't reappear on restart
+            if orch.db:
+                try:
+                    orch.db.client.table('alpha_plays').update({'status': 'rejected'}).eq('symbol', symbol).eq('status', 'pending').execute()
+                except Exception:
+                    pass
+            return {"success": True, "symbol": symbol, "message": f"Alpha play {symbol} rejected and removed"}
+        else:
+            return {"success": False, "error": f"Alpha play {symbol} not found in pending queue"}
+    except Exception as e:
+        logger.error(f"Error rejecting alpha play: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/alpha/close")
+async def close_alpha(play_id: str, reason: str = "manual"):
+    """Manually close an active alpha play from dashboard."""
+    orch = require_orch()
+    try:
+        if not orch.alpha_engine:
+            return {"success": False, "error": "Alpha engine not initialized"}
         
-        return {"success": True, "message": "Alpha scan triggered. Check logs for results."}
+        result = await orch.alpha_engine.close_play(play_id, reason=reason)
+        if result:
+            return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} closed"}
+        else:
+            return {"success": False, "error": f"Alpha play {play_id} not found or already closed"}
+    except Exception as e:
+        logger.error(f"Error closing alpha play: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/alpha/update")
+async def update_alpha(play_id: str, updates: dict = Body(...)):
+    """Update an active alpha play's parameters (SL, TP, entry, position size)."""
+    orch = require_orch()
+    try:
+        if not orch.alpha_engine:
+            return {"success": False, "error": "Alpha engine not initialized"}
+        
+        result = await orch.alpha_engine.update_play(play_id, updates)
+        if result:
+            return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} updated", "updates": updates}
+        else:
+            return {"success": False, "error": f"Alpha play {play_id} not found"}
+    except Exception as e:
+        logger.error(f"Error updating alpha play: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/alpha/trigger")
+async def trigger_alpha_scan(chain: str = None):
+    """Manually trigger an alpha/DEX play discovery scan."""
+    orch = require_orch()
+    try:
+        if not orch.alpha_engine:
+            return {"success": False, "error": "Alpha engine not initialized"}
+        
+        asyncio.create_task(orch.alpha_engine.discover_and_create(chain=chain, limit=5))
+        
+        return {"success": True, "message": f"DEX scan triggered (chain={chain or 'all'}). Check logs for results."}
     except Exception as e:
         logger.error(f"Error triggering alpha scan: {e}")
         return {"success": False, "error": str(e)}
@@ -357,7 +443,7 @@ async def trigger_alpha_scan():
 
 @app.get("/api/alpha/stats")
 async def alpha_stats():
-    """Get alpha plays statistics."""
+    """Get alpha/DEX plays statistics."""
     orch = require_orch()
     try:
         if not orch.alpha_engine:
@@ -369,6 +455,13 @@ async def alpha_stats():
                 "enabled": False
             }
         
+        # Count trade types in pending
+        trade_types = {}
+        if orch.alpha_engine.pending_plays:
+            for c in orch.alpha_engine.pending_plays.values():
+                tt = c.trade_type or 'unknown'
+                trade_types[tt] = trade_types.get(tt, 0) + 1
+        
         return {
             "vip_daily_count": orch.alpha_engine.vip_count_today,
             "free_weekly_count": orch.alpha_engine.free_count_this_week,
@@ -376,11 +469,237 @@ async def alpha_stats():
             "free_weekly_limit": orch.alpha_engine.free_weekly_limit,
             "active_plays": len(orch.alpha_engine.active_plays),
             "pending_plays": len(orch.alpha_engine.pending_plays),
+            "trade_type_breakdown": trade_types,
             "enabled": True
         }
     except Exception as e:
         logger.error(f"Error getting alpha stats: {e}")
         return {"error": str(e)}
+
+
+@app.get("/api/alpha/performance")
+async def alpha_performance(days: int = 90):
+    """Get alpha play performance analytics from DB."""
+    orch = require_orch()
+    try:
+        plays = await orch.db.get_alpha_plays(status=None, limit=500)
+        if not plays:
+            return {
+                "total_plays": 0, "win_rate": 0, "big_win_rate": 0,
+                "avg_pnl": 0, "avg_hold_hours": 0, "best_play": None, "worst_play": None,
+                "by_chain": {}, "by_trade_type": {}, "by_risk": {},
+                "history": [], "active": []
+            }
+        
+        from datetime import datetime
+        import json
+        
+        total = len(plays)
+        wins = 0
+        big_wins = 0
+        losses = 0
+        pnls = []
+        hold_hours = []
+        history = []
+        active_plays = []
+        by_chain = {}
+        by_trade_type = {}
+        by_risk = {}
+        best = None
+        worst = None
+        
+        for p in plays:
+            status = p.get('status', 'active')
+            
+            # Parse candidate_data for extra metadata
+            meta = {}
+            cd = p.get('candidate_data')
+            if cd:
+                try:
+                    cdict = json.loads(cd) if isinstance(cd, str) else cd
+                    meta = cdict.pop('__play_meta__', {}) if isinstance(cdict, dict) else {}
+                except Exception:
+                    pass
+            
+            entry = float(meta.get('entry_price') or p.get('entry_price') or 0)
+            current_pnl = float(meta.get('current_pnl') or p.get('current_pnl') or 0)
+            chain = p.get('chain', 'unknown')
+            trade_type = p.get('trade_type', 'unknown')
+            risk_level = p.get('risk_level', 'unknown')
+            symbol = p.get('symbol', 'UNKNOWN')
+            
+            # Determine outcome
+            outcome = 'active'
+            pnl = current_pnl
+            if status == 'tp2_hit':
+                outcome = 'tp2_hit'
+                wins += 1
+                big_wins += 1
+                # Estimate PnL from TP2
+                tp2 = float(meta.get('take_profit_2') or p.get('take_profit_2') or 0)
+                if entry > 0 and tp2 > 0:
+                    pnl = round(((tp2 - entry) / entry) * 100, 2)
+            elif status == 'tp1_hit':
+                outcome = 'tp1_hit'
+                wins += 1
+                tp1 = float(meta.get('take_profit_1') or p.get('take_profit_1') or 0)
+                if entry > 0 and tp1 > 0:
+                    pnl = round(((tp1 - entry) / entry) * 100, 2)
+            elif status == 'sl_hit':
+                outcome = 'sl_hit'
+                losses += 1
+                sl = float(meta.get('stop_loss') or p.get('stop_loss') or 0)
+                if entry > 0 and sl > 0:
+                    pnl = round(((sl - entry) / entry) * 100, 2)
+            elif status == 'closed':
+                if pnl >= 0:
+                    outcome = 'win'
+                    wins += 1
+                else:
+                    outcome = 'loss'
+                    losses += 1
+            elif status == 'active' or status == 'pending':
+                active_plays.append({
+                    "symbol": symbol,
+                    "chain": chain,
+                    "status": status,
+                    "entry_price": entry,
+                    "current_pnl": pnl,
+                    "trade_type": trade_type,
+                    "risk_level": risk_level,
+                    "approved_at": meta.get('approved_at') or (p.get('approved_at') if isinstance(p.get('approved_at'), str) else None),
+                })
+                continue
+            
+            # Hold time calculation
+            approved_str = meta.get('approved_at') or (p.get('approved_at') if isinstance(p.get('approved_at'), str) else None)
+            closed_str = meta.get('closed_at') or (p.get('closed_at') if isinstance(p.get('closed_at'), str) else None)
+            hold_h = None
+            if approved_str and closed_str:
+                try:
+                    a = datetime.fromisoformat(approved_str.replace('Z', '+00:00'))
+                    c = datetime.fromisoformat(closed_str.replace('Z', '+00:00'))
+                    hold_h = round((c - a).total_seconds() / 3600, 1)
+                    hold_hours.append(hold_h)
+                except Exception:
+                    pass
+            
+            # Track PnL
+            pnls.append(pnl)
+            
+            # Best / Worst
+            if best is None or pnl > best['pnl']:
+                best = {"symbol": symbol, "pnl": pnl, "outcome": outcome, "chain": chain}
+            if worst is None or pnl < worst['pnl']:
+                worst = {"symbol": symbol, "pnl": pnl, "outcome": outcome, "chain": chain}
+            
+            # Aggregate by dimensions
+            def _agg(bucket, key):
+                entry = bucket.setdefault(key, {"count": 0, "wins": 0, "losses": 0, "pnl_sum": 0})
+                entry["count"] += 1
+                if outcome in ('tp1_hit', 'tp2_hit', 'win'):
+                    entry["wins"] += 1
+                elif outcome in ('sl_hit', 'loss'):
+                    entry["losses"] += 1
+                entry["pnl_sum"] += pnl
+            
+            _agg(by_chain, chain)
+            _agg(by_trade_type, trade_type)
+            _agg(by_risk, risk_level)
+            
+            history.append({
+                "symbol": symbol,
+                "chain": chain,
+                "outcome": outcome,
+                "pnl": pnl,
+                "entry_price": entry,
+                "hold_hours": hold_h,
+                "trade_type": trade_type,
+                "risk_level": risk_level,
+                "approved_at": approved_str,
+                "closed_at": closed_str,
+            })
+        
+        closed_count = wins + losses
+        return {
+            "total_plays": total,
+            "closed_count": closed_count,
+            "win_rate": round((wins / closed_count) * 100, 1) if closed_count else 0,
+            "big_win_rate": round((big_wins / closed_count) * 100, 1) if closed_count else 0,
+            "avg_pnl": round(sum(pnls) / len(pnls), 2) if pnls else 0,
+            "avg_hold_hours": round(sum(hold_hours) / len(hold_hours), 1) if hold_hours else 0,
+            "best_play": best,
+            "worst_play": worst,
+            "by_chain": {k: {"count": v["count"], "win_rate": round((v["wins"]/v["count"])*100,1) if v["count"] else 0, "avg_pnl": round(v["pnl_sum"]/v["count"],2) if v["count"] else 0} for k,v in by_chain.items()},
+            "by_trade_type": {k: {"count": v["count"], "win_rate": round((v["wins"]/v["count"])*100,1) if v["count"] else 0, "avg_pnl": round(v["pnl_sum"]/v["count"],2) if v["count"] else 0} for k,v in by_trade_type.items()},
+            "by_risk": {k: {"count": v["count"], "win_rate": round((v["wins"]/v["count"])*100,1) if v["count"] else 0, "avg_pnl": round(v["pnl_sum"]/v["count"],2) if v["count"] else 0} for k,v in by_risk.items()},
+            "history": history,
+            "active": active_plays,
+        }
+    except Exception as e:
+        logger.error(f"Error getting alpha performance: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/dex/opportunities")
+async def dex_opportunities(chain: str = None, trade_type: str = None):
+    """
+    Get current DEX opportunities with filtering.
+    Returns pending alpha plays filtered by chain and trade type.
+    """
+    orch = require_orch()
+    try:
+        if not orch.alpha_engine:
+            return {"opportunities": [], "count": 0, "enabled": False}
+        
+        opportunities = []
+        for symbol, candidate in orch.alpha_engine.pending_plays.items():
+            # Filter by chain
+            if chain and candidate.chain != chain:
+                continue
+            # Filter by trade type
+            if trade_type and candidate.trade_type != trade_type:
+                continue
+            
+            opportunities.append({
+                "symbol": symbol,
+                "name": candidate.name,
+                "chain": candidate.chain,
+                "trade_type": candidate.trade_type,
+                "risk_level": candidate.risk_level,
+                "time_frame": candidate.time_frame,
+                "price_usd": candidate.price_usd,
+                "market_cap": candidate.market_cap_usd,
+                "volume_24h": candidate.volume_24h,
+                "liquidity": candidate.liquidity_usd,
+                "price_change_24h": round(candidate.price_change_24h, 1),
+                "price_change_1h": round(candidate.price_change_1h, 1),
+                "buy_sell_ratio": round(candidate.buy_sell_ratio, 2),
+                "overall_score": round(candidate.overall_score, 1),
+                "catalyst": candidate.catalyst,
+                "narrative": candidate.narrative,
+                "why_trending": candidate.why_trending,
+                "short_term_potential": candidate.short_term_potential,
+                "long_term_potential": candidate.long_term_potential,
+                "red_flags": candidate.red_flags,
+                "dex_url": candidate.dex_url,
+                "chart_url": candidate.chart_url,
+                "buy_url": candidate.buy_url,
+                "dex_source": candidate.dex_source,
+            })
+        
+        # Sort by overall score
+        opportunities.sort(key=lambda x: x['overall_score'], reverse=True)
+        
+        return {
+            "opportunities": opportunities,
+            "count": len(opportunities),
+            "filters": {"chain": chain, "trade_type": trade_type},
+            "enabled": True
+        }
+    except Exception as e:
+        logger.error(f"Error getting DEX opportunities: {e}")
+        return {"opportunities": [], "count": 0, "error": str(e)}
 
 
 # ==================== SIGNALS ====================
@@ -390,16 +709,31 @@ async def signal_action(action: SignalAction):
     """Approve or reject a pending signal from the dashboard."""
     orch = require_orch()
     signal = orch.admin_bot.pending_signals.get(action.signal_id)
+    
+    # If not in memory, try loading from database
+    if not signal:
+        try:
+            all_signals = await orch.db.get_pending_signals()
+            for s in all_signals:
+                if str(s.id) == str(action.signal_id):
+                    signal = s
+                    orch.admin_bot.pending_signals[signal.id] = signal
+                    break
+        except Exception as e:
+            logger.warning(f"Could not load signal from DB: {e}")
+    
     if not signal:
         raise HTTPException(status_code=404, detail="Signal not found")
     
     if action.action == "approve":
+        if action.signal_id in orch.admin_bot.pending_signals:
+            del orch.admin_bot.pending_signals[action.signal_id]
         await orch.on_signal_approved(signal)
-        del orch.admin_bot.pending_signals[action.signal_id]
         return {"success": True, "message": f"Signal {action.signal_id} approved"}
     elif action.action == "reject":
+        if action.signal_id in orch.admin_bot.pending_signals:
+            del orch.admin_bot.pending_signals[action.signal_id]
         await orch.on_signal_rejected(signal)
-        del orch.admin_bot.pending_signals[action.signal_id]
         return {"success": True, "message": f"Signal {action.signal_id} rejected"}
     else:
         raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
@@ -587,18 +921,77 @@ async def trigger_campaign(campaign: CampaignTrigger):
     orch = require_orch()
     try:
         if campaign.campaign_type == "fomo":
-            # Send FOMO to free channel
-            text = campaign.message or "🔥 VIP members just hit targets. Full signals exclusively in VIP."
-            await orch.channel_publisher.send_free_channel_message(text)
-            return {"success": True, "type": "fomo"}
+            # Build FOMO with real stats — active signals + recent wins
+            since = datetime.utcnow() - timedelta(days=7)
+            result = orch.db.client.table('signals').select('*').gte('created_at', since.isoformat()).execute()
+            rows = result.data if hasattr(result, 'data') else []
+            
+            active = [r for r in rows if r.get('status') == 'active']
+            closed = [r for r in rows if r.get('status') == 'closed']
+            wins = [r for r in closed if (r.get('pnl_percent') or 0) > 0]
+            
+            # Find best recent trade
+            best = max(wins, key=lambda x: x.get('pnl_percent', 0) or 0) if wins else None
+            
+            text = "🔥 <b>VIP JUST BANKED IT!</b>\n\n"
+            
+            if best:
+                text += (
+                    f"📊 <b>{best.get('symbol', 'Unknown')}</b> hit TP — "
+                    f"<b>+{best.get('pnl_percent', 0):.1f}%</b>\n"
+                )
+            
+            if active:
+                text += f"🎯 {len(active)} active signal{'s' if len(active) > 1 else ''} running right now\n"
+            
+            if wins:
+                total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in wins)
+                text += f"💰 {len(wins)} winner{'s' if len(wins) > 1 else ''} this week (+{total_pnl:.1f}%)\n"
+            
+            text += (
+                f"\nWhile free channel watched the teaser...\n"
+                f"VIP members executed the full plan.\n\n"
+                f"💎 <a href='https://t.me/{settings.TELEGRAM_VIP_BOT_USERNAME}'>Join VIP for the next one</a>"
+            )
+            
+            target_id = settings.TELEGRAM_FREE_CHANNEL_ID
+            await orch.channel_publisher.bot.send_message(
+                chat_id=target_id,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            return {"success": True, "type": "fomo", "active_signals": len(active), "recent_wins": len(wins)}
         
         elif campaign.campaign_type == "social_proof":
-            stats = await orch.db.get_weekly_stats()
+            # Use same DB query as Performance page for accurate stats
+            since = datetime.utcnow() - timedelta(days=7)
+            result = orch.db.client.table('signals').select('*').gte('created_at', since.isoformat()).execute()
+            rows = result.data if hasattr(result, 'data') else []
+            total = len(rows)
+            wins = sum(1 for r in rows if (r.get('pnl_percent') or 0) > 0)
+            losses = sum(1 for r in rows if (r.get('pnl_percent') or 0) < 0)
+            win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+            total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in rows)
+            
+            # Fallback to all-time if week is empty
+            if total == 0:
+                result_all = orch.db.client.table('signals').select('*').execute()
+                rows_all = result_all.data if hasattr(result_all, 'data') else []
+                total = len(rows_all)
+                wins = sum(1 for r in rows_all if (r.get('pnl_percent') or 0) > 0)
+                losses = sum(1 for r in rows_all if (r.get('pnl_percent') or 0) < 0)
+                win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+                total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in rows_all)
+                period_label = "All Time"
+            else:
+                period_label = "This Week"
+            
             text = (
-                f"📊 <b>This Week's Results</b>\n\n"
-                f"Signals: {stats.get('total_signals', 0)}\n"
-                f"Win Rate: {stats.get('win_rate', 0):.0f}%\n"
-                f"Total P&L: +{stats.get('total_pnl', 0):.1f}%\n\n"
+                f"📊 <b>{period_label}'s Results</b>\n\n"
+                f"Signals: {total}\n"
+                f"Win Rate: {win_rate:.1f}%\n"
+                f"Total P&L: {total_pnl:+.1f}%\n\n"
                 f"💎 See full plans in VIP"
             )
             await orch.channel_publisher.send_free_channel_message(text)
@@ -641,9 +1034,18 @@ async def trigger_scheduled_job(job: ScheduleJob):
         elif job.job_type == "weekly":
             await orch._post_weekly_report()
             return {"success": True, "job": "weekly_report"}
-        elif job.job_type == "scan":
+        elif job.job_type == "scan" or job.job_type == "scan_15m":
             await orch.scan_15m()
             return {"success": True, "job": "scan_15m"}
+        elif job.job_type == "scan_1h":
+            await orch.scan_1h()
+            return {"success": True, "job": "scan_1h"}
+        elif job.job_type == "scan_4h":
+            await orch.scan_4h()
+            return {"success": True, "job": "scan_4h"}
+        elif job.job_type == "scan_1d" or job.job_type == "scan_daily":
+            await orch.scan_daily()
+            return {"success": True, "job": "scan_daily"}
         else:
             raise HTTPException(status_code=400, detail="Unknown job type")
     except Exception as e:
@@ -752,6 +1154,49 @@ async def signal_performance(days: int = Query(30, ge=1, le=365)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/marketing/send-performance")
+async def send_performance_to_channel(days: int = Query(7, ge=1, le=365), channel: str = Query("free")):
+    """Send current performance stats to a Telegram channel (free or vip)."""
+    orch = require_orch()
+    try:
+        # Re-use the same query as the Performance page
+        since = datetime.utcnow() - timedelta(days=days)
+        result = orch.db.client.table('signals').select('*').gte('created_at', since.isoformat()).execute()
+        rows = result.data if hasattr(result, 'data') else []
+        
+        total = len(rows)
+        wins = sum(1 for r in rows if (r.get('pnl_percent') or 0) > 0)
+        losses = sum(1 for r in rows if (r.get('pnl_percent') or 0) < 0)
+        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+        total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in rows)
+        
+        period_label = f"Last {days} Days" if days != 7 else "This Week"
+        if days >= 365:
+            period_label = "All Time"
+        
+        text = (
+            f"📊 <b>{period_label}'s Results</b>\n\n"
+            f"Signals: {total}\n"
+            f"Win Rate: {win_rate:.1f}%\n"
+            f"Total P&L: {total_pnl:+.1f}%\n\n"
+            f"💎 See full plans in VIP"
+        )
+        
+        target_id = settings.TELEGRAM_VIP_CHANNEL_ID if channel == 'vip' else settings.TELEGRAM_FREE_CHANNEL_ID
+        await orch.channel_publisher.bot.send_message(
+            chat_id=target_id,
+            text=text,
+            parse_mode='HTML'
+        )
+        
+        logger.info(f"Performance stats sent to {channel} channel: {total} signals, {win_rate:.1f}% WR")
+        return {"success": True, "channel": channel, "stats": {"total": total, "win_rate": win_rate, "total_pnl": total_pnl}}
+        
+    except Exception as e:
+        logger.error(f"Send performance error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== SIGNALS PRO ====================
 
 @app.get("/api/signals/{signal_id}")
@@ -783,7 +1228,7 @@ async def bulk_signal_action(bulk: BulkSignalAction):
         for sid in bulk.signal_ids:
             try:
                 if bulk.action == "approve":
-                    signal = orch.admin_bot.pending_signals.get(sid)
+                    signal = orch.admin_bot.pending_signals.pop(sid, None)
                     if signal:
                         await orch.on_signal_approved(signal)
                         results["approved"].append(sid)
@@ -989,6 +1434,150 @@ class DmBlast(BaseModel):
     filter_status: Optional[str] = None  # active, expired, trial, or None for all
 
 
+class AddBetaTester(BaseModel):
+    telegram_user_id: str
+    username: Optional[str] = None
+    days: int = 30  # Free access duration
+    notes: Optional[str] = None
+
+
+@app.post("/api/subscribers/beta")
+async def add_beta_tester(tester: AddBetaTester):
+    """Give a user free VIP access (beta/trial)."""
+    orch = require_orch()
+    try:
+        from datetime import datetime, timedelta
+        
+        expiry = datetime.utcnow() + timedelta(days=tester.days)
+        
+        success = await orch.db.save_subscriber(
+            user_id=tester.telegram_user_id,
+            username=tester.username or f"beta_{tester.telegram_user_id[:8]}",
+            tier="beta",
+            extra_data={
+                "status": "trial",
+                "trial_ends_at": expiry.isoformat(),
+                "notes": tester.notes or "Beta tester - free access",
+                "telegram_user_id": tester.telegram_user_id,
+                "created_at": datetime.utcnow().isoformat()
+            }
+        )
+        
+        if success:
+            # Send welcome message from VIP bot so user has direct access
+            vip_bot_username = getattr(settings, 'TELEGRAM_VIP_BOT_USERNAME', 'CryptoPulseVIPBot')
+            welcome_text = (
+                f"🎉 <b>Welcome to Crypto Pulse VIP!</b>\n\n"
+                f"You now have <b>FREE VIP access</b> for {tester.days} days.\n\n"
+                f"✅ Full signal access\n"
+                f"✅ Real-time updates\n"
+                f"✅ Alpha plays (when available)\n\n"
+                f"⏰ Expires: {expiry.strftime('%Y-%m-%d')}\n\n"
+                f"👇 <b>Tap below to open the VIP bot and join the channel:</b>\n"
+                f"https://t.me/{vip_bot_username}?start=access"
+            )
+            sent = False
+            # Try VIP bot first (better UX - same bot they'll use)
+            if orch.vip_bot and orch.vip_bot.app and orch.vip_bot.app.bot:
+                try:
+                    await orch.vip_bot.app.bot.send_message(
+                        chat_id=int(tester.telegram_user_id),
+                        text=welcome_text,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                    sent = True
+                except Exception as e:
+                    logger.warning(f"VIP bot welcome failed, falling back to admin: {e}")
+            # Fall back to admin bot
+            if not sent and orch.admin_bot and orch.admin_bot.app and orch.admin_bot.app.bot:
+                try:
+                    await orch.admin_bot.app.bot.send_message(
+                        chat_id=int(tester.telegram_user_id),
+                        text=welcome_text,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not send welcome DM to beta user: {e}")
+            
+            return {
+                "success": True,
+                "message": f"Beta access granted for {tester.days} days",
+                "expires": expiry.strftime('%Y-%m-%d')
+            }
+        else:
+            return {"success": False, "error": "Failed to save subscriber"}
+            
+    except Exception as e:
+        logger.error(f"Add beta tester error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class UpdateSubscriber(BaseModel):
+    trial_ends_at: Optional[str] = None  # ISO date string
+    notes: Optional[str] = None
+    tier: Optional[str] = None
+    status: Optional[str] = None
+
+
+@app.post("/api/subscribers/{user_id}/update")
+async def update_subscriber_endpoint(user_id: str, update: UpdateSubscriber):
+    """Update subscriber details (trial length, notes, tier, status)."""
+    orch = require_orch()
+    try:
+        update_data = {}
+        if update.trial_ends_at:
+            update_data['trial_ends_at'] = update.trial_ends_at
+        if update.notes is not None:
+            update_data['notes'] = update.notes
+        if update.tier:
+            update_data['tier'] = update.tier
+        if update.status:
+            update_data['status'] = update.status
+        
+        if not update_data:
+            return {"success": False, "error": "No fields to update"}
+        
+        success = await orch.db.update_subscriber(user_id, update_data)
+        
+        if success:
+            return {"success": True, "message": "Subscriber updated", "updated": update_data}
+        else:
+            return {"success": False, "error": "Failed to update subscriber"}
+            
+    except Exception as e:
+        logger.error(f"Update subscriber error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/subscribers/{user_id}/cancel")
+async def cancel_subscriber_endpoint(user_id: str):
+    """Cancel/deactivate a subscriber."""
+    orch = require_orch()
+    try:
+        success = await orch.db.deactivate_subscriber(user_id)
+        
+        if success:
+            # Notify user if possible
+            try:
+                await orch.admin_bot.app.bot.send_message(
+                    chat_id=int(user_id),
+                    text="⚠️ Your VIP access has been cancelled. Contact admin if this was a mistake.",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+            
+            return {"success": True, "message": "Subscriber cancelled"}
+        else:
+            return {"success": False, "error": "Failed to cancel subscriber"}
+            
+    except Exception as e:
+        logger.error(f"Cancel subscriber error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/subscribers/blast")
 async def subscriber_dm_blast(blast: DmBlast):
     """Send a DM blast to VIP subscribers."""
@@ -1051,6 +1640,13 @@ async def subscriber_stats():
 
 
 # ==================== Static Files ====================
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Serve favicon - inline SVG to avoid 404"""
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2338bdf8'/><path d='M16 8L22 16L16 24L10 16L16 8Z' fill='white'/></svg>"
+    return Response(content=svg, media_type="image/svg+xml")
+
 
 @app.get("/")
 async def root():

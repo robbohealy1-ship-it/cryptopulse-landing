@@ -22,15 +22,23 @@ class ViralGrowthEngine:
         self.channel_publisher = channel_publisher
         
         # Free platforms you can post to
+        has_reddit_creds = bool(
+            getattr(settings, 'REDDIT_CLIENT_ID', None) and
+            getattr(settings, 'REDDIT_CLIENT_SECRET', None) and
+            getattr(settings, 'REDDIT_USERNAME', None)
+        )
         self.platforms = {
-            'reddit': False,  # Will enable with Reddit API
-            'telegram_groups': True,  # Cross-post to other crypto groups
-            'discord_servers': True,  # Multiple Discord servers
-            'twitter_threads': False,  # Twitter API (when you upgrade)
-            'crypto_forums': True,  # BitcoinTalk, etc.
+            'reddit': has_reddit_creds,  # Auto-enable when credentials exist
+            'telegram_groups': True,
+            'discord_servers': True,
+            'twitter_threads': False,
+            'crypto_forums': True,
         }
         
-        logger.info("🚀 Viral Growth Engine initialized")
+        if has_reddit_creds:
+            logger.info("🚀 Viral Growth Engine initialized (Reddit ENABLED)")
+        else:
+            logger.info("🚀 Viral Growth Engine initialized (Reddit disabled — add REDDIT_CLIENT_ID to .env)")
     
     # ==================== REDDIT MARKETING ====================
     
@@ -49,6 +57,8 @@ class ViralGrowthEngine:
             reddit = praw.Reddit(
                 client_id=getattr(settings, 'REDDIT_CLIENT_ID', None),
                 client_secret=getattr(settings, 'REDDIT_CLIENT_SECRET', None),
+                username=getattr(settings, 'REDDIT_USERNAME', None),
+                password=getattr(settings, 'REDDIT_PASSWORD', None),
                 user_agent='CryptoPulseSignals/1.0'
             )
             

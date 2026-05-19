@@ -1,6 +1,7 @@
 from supabase import create_client, Client
 from typing import List, Optional, Dict
 from datetime import datetime
+from decimal import Decimal
 import uuid
 import re
 from src.config import settings
@@ -475,23 +476,68 @@ class SupabaseClient:
             if stripe_customer_id:
                 data['stripe_customer_id'] = stripe_customer_id
             
-            # Default fields
-            if 'subscribed_at' not in data:
-                data['subscribed_at'] = datetime.utcnow().isoformat()
-            if 'active' not in data:
-                data['active'] = True
+            # Build minimal data with only guaranteed columns
+            minimal_data = {
+                'user_id': data.get('user_id') or user_id,
+                'username': data.get('username') or username,
+                'tier': data.get('tier') or tier or 'monthly'
+            }
             
-            self.client.table('subscribers').upsert(data).execute()
-            logger.info(f"Subscriber {data.get('username', user_id)} saved/updated")
-            return True
+            # Try to add optional fields if they exist
+            for field in ['subscribed_at', 'status', 'notes', 'trial_ends_at', 
+                          'telegram_user_id', 'created_at', 'stripe_customer_id']:
+                if field in data and data[field] is not None:
+                    minimal_data[field] = data[field]
+            
+            # Add defaults
+            if 'subscribed_at' not in minimal_data:
+                minimal_data['subscribed_at'] = datetime.utcnow().isoformat()
+            if 'status' not in minimal_data:
+                minimal_data['status'] = 'active'
+            
+            # Remove legacy field if present
+            minimal_data.pop('active', None)
+            
+            # Try to save - if columns missing, Supabase will ignore unknown fields if we use the right approach
+            try:
+                self.client.table('subscribers').upsert(minimal_data).execute()
+                logger.info(f"Subscriber {minimal_data.get('username', user_id)} saved/updated")
+                return True
+            except Exception as schema_error:
+                # Fallback: save with only guaranteed columns
+                if 'PGRST204' in str(schema_error):
+                    logger.warning(f"Column missing, saving with core fields only")
+                    core_data = {
+                        'user_id': minimal_data.get('user_id'),
+                        'username': minimal_data.get('username'),
+                        'tier': minimal_data.get('tier', 'monthly')
+                    }
+                    if minimal_data.get('subscribed_at'):
+                        core_data['subscribed_at'] = minimal_data['subscribed_at']
+                    
+                    self.client.table('subscribers').upsert(core_data).execute()
+                    logger.info(f"Subscriber saved with core fields")
+                    return True
+                raise
             
         except Exception as e:
-            logger.error(f"Error saving subscriber: {e}")
+            error_msg = str(e)
+            if 'PGRST204' in error_msg or 'does not exist' in error_msg:
+                logger.error(f"❌ SUBSCRIBERS TABLE BROKEN: {error_msg}")
+                logger.error("👉 Run this SQL in Supabase to fix: migrations/create_subscribers_table.sql")
+            else:
+                logger.error(f"Error saving subscriber: {e}")
             return False
     
     async def get_active_subscribers(self, tier: str = None) -> List[Dict]:
         try:
-            query = self.client.table('subscribers').select('*').eq('active', True)
+            query = self.client.table('subscribers').select('*')
+            
+            # Try filtering by status, fall back to all if column missing
+            try:
+                query = query.eq('status', 'active')
+            except Exception:
+                pass  # status column may not exist
             
             if tier:
                 query = query.eq('tier', tier)
@@ -516,10 +562,25 @@ class SupabaseClient:
     
     async def deactivate_subscriber(self, user_id: str) -> bool:
         try:
-            self.client.table('subscribers').update({
-                'active': False,
-                'cancelled_at': datetime.utcnow().isoformat()
-            }).eq('user_id', user_id).execute()
+            update_data = {}
+            
+            # Try to update status if column exists
+            try:
+                self.client.table('subscribers').update({'status': 'cancelled'}).eq('user_id', user_id).execute()
+                update_data['status'] = 'cancelled'
+            except Exception:
+                # status column may not exist, try deleting instead
+                try:
+                    self.client.table('subscribers').delete().eq('user_id', user_id).execute()
+                    logger.info(f"Subscriber {user_id} deleted (no status column)")
+                    return True
+                except Exception:
+                    pass
+            
+            # Try to add cancelled_at
+            if update_data:
+                update_data['cancelled_at'] = datetime.utcnow().isoformat()
+                self.client.table('subscribers').update(update_data).eq('user_id', user_id).execute()
             
             logger.info(f"Subscriber {user_id} deactivated")
             return True
@@ -568,7 +629,7 @@ class SupabaseClient:
             
             result = self.client.table('subscribers').select('*')\
                 .eq('tier', 'trial')\
-                .eq('active', True)\
+                .eq('status', 'active')\
                 .gte('trial_ends_at', now.isoformat())\
                 .lte('trial_ends_at', expiry_window.isoformat())\
                 .execute()
@@ -586,7 +647,7 @@ class SupabaseClient:
             
             result = self.client.table('subscribers').select('*')\
                 .eq('tier', 'trial')\
-                .eq('active', True)\
+                .eq('status', 'active')\
                 .lt('trial_ends_at', now.isoformat())\
                 .execute()
             
@@ -679,44 +740,176 @@ class SupabaseClient:
 
     # ==================== ALPHA/DEGEN PLAYS ====================
 
-    async def save_alpha_play(self, play_data: dict) -> bool:
-        """Save an alpha play to the database"""
+    def _serialize_for_json(self, obj):
+        """Helper to serialize dataclasses/datetimes/Decimals for JSON storage."""
+        if hasattr(obj, '__dataclass_fields__'):
+            result = {}
+            for k in obj.__dataclass_fields__:
+                v = getattr(obj, k)
+                result[k] = self._serialize_for_json(v)
+            return result
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
+        if isinstance(obj, list):
+            return [self._serialize_for_json(i) for i in obj]
+        if isinstance(obj, dict):
+            return {k: self._serialize_for_json(v) for k, v in obj.items()}
+        return obj
+    
+    def _json_default(self, obj):
+        """Fallback JSON serializer for edge cases."""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    async def save_alpha_play(self, play_data) -> bool:
+        """Save an alpha play to the database. Accepts dict or ActiveAlphaPlay dataclass."""
         try:
-            data = {
-                'id': play_data.get('id', str(uuid.uuid4())),
-                'symbol': play_data.get('symbol'),
-                'name': play_data.get('name'),
-                'chain': play_data.get('chain'),
-                'token_address': play_data.get('token_address'),
+            # Helper to safely get value from dict or dataclass (with nested candidate fallback)
+            def _get(field, default=None):
+                if isinstance(play_data, dict):
+                    return play_data.get(field, default)
+                val = getattr(play_data, field, None)
+                if val is not None:
+                    return val
+                candidate = getattr(play_data, 'candidate', None)
+                if candidate is not None:
+                    return getattr(candidate, field, default)
+                return default
+            
+            # Serialize full candidate as JSON for reconstruction on restart
+            # Also embed play-level metadata (approved_at, closed_at, etc.) since
+            # some DB schemas don't have these as top-level columns
+            import json
+            candidate = _get('candidate')
+            candidate_dict = None
+            if candidate is not None:
+                candidate_dict = self._serialize_for_json(candidate)
+            elif isinstance(play_data, dict) and 'candidate_data' in play_data:
+                cd = play_data['candidate_data']
+                candidate_dict = json.loads(cd) if isinstance(cd, str) else cd
+            
+            # Embed play metadata into candidate_data so we don't need extra DB columns
+            if candidate_dict is not None:
+                play_meta = {}
+                for meta_field in ['approved_at', 'closed_at', 'tp1_hit_at', 'tp2_hit_at', 'sl_hit_at',
+                                    'entry_price', 'stop_loss', 'take_profit_1', 'take_profit_2',
+                                    'position_size', 'current_price', 'current_pnl',
+                                    'vip_message_id', 'free_message_id', 'notes']:
+                    mv = _get(meta_field)
+                    if mv is not None:
+                        if isinstance(mv, datetime):
+                            play_meta[meta_field] = mv.isoformat()
+                        elif isinstance(mv, Decimal):
+                            play_meta[meta_field] = float(mv)
+                        else:
+                            play_meta[meta_field] = mv
+                if play_meta:
+                    candidate_dict['__play_meta__'] = play_meta
+                candidate_data = json.dumps(candidate_dict, default=self._json_default)
+            else:
+                candidate_data = None
+            
+            # Build raw data dict with ALL possible fields
+            raw_data = {
+                'id': _get('id', str(uuid.uuid4())),
+                'symbol': _get('symbol'),
+                'name': _get('name'),
+                'chain': _get('chain'),
+                'token_address': _get('token_address'),
+                'pair_address': _get('pair_address'),
                 'play_type': 'alpha',
-                'status': play_data.get('status', 'active'),
-                'entry_price': play_data.get('entry_price'),
-                'stop_loss': play_data.get('stop_loss'),
-                'take_profit_1': play_data.get('take_profit_1'),
-                'take_profit_2': play_data.get('take_profit_2'),
-                'current_price': play_data.get('current_price'),
-                'current_pnl': play_data.get('current_pnl'),
-                'market_cap': play_data.get('market_cap'),
-                'volume_24h': play_data.get('volume_24h'),
-                'price_change_24h': play_data.get('price_change_24h'),
-                'overall_score': play_data.get('overall_score'),
-                'catalyst': play_data.get('catalyst'),
-                'dex_url': play_data.get('dex_url'),
-                'chart_url': play_data.get('chart_url'),
-                'buy_url': play_data.get('buy_url'),
-                'position_size': play_data.get('position_size'),
-                'red_flags': play_data.get('red_flags'),
-                'created_at': datetime.utcnow().isoformat(),
-                'approved_at': play_data.get('approved_at'),
-                'closed_at': play_data.get('closed_at'),
+                'status': _get('status', 'active'),
+                'entry_price': _get('entry_price'),
+                'stop_loss': _get('stop_loss'),
+                'take_profit_1': _get('take_profit_1'),
+                'take_profit_2': _get('take_profit_2'),
+                'current_price': _get('current_price'),
+                'current_pnl': _get('current_pnl'),
+                'price_usd': _get('price_usd'),
+                'market_cap': _get('market_cap'),
+                'volume_24h': _get('volume_24h'),
+                'liquidity_usd': _get('liquidity_usd'),
+                'price_change_24h': _get('price_change_24h'),
+                'price_change_1h': _get('price_change_1h'),
+                'price_change_5min': _get('price_change_5min'),
+                'holders': _get('holders'),
+                'transactions_24h': _get('transactions_24h'),
+                'buy_sell_ratio': _get('buy_sell_ratio'),
+                'overall_score': _get('overall_score'),
+                'trade_type': _get('trade_type'),
+                'time_frame': _get('time_frame'),
+                'risk_level': _get('risk_level'),
+                'narrative': _get('narrative'),
+                'why_trending': _get('why_trending'),
+                'short_term_potential': _get('short_term_potential'),
+                'long_term_potential': _get('long_term_potential'),
+                'catalyst': _get('catalyst'),
+                'dex_url': _get('dex_url'),
+                'chart_url': _get('chart_url'),
+                'buy_url': _get('buy_url'),
+                'position_size': _get('position_size'),
+                'red_flags': _get('red_flags'),
+                'dex_source': _get('dex_source'),
+                'created_at': _get('created_at') or datetime.utcnow().isoformat(),
+                'vip_message_id': _get('vip_message_id'),
+                'free_message_id': _get('free_message_id'),
             }
             
+            # Deep serialize everything and strip None values to avoid missing-column errors
+            def _deep_serialize(obj):
+                if isinstance(obj, datetime):
+                    return obj.isoformat()
+                if isinstance(obj, Decimal):
+                    return float(obj)
+                if isinstance(obj, list):
+                    return [_deep_serialize(i) for i in obj]
+                if isinstance(obj, dict):
+                    return {k: _deep_serialize(v) for k, v in obj.items()}
+                return obj
+            
+            data = {}
+            for k, v in raw_data.items():
+                sv = _deep_serialize(v)
+                if sv is not None:
+                    data[k] = sv
+            
+            if candidate_data:
+                data['candidate_data'] = candidate_data
+            
+            logger.info(f"💾 Saving alpha play {data.get('symbol')} (id={data.get('id', 'no-id')[:8]}...) status={data.get('status')}")
             self.client.table('alpha_plays').upsert(data).execute()
-            logger.info(f"Alpha play {data['symbol']} saved to database")
+            logger.info(f"✅ Alpha play {data.get('symbol')} saved to database")
             return True
             
         except Exception as e:
-            logger.error(f"Error saving alpha play: {e}")
+            err_str = str(e).lower()
+            # If ANY column is missing, fallback to minimal safe fields
+            if 'column' in err_str or 'pgrst204' in err_str:
+                logger.warning(f"DB column error ({e}) — retrying with minimal fields")
+                try:
+                    minimal = {
+                        'id': data.get('id', str(uuid.uuid4())),
+                        'symbol': data.get('symbol'),
+                        'name': data.get('name'),
+                        'chain': data.get('chain'),
+                        'status': data.get('status', 'active'),
+                        'candidate_data': data.get('candidate_data'),
+                        'created_at': data.get('created_at', datetime.utcnow().isoformat()),
+                    }
+                    # Strip None values from minimal
+                    minimal = {k: v for k, v in minimal.items() if v is not None}
+                    self.client.table('alpha_plays').upsert(minimal).execute()
+                    logger.info(f"✅ Alpha play {minimal.get('symbol')} saved with minimal fields")
+                    return True
+                except Exception as e2:
+                    logger.error(f"Error saving alpha play (minimal retry): {e2}")
+            else:
+                logger.error(f"Error saving alpha play: {e}")
             return False
 
     async def get_alpha_plays(self, status: str = None, limit: int = 50) -> List[Dict]:
