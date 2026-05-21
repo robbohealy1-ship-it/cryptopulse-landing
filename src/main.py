@@ -1302,6 +1302,20 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
                     f"Win Rate: {win_rate:.0f}% | Total P&L: {emoji} {total_pnl:+.2f}%"
                 )
             
+            # List individual closed trades for today
+            closed_trades_text = ""
+            if today_signals:
+                closed_trades_text = "\n<b>📋 TODAY'S CLOSED TRADES:</b>\n"
+                for s in today_signals:
+                    entry = s.actual_entry or s.entry_price or 0
+                    exit_p = s.actual_exit or s.entry_price or 0
+                    pnl = s.pnl_percent or 0
+                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                    result = "TP Hit" if pnl > 0 else "SL Hit" if pnl < 0 else "Closed"
+                    entry_str = f"${entry:.4f}" if entry else "N/A"
+                    exit_str = f"${exit_p:.4f}" if exit_p else "N/A"
+                    closed_trades_text += f"{pnl_emoji} {s.symbol} {s.direction.value} | Entry: {entry_str} → Exit: {exit_str} | P&L: {pnl:+.2f}% ({result})\n"
+            
             performance_text = "\n".join([
                 "",
                 "<b>📊 PERFORMANCE:</b>",
@@ -1325,7 +1339,7 @@ Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
 BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
 BTC Dominance: <b>{btc_dominance:.1f}%</b>
 Funding Rate: <b>{funding_rate*100:.4f}%</b>
-{active_trades_text}{alpha_plays_text}{performance_text}
+{active_trades_text}{alpha_plays_text}{closed_trades_text}{performance_text}
 
 <b>🔮 Tomorrow's Focus:</b>
 • {key_levels}
