@@ -40,7 +40,18 @@ class ActiveAlphaPlay:
     free_message_id: Optional[int] = None
     current_price: float = 0.0
     current_pnl: float = 0.0
+    is_limit_order: bool = False  # market vs limit entry
+    actual_entry: float = 0.0  # filled price for limit orders
     notes: str = ""
+    
+    # Degen strategy fields
+    entry_liquidity: float = 0.0  # Snapshot of liquidity at entry (for rug protection)
+    highest_price: float = 0.0  # Track peak for trailing stop
+    trailing_stop_pct: float = 20.0  # % below peak to trigger trailing stop
+    time_stop_hours: float = 48.0  # Close if no momentum after X hours
+    partial_sell_1_done: bool = False  # Sold 50% at 2x
+    partial_sell_2_done: bool = False  # Sold 25% at 5x
+    is_degen: bool = False  # Use degen strategy (no hard SL, trailing stop, partial sells)
     
     def __post_init__(self):
         if self.approved_at is None:
@@ -62,12 +73,13 @@ class AlphaPlaysEngine:
     6. close() - Mark as closed and send result
     """
     
-    def __init__(self, db=None, publisher=None, admin_notification=None):
+    def __init__(self, db=None, publisher=None, admin_notification=None, admin_bot=None):
         self.discovery = AlphaDiscovery()
         self.formatter = AlphaContentFormatter()
         self.db = db
         self.publisher = publisher
         self._notify_admin = admin_notification
+        self._admin_bot = admin_bot
         self.session: Optional[aiohttp.ClientSession] = None
         
         # Active plays being tracked
@@ -75,6 +87,11 @@ class AlphaPlaysEngine:
         
         # Pending plays awaiting approval
         self.pending_plays: Dict[str, AlphaPlayCandidate] = {}
+        
+        # Pending alpha limit orders (waiting for entry price hit)
+        self.pending_alpha_limits: Dict[str, ActiveAlphaPlay] = {}
+        # Track price extremes for pending alpha limits so brief touches aren't missed
+        self.pending_alpha_extremes: Dict[str, dict] = {}  # play_id -> {'lowest': float, 'highest': float}
         
         # Settings
         self.min_alpha_score = getattr(settings, 'ALPHA_MIN_SCORE', 70.0)
@@ -89,6 +106,50 @@ class AlphaPlaysEngine:
         self.last_free_reset = datetime.utcnow().date()
         
         logger.info("🎰 Alpha Plays Engine initialized")
+    
+    def _looks_like_address_fragment(self, symbol: str) -> bool:
+        """Detect if a symbol is actually an address prefix (e.g. '0X829F', 'AV8TVX')."""
+        if not symbol or symbol == 'UNKNOWN':
+            return True
+        # Address fragments are typically 5-7 chars, all uppercase, with numbers
+        if len(symbol) >= 5 and len(symbol) <= 7 and symbol.isupper():
+            # Check if it contains digits (real token symbols rarely do)
+            has_digits = any(c.isdigit() for c in symbol)
+            if has_digits:
+                return True
+        # Very short all-caps with digits is likely an address
+        return False
+    
+    async def _enrich_token_info(self, candidate: AlphaPlayCandidate) -> bool:
+        """Try to fetch real token name/symbol from DEXScreener by token_address."""
+        if not candidate.token_address or not self.session:
+            return False
+        try:
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{candidate.token_address}"
+            async with self.session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    pairs = data.get('pairs', [])
+                    if pairs:
+                        best = max(pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0) or 0))
+                        base = best.get('baseToken', {})
+                        quote = best.get('quoteToken', {})
+                        # Update symbol/name from live data
+                        new_symbol = (base.get('symbol', '') or quote.get('symbol', '') or '').strip()
+                        new_name = (base.get('name', '') or quote.get('name', '') or '').strip()
+                        if new_symbol and new_symbol != candidate.symbol:
+                            candidate.symbol = new_symbol
+                            logger.info(f"🔄 Enriched symbol for {candidate.token_address[:8]}... -> {new_symbol}")
+                        if new_name and new_name != candidate.name:
+                            candidate.name = new_name
+                            logger.info(f"🔄 Enriched name for {candidate.token_address[:8]}... -> {new_name}")
+                        # Also refresh pair_address
+                        if best.get('pairAddress') and not candidate.pair_address:
+                            candidate.pair_address = best.get('pairAddress')
+                        return True
+        except Exception as e:
+            logger.debug(f"Token enrichment failed for {candidate.token_address[:8]}...: {e}")
+        return False
     
     async def initialize(self):
         """Initialize the engine and reload persisted active and pending plays from DB."""
@@ -116,6 +177,47 @@ class AlphaPlaysEngine:
                     else:
                         logger.warning(f"⚠️ Failed to reconstruct active play from DB row: {play_data.get('symbol', 'unknown')} (id={play_data.get('id', 'no-id')[:8] if play_data.get('id') else 'no-id'})")
                 logger.info(f"🔁 Restored {restored}/{len(plays)} active alpha plays from DB")
+                
+                # Re-enrich token info for plays with address-fragment symbols
+                enriched_count = 0
+                for play in self.active_plays.values():
+                    if self._looks_like_address_fragment(play.candidate.symbol) and play.candidate.token_address:
+                        if await self._enrich_token_info(play.candidate):
+                            enriched_count += 1
+                            # Save updated play to DB
+                            try:
+                                await self._persist_play(play)
+                            except Exception:
+                                pass
+                if enriched_count > 0:
+                    logger.info(f"🔄 Re-enriched {enriched_count} alpha play symbol(s) from live data")
+                
+                # Clean up corrupted legacy plays that have no real data
+                cleaned = 0
+                for play_id, play in list(self.active_plays.items()):
+                    is_bad_symbol = self._looks_like_address_fragment(play.candidate.symbol)
+                    has_no_token = not play.candidate.token_address
+                    has_no_entry = play.entry_price == 0
+                    has_no_prices = play.entry_price == 0 and play.stop_loss == 0 and play.take_profit_1 == 0
+                    
+                    if (is_bad_symbol and has_no_token) or (has_no_entry and has_no_token) or has_no_prices:
+                        logger.warning(f"🗑️ Removing corrupted legacy play {play.candidate.symbol} (no token/entry data) — discovered before fixes")
+                        del self.active_plays[play_id]
+                        cleaned += 1
+                        # Mark as corrupted in DB
+                        if self.db:
+                            try:
+                                await self.db.save_alpha_play({
+                                    'id': play_id,
+                                    'status': 'corrupted',
+                                    'symbol': play.candidate.symbol,
+                                    'candidate_data': None,
+                                    'candidate': play.candidate,
+                                })
+                            except Exception:
+                                pass
+                if cleaned > 0:
+                    logger.info(f"🗑️ Cleaned up {cleaned} corrupted legacy alpha play(s)")
             except Exception as e:
                 logger.warning(f"Could not load active alpha plays from DB: {e}")
             
@@ -230,6 +332,15 @@ class AlphaPlaysEngine:
                 vip_message_id=_meta_or_data('vip_message_id'),
                 free_message_id=_meta_or_data('free_message_id'),
                 notes=_meta_or_data('notes', ''),
+                is_limit_order=_meta_or_data('is_limit_order', False, bool),
+                actual_entry=_meta_or_data('actual_entry', 0.0, float),
+                entry_liquidity=_meta_or_data('entry_liquidity', 0.0, float),
+                highest_price=_meta_or_data('highest_price', 0.0, float),
+                trailing_stop_pct=_meta_or_data('trailing_stop_pct', 20.0, float),
+                time_stop_hours=_meta_or_data('time_stop_hours', 48.0, float),
+                partial_sell_1_done=_meta_or_data('partial_sell_1_done', False, bool),
+                partial_sell_2_done=_meta_or_data('partial_sell_2_done', False, bool),
+                is_degen=_meta_or_data('is_degen', False, bool),
             )
             
             # Parse timestamps from __play_meta__ or top-level columns
@@ -349,8 +460,13 @@ class AlphaPlaysEngine:
                 # Add to pending queue
                 self.pending_plays[candidate.symbol] = candidate
                 logger.info(f"⏳ Alpha play pending approval: {candidate.symbol} (Score: {candidate.overall_score:.1f})")
-                # Notify admin via Telegram
-                if self._notify_admin:
+                # Notify admin via Telegram with interactive buttons when possible
+                if self._admin_bot and hasattr(self._admin_bot, 'send_alpha_for_approval'):
+                    try:
+                        await self._admin_bot.send_alpha_for_approval(candidate)
+                    except Exception as e:
+                        logger.warning(f"Could not send alpha approval UI: {e}")
+                elif self._notify_admin:
                     try:
                         msg = (
                             f"🎰 <b>New Alpha Play Pending Approval</b>\n\n"
@@ -380,13 +496,18 @@ class AlphaPlaysEngine:
         
         return approved_candidates
     
-    async def approve_play(self, symbol: str, admin_notes: str = "") -> Optional[ActiveAlphaPlay]:
+    async def approve_alpha_play(self, symbol: str, admin_notes: str = "", is_limit_order: bool = False) -> Optional[ActiveAlphaPlay]:
+        """Alias for approve_play for backward compatibility."""
+        return await self.approve_play(symbol, admin_notes, is_limit_order)
+    
+    async def approve_play(self, symbol: str, admin_notes: str = "", is_limit_order: bool = False) -> Optional[ActiveAlphaPlay]:
         """
         Admin approves an alpha play from the pending queue.
         
         Args:
             symbol: Token symbol to approve
             admin_notes: Optional notes from admin
+            is_limit_order: If True, track as limit order and wait for entry price hit
         
         Returns:
             ActiveAlphaPlay if approved, None if not found
@@ -401,18 +522,43 @@ class AlphaPlaysEngine:
         # Generate trade parameters
         entry, sl, tp1, tp2 = self._generate_trade_parameters(candidate)
         
+        # Determine strategy
+        is_degen = candidate.risk_level == 'degen'
+        
         # Create active play
         active_play = ActiveAlphaPlay(
             id=str(uuid.uuid4()),
             candidate=candidate,
             entry_price=entry,
-            stop_loss=sl,
-            take_profit_1=tp1,
-            take_profit_2=tp2,
+            stop_loss=sl if not is_degen else 0.0,  # No hard SL for degen
+            take_profit_1=tp1 if not is_degen else entry * 2.0,  # Degen: 2x for 50% sell
+            take_profit_2=tp2 if not is_degen else entry * 5.0,  # Degen: 5x for 25% sell
             position_size=self._get_position_size(candidate),
             notes=admin_notes,
-            approved_at=datetime.utcnow()
+            approved_at=datetime.utcnow(),
+            is_degen=is_degen,
+            is_limit_order=is_limit_order,
+            entry_liquidity=candidate.liquidity_usd,
+            highest_price=entry,  # Start tracking from entry
+            trailing_stop_pct=20.0 if is_degen else 0.0,
+            time_stop_hours=48.0 if is_degen else 0.0
         )
+        
+        if is_limit_order:
+            # For limit orders: add to pending, not active. Wait for price hit.
+            self.pending_alpha_limits[active_play.id] = active_play
+            self.pending_alpha_extremes[active_play.id] = {'lowest': float('inf'), 'highest': 0.0}
+            logger.info(f"⏳ Alpha limit order pending for {symbol} at ${entry:.6f} — will track when limit is hit")
+            
+            # Save to DB as pending limit
+            if self.db:
+                try:
+                    active_play.status = 'pending_limit'
+                    await self.db.save_alpha_play(active_play)
+                except Exception as e:
+                    logger.warning(f"Could not save pending alpha limit to DB: {e}")
+            
+            return active_play
         
         # Add to active tracking
         self.active_plays[active_play.id] = active_play
@@ -429,7 +575,8 @@ class AlphaPlaysEngine:
             except Exception as e:
                 logger.warning(f"Could not save alpha play to DB: {e}")
         
-        logger.info(f"✅ Alpha play approved: {symbol} | Entry: ${entry:.6f} | SL: ${sl:.6f} | TP1: ${tp1:.6f} | TP2: ${tp2:.6f}")
+        strategy_label = "DEGEN" if is_degen else "STANDARD"
+        logger.info(f"✅ Alpha {strategy_label} approved: {symbol} | Entry: ${entry:.6f} | TP1: ${active_play.take_profit_1:.6f} | TP2: ${active_play.take_profit_2:.6f} | SL: {f'${sl:.6f}' if sl > 0 else 'NONE (rug protect)'}")
         
         return active_play
     
@@ -458,7 +605,9 @@ class AlphaPlaysEngine:
                 stop_loss=play.stop_loss,
                 take_profit_1=play.take_profit_1,
                 take_profit_2=play.take_profit_2,
-                position_size=play.position_size
+                position_size=play.position_size,
+                is_limit_order=play.is_limit_order,
+                is_degen=play.is_degen
             )
             
             # Publish
@@ -519,11 +668,82 @@ class AlphaPlaysEngine:
             except Exception as e:
                 logger.warning(f"Could not persist alpha play to DB: {e}")
     
+    async def _check_alpha_limit_hit(self, play_id: str):
+        """Check if an alpha limit order's entry price has been hit."""
+        play = self.pending_alpha_limits.get(play_id)
+        if not play:
+            return
+        
+        try:
+            data = await self._get_price_and_liquidity(play.candidate)
+            if not data:
+                return
+            current_price = data['price']
+        except Exception:
+            return
+        
+        entry = play.entry_price
+        
+        # Update extremes tracking
+        extremes = self.pending_alpha_extremes.get(play_id, {'lowest': float('inf'), 'highest': 0.0})
+        extremes['lowest'] = min(extremes['lowest'], current_price)
+        extremes['highest'] = max(extremes['highest'], current_price)
+        self.pending_alpha_extremes[play_id] = extremes
+        
+        # Alpha plays are always LONG (buy low, sell high)
+        # For limit order: price must drop to or below entry
+        hit = (current_price <= entry) or (extremes['lowest'] <= entry)
+        
+        if hit:
+            play.status = 'active'
+            play.actual_entry = current_price
+            del self.pending_alpha_limits[play_id]
+            self.pending_alpha_extremes.pop(play_id, None)
+            self.active_plays[play_id] = play
+            
+            if current_price > entry:
+                logger.info(f"🎯 Alpha limit hit for {play.candidate.symbol} at ${current_price:.6f} (was briefly at ${extremes['lowest']:.6f} ≤ entry ${entry:.6f}) — tracking started")
+            else:
+                logger.info(f"🎯 Alpha limit hit for {play.candidate.symbol} at ${current_price:.6f} — tracking started")
+            
+            # Notify VIP channel
+            if self.publisher and hasattr(self.publisher, 'bot') and self.publisher.bot:
+                try:
+                    from src.config import settings
+                    msg = (
+                        f"🎯 <b>ALPHA LIMIT ORDER FILLED</b>\n\n"
+                        f"{play.candidate.symbol} ({play.candidate.chain.upper()})\n"
+                        f"Entry: ${current_price:.6f}\n"
+                        f"TP1: ${play.take_profit_1:.6f}\n"
+                        f"TP2: ${play.take_profit_2:.6f}\n\n"
+                        f"📊 Now tracking TP/SL automatically"
+                    )
+                    await self.publisher.bot.send_message(
+                        chat_id=self.publisher.vip_channel_id,
+                        text=msg,
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not send alpha limit fill VIP notification: {e}")
+            
+            # Save to DB
+            if self.db:
+                try:
+                    await self.db.save_alpha_play(play)
+                except Exception as e:
+                    logger.warning(f"Could not save limit-hit alpha play to DB: {e}")
+    
     async def track_active_plays(self):
         """
-        Check all active alpha plays for TP/SL hits.
+        Check all active alpha plays for TP/SL/rug/time hits.
+        Also checks pending alpha limit orders for entry hits.
         Called periodically (every 5 minutes).
         """
+        # Check pending alpha limit orders first
+        if self.pending_alpha_limits:
+            for play_id in list(self.pending_alpha_limits.keys()):
+                await self._check_alpha_limit_hit(play_id)
+        
         if not self.active_plays:
             return
         
@@ -531,11 +751,13 @@ class AlphaPlaysEngine:
         
         for play_id, play in list(self.active_plays.items()):
             try:
-                # Get current price (would use price API)
-                current_price = await self._get_current_price(play.candidate)
-                
-                if not current_price:
+                # Fetch price + liquidity + volume from DEXScreener
+                data = await self._get_price_and_liquidity(play.candidate)
+                if not data:
                     continue
+                
+                current_price = data['price']
+                current_liquidity = data['liquidity']
                 
                 play.current_price = current_price
                 
@@ -543,37 +765,114 @@ class AlphaPlaysEngine:
                 if play.entry_price > 0:
                     play.current_pnl = ((current_price - play.entry_price) / play.entry_price) * 100
                 
-                # Persist current price/pnl every track cycle
+                # Track highest price for trailing stop
+                if current_price > play.highest_price:
+                    play.highest_price = current_price
+                
+                # Persist every cycle
                 await self._persist_play(play)
                 
-                # Check TP1
-                if play.status == 'active' and play.take_profit_1 > 0:
-                    if current_price >= play.take_profit_1:
-                        await self._handle_tp1_hit(play)
+                # ─── RUG PROTECTION (all plays) ───
+                if play.entry_liquidity > 0 and current_liquidity > 0:
+                    liquidity_ratio = current_liquidity / play.entry_liquidity
+                    if liquidity_ratio < 0.5:
+                        await self._close_play(play, 'RUG_PULL',
+                            f"🚨 <b>RUG PROTECTION TRIGGERED</b>\n\n"
+                            f"<b>{play.candidate.symbol}</b> liquidity dropped {((1-liquidity_ratio)*100):.0f}%\n"
+                            f"Entry liq: ${play.entry_liquidity:,.0f}\n"
+                            f"Current liq: ${current_liquidity:,.0f}\n"
+                            f"Position closed to protect capital.")
+                        continue
                 
-                # Check TP2
-                if play.status == 'tp1_hit' and play.take_profit_2 > 0:
-                    if current_price >= play.take_profit_2:
-                        await self._handle_tp2_hit(play)
+                # ─── TIME STOP (degen only) ───
+                if play.is_degen and play.time_stop_hours > 0 and play.approved_at:
+                    hours_elapsed = (datetime.utcnow() - play.approved_at).total_seconds() / 3600
+                    if hours_elapsed >= play.time_stop_hours:
+                        await self._close_play(play, 'TIME_STOP',
+                            f"⏰ <b>TIME STOP</b>\n\n"
+                            f"<b>{play.candidate.symbol}</b> held for {hours_elapsed:.0f}h with no breakout.\n"
+                            f"Final P&L: {play.current_pnl:+.1f}%\n"
+                            f"Position closed.")
+                        continue
                 
-                # Check SL
-                if play.status in ['active', 'tp1_hit'] and play.stop_loss > 0:
-                    if current_price <= play.stop_loss:
-                        await self._handle_sl_hit(play)
+                if play.is_degen:
+                    # ─── DEGEN STRATEGY ───
+                    # TP1: +100% (2x) → sell 50%
+                    if not play.partial_sell_1_done and play.take_profit_1 > 0:
+                        if current_price >= play.take_profit_1:
+                            play.partial_sell_1_done = True
+                            await self._persist_play(play)
+                            await self._notify_partial_sell(play, 1, 50, "2x")
+                    
+                    # TP2: +400% (5x) → sell 25%
+                    if not play.partial_sell_2_done and play.partial_sell_1_done and play.take_profit_2 > 0:
+                        if current_price >= play.take_profit_2:
+                            play.partial_sell_2_done = True
+                            await self._persist_play(play)
+                            await self._notify_partial_sell(play, 2, 25, "5x")
+                    
+                    # Trailing stop: after TP2, if price drops trailing_stop_pct% from peak
+                    if play.partial_sell_2_done and play.highest_price > 0 and play.trailing_stop_pct > 0:
+                        trailing_level = play.highest_price * (1 - play.trailing_stop_pct / 100)
+                        if current_price <= trailing_level:
+                            await self._close_play(play, 'TRAILING_STOP',
+                                f"🎯 <b>TRAILING STOP HIT</b>\n\n"
+                                f"<b>{play.candidate.symbol}</b> pulled back {play.trailing_stop_pct:.0f}% from peak\n"
+                                f"Peak: ${play.highest_price:.6f}\n"
+                                f"Exit: ${current_price:.6f}\n"
+                                f"Final P&L: {play.current_pnl:+.1f}%\n"
+                                f"Remaining 25% position closed. Let the runners run!")
+                            continue
+                else:
+                    # ─── STANDARD STRATEGY (non-degen) ───
+                    if play.status == 'active' and play.take_profit_1 > 0:
+                        if current_price >= play.take_profit_1:
+                            await self._handle_tp1_hit(play)
+                    
+                    if play.status == 'tp1_hit' and play.take_profit_2 > 0:
+                        if current_price >= play.take_profit_2:
+                            await self._handle_tp2_hit(play)
+                    
+                    if play.status in ['active', 'tp1_hit'] and play.stop_loss > 0:
+                        if current_price <= play.stop_loss:
+                            await self._handle_sl_hit(play)
                 
             except Exception as e:
                 logger.error(f"Error tracking alpha play {play_id}: {e}")
     
+    async def _notify_partial_sell(self, play: ActiveAlphaPlay, tp_num: int, pct_sold: int, multiplier: str):
+        """Notify VIP about a partial sell on a degen play."""
+        logger.info(f"🎯 Alpha DEGEN TP{tp_num} ({multiplier}): {play.candidate.symbol} — sold {pct_sold}% at +{play.current_pnl:.1f}%")
+        if self.publisher:
+            await self.publisher.send_alpha_update(
+                play,
+                f"🎯 <b>DEGEN TP{tp_num} HIT ({multiplier})</b>\n\n"
+                f"<b>{play.candidate.symbol}</b> at ${play.current_price:.6f}\n"
+                f"P&L: +{play.current_pnl:.1f}%\n\n"
+                f"� <b>Sold {pct_sold}% of position</b>\n"
+                f"Remaining: {100 - (50 if tp_num == 1 else 75)}% riding\n\n"
+                f"{'Next: 5x target for 25% sell' if tp_num == 1 else 'Trailing stop active on final 25%'}")
+    
+    async def _close_play(self, play: ActiveAlphaPlay, reason_code: str, vip_message: str):
+        """Generic close with VIP notification."""
+        play.status = reason_code.lower()
+        play.closed_at = datetime.utcnow()
+        await self._persist_play(play)
+        self.active_plays.pop(play.id, None)
+        
+        logger.info(f"📕 Alpha {reason_code}: {play.candidate.symbol} at ${play.current_price:.6f} ({play.current_pnl:.1f}%)")
+        
+        if self.publisher:
+            await self.publisher.publish_alpha_result_vip(vip_message)
+    
     async def _handle_tp1_hit(self, play: ActiveAlphaPlay):
-        """Handle TP1 hit"""
+        """Handle TP1 hit (standard non-degen plays only)"""
         play.status = 'tp1_hit'
         play.tp1_hit_at = datetime.utcnow()
-        
         await self._persist_play(play)
         
         logger.info(f"🎯 Alpha TP1 HIT: {play.candidate.symbol} at ${play.current_price:.6f}")
         
-        # Send VIP update
         if self.publisher:
             await self.publisher.send_alpha_update(
                 play,
@@ -582,27 +881,12 @@ class AlphaPlaysEngine:
             )
     
     async def _handle_tp2_hit(self, play: ActiveAlphaPlay):
-        """Handle TP2 hit (max profit)"""
-        play.status = 'tp2_hit'
-        play.tp2_hit_at = datetime.utcnow()
-        play.closed_at = datetime.utcnow()
-        
-        await self._persist_play(play)
-        
-        # Move from active to closed
-        self.active_plays.pop(play.id, None)
-        
-        logger.info(f"🎉 Alpha MAX PROFIT: {play.candidate.symbol} at ${play.current_price:.6f} (+{play.current_pnl:.1f}%)")
-        
-        # Send VIP result
-        if self.publisher:
-            message = self.formatter.format_alpha_result(
-                play.candidate,
-                play.current_pnl,
-                play.current_price,
-                'TP2_HIT'
-            )
-            await self.publisher.publish_alpha_result_vip(message)
+        """Handle TP2 hit (standard non-degen plays only)"""
+        await self._close_play(play, 'TP2_HIT',
+            f"🎉 <b>MAX PROFIT</b>\n\n"
+            f"<b>{play.candidate.symbol}</b> hit TP2 at ${play.take_profit_2:.6f}\n"
+            f"Final P&L: {play.current_pnl:+.1f}%\n\n"
+            f"🎯 Full position closed.")
         
         # Send free teaser result
         if self.publisher and play.free_message_id:
@@ -615,27 +899,12 @@ class AlphaPlaysEngine:
             )
     
     async def _handle_sl_hit(self, play: ActiveAlphaPlay):
-        """Handle SL hit"""
-        play.status = 'sl_hit'
-        play.sl_hit_at = datetime.utcnow()
-        play.closed_at = datetime.utcnow()
-        
-        await self._persist_play(play)
-        
-        # Move from active
-        self.active_plays.pop(play.id, None)
-        
-        logger.info(f"🛑 Alpha SL HIT: {play.candidate.symbol} at ${play.current_price:.6f} ({play.current_pnl:.1f}%)")
-        
-        # Send VIP result
-        if self.publisher:
-            message = self.formatter.format_alpha_result(
-                play.candidate,
-                play.current_pnl,
-                play.current_price,
-                'SL_HIT'
-            )
-            await self.publisher.publish_alpha_result_vip(message)
+        """Handle SL hit (standard non-degen plays only)"""
+        await self._close_play(play, 'SL_HIT',
+            f"🛑 <b>STOP LOSS HIT</b>\n\n"
+            f"<b>{play.candidate.symbol}</b> hit SL at ${play.stop_loss:.6f}\n"
+            f"Final P&L: {play.current_pnl:+.1f}%\n\n"
+            f"Position closed. On to the next alpha.")
     
     def _generate_trade_parameters(self, candidate: AlphaPlayCandidate) -> tuple:
         """
@@ -675,17 +944,15 @@ class AlphaPlaysEngine:
         else:
             return "3-5%"
     
-    async def _get_current_price(self, candidate: AlphaPlayCandidate) -> Optional[float]:
-        """Fetch current price from DEXScreener API using token address or pair address."""
+    async def _get_price_and_liquidity(self, candidate: AlphaPlayCandidate) -> Optional[dict]:
+        """Fetch current price AND liquidity from DEXScreener API."""
         if not self.session or self.session.closed:
             return None
         
-        # Try token address first (most reliable)
         token_addr = candidate.token_address
         pair_addr = candidate.pair_address
         chain = candidate.chain
         
-        # Endpoint priority: token address > pair address
         urls = []
         if token_addr:
             urls.append(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}")
@@ -703,17 +970,29 @@ class AlphaPlaysEngine:
                         data = await resp.json()
                         pairs = data.get('pairs', [])
                         if pairs:
-                            # Get the pair with highest liquidity
                             best = max(pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0) or 0))
                             price = float(best.get('priceUsd', 0) or 0)
+                            liquidity = float(best.get('liquidity', {}).get('usd', 0) or 0)
+                            volume_24h = float(best.get('volume', {}).get('h24', 0) or 0)
                             if price > 0:
-                                return price
+                                return {
+                                    'price': price,
+                                    'liquidity': liquidity,
+                                    'volume_24h': volume_24h,
+                                    'dex_id': best.get('dexId', ''),
+                                    'pair_address': best.get('pairAddress', '')
+                                }
             except Exception as e:
                 logger.debug(f"Price fetch failed for {candidate.symbol} via {url}: {e}")
                 continue
         
         logger.warning(f"Could not fetch current price for {candidate.symbol} from DEXScreener")
         return None
+    
+    async def _get_current_price(self, candidate: AlphaPlayCandidate) -> Optional[float]:
+        """Legacy convenience method - returns just price."""
+        result = await self._get_price_and_liquidity(candidate)
+        return result['price'] if result else None
     
     def _reset_counts_if_needed(self):
         """Reset daily/weekly counters if needed"""
@@ -751,13 +1030,16 @@ class AlphaPlaysEngine:
         
         # Notify VIP
         if self.publisher:
+            pnl = play.current_pnl if play.current_pnl is not None else 0.0
+            entry_price = play.entry_price if play.entry_price is not None else 0.0
+            exit_price = play.current_price if play.current_price is not None else entry_price
             await self.publisher.publish_alpha_result_vip(
                 f"📕 <b>Alpha Play Closed</b>\n\n"
                 f"<b>{play.candidate.symbol}</b> manually closed by admin.\n"
                 f"Reason: {reason}\n"
-                f"Final P&L: {play.current_pnl:+.1f}%\n\n"
-                f"Entry: ${play.entry_price:.6f}\n"
-                f"Exit:  ${play.current_price:.6f}"
+                f"Final P&L: {pnl:+.1f}%\n\n"
+                f"Entry: ${entry_price:.6f}\n"
+                f"Exit:  ${exit_price:.6f}"
             )
         
         logger.info(f"📕 Alpha play {play.candidate.symbol} manually closed by admin ({reason})")
@@ -771,12 +1053,14 @@ class AlphaPlaysEngine:
             return False
         
         # Update allowed fields
-        allowed_fields = ['entry_price', 'stop_loss', 'take_profit_1', 'take_profit_2', 'position_size']
+        allowed_fields = ['entry_price', 'stop_loss', 'take_profit_1', 'take_profit_2', 'position_size', 'is_limit_order']
         for field in allowed_fields:
             if field in updates and updates[field] is not None:
                 try:
                     if field == 'position_size':
                         setattr(play, field, str(updates[field]))
+                    elif field == 'is_limit_order':
+                        setattr(play, field, bool(updates[field]))
                     else:
                         setattr(play, field, float(updates[field]))
                 except (ValueError, TypeError):

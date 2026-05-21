@@ -114,6 +114,108 @@ class AlphaDiscovery:
             )
         return self.session
     
+    async def _fetch_holder_data(self, token_address: str, chain: str) -> dict:
+        """Fetch real holder count and top-holder concentration where possible.
+        Returns dict with 'holders', 'top_holder_concentration', 'holder_growth_24h'.
+        - Solana: Solscan public API (free, no key)
+        - ETH: Etherscan API (requires ETHERSCAN_API_KEY in .env)
+        - Base: Basescan API (requires BASESCAN_API_KEY in .env)
+        """
+        result = {'holders': 0, 'top_holder_concentration': 0.0, 'holder_growth_24h': 0.0}
+        if not token_address:
+            return result
+        
+        session = await self._get_session()
+        
+        if chain == 'sol':
+            try:
+                # Solscan public token meta endpoint
+                url = f"https://api.solscan.io/token/meta?token={token_address}"
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('success'):
+                            meta = data.get('data', {})
+                            result['holders'] = int(meta.get('holders', 0) or 0)
+                            # Top holder concentration if available
+                            supply = float(meta.get('supply', {}).get('supply', 0) or 0)
+                            if supply > 0:
+                                top10 = meta.get('top10Holders', 0)
+                                if top10:
+                                    result['top_holder_concentration'] = (float(top10) / supply) * 100
+            except Exception as e:
+                logger.debug(f"Solscan holder fetch failed for {token_address[:8]}...: {e}")
+        
+        elif chain == 'eth':
+            api_key = getattr(settings, 'ETHERSCAN_API_KEY', None)
+            if api_key:
+                try:
+                    # Etherscan: token holder count via tokenholderlist
+                    url = f"https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress={token_address}&page=1&offset=1&apikey={api_key}"
+                    async with session.get(url, timeout=10) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get('status') == '1' and data.get('result'):
+                                # Etherscan doesn't give total holder count directly in this endpoint
+                                # We can estimate from the holder list length, but it's paginated
+                                # Use a workaround: get total supply + top 10 holders
+                                result['holders'] = len(data.get('result', []))
+                    # Get token supply for concentration calc
+                    supply_url = f"https://api.etherscan.io/api?module=stats&action=tokensupply&contractaddress={token_address}&apikey={api_key}"
+                    async with session.get(supply_url, timeout=10) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get('status') == '1':
+                                total_supply = float(data.get('result', 0)) / (10 ** 18)
+                                if total_supply > 0:
+                                    # Get top 10 holders
+                                    top10_url = f"https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress={token_address}&page=1&offset=10&apikey={api_key}"
+                                    async with session.get(top10_url, timeout=10) as resp:
+                                        if resp.status == 200:
+                                            top_data = await resp.json()
+                                            if top_data.get('status') == '1' and top_data.get('result'):
+                                                top10_amount = sum(float(h.get('TokenHolderQuantity', 0)) for h in top_data['result'])
+                                                result['top_holder_concentration'] = (top10_amount / total_supply) * 100
+                except Exception as e:
+                    logger.debug(f"Etherscan holder fetch failed for {token_address[:8]}...: {e}")
+            else:
+                logger.debug(f"No ETHERSCAN_API_KEY set — skipping ETH holder data for {token_address[:8]}...")
+        
+        elif chain == 'base':
+            # Etherscan API V2 supports Base with a single key
+            # Chain ID 8453 = Base. Get key from ETHERSCAN_API_KEY or BASESCAN_API_KEY for backward compat
+            api_key = getattr(settings, 'ETHERSCAN_API_KEY', None) or getattr(settings, 'BASESCAN_API_KEY', None)
+            if api_key:
+                try:
+                    # Etherscan API V2: use chainid parameter
+                    url = f"https://api.etherscan.io/v2/api?chainid=8453&module=token&action=tokenholderlist&contractaddress={token_address}&page=1&offset=1&apikey={api_key}"
+                    async with session.get(url, timeout=10) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get('status') == '1' and data.get('result'):
+                                result['holders'] = len(data.get('result', []))
+                    # Get token supply
+                    supply_url = f"https://api.etherscan.io/v2/api?chainid=8453&module=stats&action=tokensupply&contractaddress={token_address}&apikey={api_key}"
+                    async with session.get(supply_url, timeout=10) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get('status') == '1':
+                                total_supply = float(data.get('result', 0)) / (10 ** 18)
+                                if total_supply > 0:
+                                    top10_url = f"https://api.etherscan.io/v2/api?chainid=8453&module=token&action=tokenholderlist&contractaddress={token_address}&page=1&offset=10&apikey={api_key}"
+                                    async with session.get(top10_url, timeout=10) as resp:
+                                        if resp.status == 200:
+                                            top_data = await resp.json()
+                                            if top_data.get('status') == '1' and top_data.get('result'):
+                                                top10_amount = sum(float(h.get('TokenHolderQuantity', 0)) for h in top_data['result'])
+                                                result['top_holder_concentration'] = (top10_amount / total_supply) * 100
+                except Exception as e:
+                    logger.debug(f"Etherscan V2 (Base) holder fetch failed for {token_address[:8]}...: {e}")
+            else:
+                logger.debug(f"No ETHERSCAN_API_KEY set — skipping Base holder data for {token_address[:8]}...")
+        
+        return result
+    
     async def discover_alpha_plays(self, chain: str = None, limit: int = 10) -> List[AlphaPlayCandidate]:
         """
         Main discovery method. Scans multiple free DEX APIs and returns top candidates.
@@ -237,7 +339,7 @@ class AlphaDiscovery:
                             
                             for pair in pairs[:20]:  # Top 20 per chain
                                 try:
-                                    candidate = self._parse_dexscreener_pair(pair)
+                                    candidate = await self._parse_dexscreener_pair(pair)
                                     if candidate:
                                         candidates.append(candidate)
                                 except Exception as e:
@@ -256,7 +358,7 @@ class AlphaDiscovery:
             logger.error(f"Error in DexScreener scan: {e}")
             return []
     
-    def _parse_dexscreener_pair(self, pair: Dict) -> Optional[AlphaPlayCandidate]:
+    async def _parse_dexscreener_pair(self, pair: Dict) -> Optional[AlphaPlayCandidate]:
         """Parse a DexScreener pair into an AlphaPlayCandidate"""
         try:
             # Extract chain from pair data
@@ -273,17 +375,25 @@ class AlphaDiscovery:
             base_token = pair.get('baseToken', {})
             quote_token = pair.get('quoteToken', {})
             
-            # Symbol fallback chain: baseToken.symbol -> quoteToken.symbol -> pair symbol -> truncated address
-            symbol = base_token.get('symbol', '') or quote_token.get('symbol', '')
+            # Symbol fallback chain: baseToken.symbol -> quoteToken.symbol -> pair symbol -> 'UNKNOWN'
+            # NEVER use address prefix as symbol — it looks like garbage on the dashboard
+            symbol = (base_token.get('symbol', '') or '').strip()
             if not symbol:
-                # Try to extract from pairAddress or use a generic name
-                addr = base_token.get('address', '') or pair.get('pairAddress', '')
-                if addr and len(addr) > 8:
-                    symbol = addr[:6].upper()
-                else:
-                    symbol = 'UNKNOWN'
+                symbol = (quote_token.get('symbol', '') or '').strip()
+            if not symbol:
+                # Try the pair's own symbol field (sometimes present)
+                pair_sym = pair.get('symbol', '') or pair.get('baseToken', {}).get('symbol', '')
+                if pair_sym:
+                    symbol = pair_sym.strip()
+            if not symbol:
+                symbol = 'UNKNOWN'
             
-            name = base_token.get('name', '') or quote_token.get('name', symbol) or symbol
+            # Name: use baseToken.name if available, otherwise fall back to symbol
+            name = (base_token.get('name', '') or '').strip()
+            if not name:
+                name = (quote_token.get('name', '') or '').strip()
+            if not name:
+                name = symbol
             token_address = base_token.get('address') or quote_token.get('address')
             pair_address = pair.get('pairAddress')
             
@@ -349,6 +459,11 @@ class AlphaDiscovery:
             # Buy/sell ratio
             buy_sell_ratio = buys / sells if sells > 0 else 1.0
             
+            # Fetch real holder data from Solscan for SOL tokens
+            holder_data = await self._fetch_holder_data(token_address, chain)
+            holders = holder_data.get('holders', 0) if holder_data.get('holders', 0) > 0 else transactions_24h
+            top_conc = holder_data.get('top_holder_concentration', 0.0)
+            
             return AlphaPlayCandidate(
                 symbol=symbol,
                 name=name,
@@ -362,10 +477,11 @@ class AlphaDiscovery:
                 price_change_24h=price_change_24h,
                 price_change_1h=price_change_1h,
                 price_change_5min=float(pair.get('priceChange', {}).get('m5', 0) or 0),
-                holders=transactions_24h,  # proxy for now
+                holders=holders,
                 transactions_24h=transactions_24h,
                 buys_24h=buys,
                 sells_24h=sells,
+                top_holder_concentration=top_conc,
                 social_score=social_score,
                 community_score=community_score,
                 technical_score=technical_score,
@@ -428,15 +544,12 @@ class AlphaDiscovery:
                                     base_token = relationships.get('base_token', {}).get('data', {})
                                     quote_token = relationships.get('quote_token', {}).get('data', {})
                                     
-                                    symbol = base_token.get('symbol', '') or quote_token.get('symbol', '')
+                                    # Symbol: never use address prefix
+                                    symbol = (base_token.get('symbol', '') or '').strip()
                                     if not symbol:
-                                        addr = base_token.get('id', '') or quote_token.get('id', '')
-                                        if '_' in addr:
-                                            symbol = addr.split('_')[-1][:6].upper()
-                                        elif addr and len(addr) > 8:
-                                            symbol = addr[:6].upper()
-                                        else:
-                                            symbol = 'UNKNOWN'
+                                        symbol = (quote_token.get('symbol', '') or '').strip()
+                                    if not symbol:
+                                        symbol = 'UNKNOWN'
                                     token_address = base_token.get('id', '').split('_')[-1] if '_' in base_token.get('id', '') else base_token.get('id', '')
                                     
                                     # Metrics
@@ -509,6 +622,11 @@ class AlphaDiscovery:
                                     # Buy/sell ratio
                                     buy_sell_ratio = buys / sells if sells > 0 else 1.0
                                     
+                                    # Fetch real holder data from Solscan for SOL tokens
+                                    holder_data = await self._fetch_holder_data(token_address, detected_chain)
+                                    holders = holder_data.get('holders', 0) if holder_data.get('holders', 0) > 0 else transactions_24h
+                                    top_conc = holder_data.get('top_holder_concentration', 0.0)
+                                    
                                     candidates.append(AlphaPlayCandidate(
                                         symbol=symbol,
                                         name=attrs.get('name', symbol),
@@ -522,10 +640,11 @@ class AlphaDiscovery:
                                         price_change_24h=price_change_24h,
                                         price_change_1h=price_change_1h,
                                         price_change_5min=price_change_5min,
-                                        holders=transactions_24h,  # proxy
+                                        holders=holders,
                                         transactions_24h=transactions_24h,
                                         buys_24h=buys,
                                         sells_24h=sells,
+                                        top_holder_concentration=top_conc,
                                         social_score=social_score,
                                         community_score=community_score,
                                         technical_score=technical_score,
@@ -911,17 +1030,17 @@ class AlphaDiscovery:
         
         if chain == 'sol':
             dex_url = f"https://dexscreener.com/solana/{pair_address}" if pair_address else f"https://dexscreener.com/solana/{token_address}" if token_address else "https://dexscreener.com/solana"
-            chart_url = f"https://www.geckoterminal.com/solana/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/so/pools/{token_address}" if token_address else "https://www.geckoterminal.com"
+            chart_url = f"https://www.geckoterminal.com/solana/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/solana/pools/{token_address}" if token_address else "https://www.geckoterminal.com/solana"
             buy_url = self._generate_buy_link('sol', token_address, symbol)
                 
         elif chain == 'eth':
             dex_url = f"https://dexscreener.com/ethereum/{pair_address}" if pair_address else f"https://dexscreener.com/ethereum/{token_address}" if token_address else "https://dexscreener.com/ethereum"
-            chart_url = f"https://www.geckoterminal.com/eth/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/eth/pools/{token_address}" if token_address else "https://www.geckoterminal.com"
+            chart_url = f"https://www.geckoterminal.com/eth/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/eth/pools/{token_address}" if token_address else "https://www.geckoterminal.com/eth"
             buy_url = self._generate_buy_link('eth', token_address, symbol)
                 
         elif chain == 'base':
             dex_url = f"https://dexscreener.com/base/{pair_address}" if pair_address else f"https://dexscreener.com/base/{token_address}" if token_address else "https://dexscreener.com/base"
-            chart_url = f"https://www.geckoterminal.com/base/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/base/pools/{token_address}" if token_address else "https://www.geckoterminal.com"
+            chart_url = f"https://www.geckoterminal.com/base/pools/{pair_address}" if pair_address else f"https://www.geckoterminal.com/base/pools/{token_address}" if token_address else "https://www.geckoterminal.com/base"
             buy_url = self._generate_buy_link('base', token_address, symbol)
         else:
             dex_url = "https://dexscreener.com"

@@ -511,6 +511,12 @@ tr:hover { background: #0f172a; }
     <h2>Components</h2>
     <div id="componentsStatus"></div>
   </div>
+  <div class="section">
+    <h2>Telegram Connectivity Test</h2>
+    <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Send test messages to VIP and Free channels to verify the bot can post.</p>
+    <button class="btn" onclick="testTelegram()">🔧 Test Telegram Channels</button>
+    <div id="telegramTestResults" style="margin-top:12px;"></div>
+  </div>
 </div>
 
 </div>
@@ -956,6 +962,26 @@ async function loadSettings() {
     ).join('');
     document.getElementById('componentsStatus').innerHTML = html;
   } catch (e) {}
+}
+
+async function testTelegram() {
+  const el = document.getElementById('telegramTestResults');
+  el.innerHTML = '<div class="empty-state">Testing Telegram channels...</div>';
+  try {
+    const result = await fetchJSON('/api/test/telegram', {method: 'POST'});
+    const rows = result.tests.map(t =>
+      `<tr>
+        <td>${t.name}</td>
+        <td><span style="color:${t.status==='PASS'?'#22c55e':t.status==='SKIP'?'#f59e0b':'#ef4444'};font-weight:600;">${t.status}</span></td>
+        <td style="font-size:12px;color:#94a3b8;">${t.detail}</td>
+      </tr>`
+    ).join('');
+    el.innerHTML = `<table style="width:100%;font-size:13px;"><thead><tr><th>Test</th><th>Status</th><th>Detail</th></tr></thead><tbody>${rows}</tbody></table>`;
+    showToast(result.all_passed ? 'All Telegram tests passed!' : 'Some Telegram tests failed', result.all_passed ? 'success' : 'error');
+  } catch (e) {
+    el.innerHTML = `<div style="color:#ef4444;">Test failed: ${e.message}</div>`;
+    showToast('Telegram test failed: ' + e.message, 'error');
+  }
 }
 
 function switchSubTab(btn, panelId) {

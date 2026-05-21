@@ -81,12 +81,13 @@ class SettingsUpdate(BaseModel):
 
 
 class SignalUpdate(BaseModel):
-    """Model for updating signal prices"""
+    """Model for updating signal prices and order type"""
     entry_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit_1: Optional[float] = None
     take_profit_2: Optional[float] = None
     take_profit_3: Optional[float] = None
+    order_type: Optional[str] = None  # 'market' or 'limit'
 
 
 class CloseSignal(BaseModel):
@@ -261,7 +262,28 @@ async def alpha_plays():
         
         # Primary: read from in-memory alpha engine (when bot is running)
         if orch.alpha_engine:
-            for play_id, play in orch.alpha_engine.active_plays.items():
+            for play_id, play in list(orch.alpha_engine.active_plays.items()):
+                # Skip corrupted legacy plays with no real data
+                if play.entry_price == 0 and play.stop_loss == 0 and play.take_profit_1 == 0:
+                    continue
+                if orch.alpha_engine._looks_like_address_fragment(play.candidate.symbol) and not play.candidate.token_address:
+                    continue
+                # Try to re-enrich bad symbols before displaying
+                symbol = play.candidate.symbol
+                name = play.candidate.name
+                if orch.alpha_engine._looks_like_address_fragment(symbol) and play.candidate.token_address:
+                    try:
+                        await orch.alpha_engine._enrich_token_info(play.candidate)
+                        symbol = play.candidate.symbol
+                        name = play.candidate.name
+                    except Exception:
+                        pass
+                
+                # Build display name: prefer real name, then symbol, then UNKNOWN
+                display_name = name if name and not orch.alpha_engine._looks_like_address_fragment(name) else symbol
+                if orch.alpha_engine._looks_like_address_fragment(display_name):
+                    display_name = name or symbol or "UNKNOWN"
+                
                 # Fetch live price on-demand if not yet tracked
                 current_price = play.current_price
                 current_pnl = play.current_pnl
@@ -275,12 +297,13 @@ async def alpha_plays():
                             play.current_price = current_price
                             play.current_pnl = current_pnl
                     except Exception as e:
-                        logger.debug(f"On-demand price fetch failed for {play.candidate.symbol}: {e}")
+                        logger.debug(f"On-demand price fetch failed for {symbol}: {e}")
                 
                 active.append({
                     "id": play_id,
-                    "symbol": play.candidate.symbol,
-                    "name": play.candidate.name,
+                    "symbol": symbol,
+                    "name": name,
+                    "display_name": display_name,
                     "chain": play.candidate.chain,
                     "status": play.status,
                     "trade_type": play.candidate.trade_type,
@@ -422,17 +445,20 @@ async def alpha_plays():
 
 
 @app.post("/api/alpha/approve")
-async def approve_alpha(symbol: str):
+async def approve_alpha(symbol: str, is_limit_order: bool = False):
     """Approve a pending alpha/DEX play from dashboard."""
     orch = require_orch()
     try:
         if not orch.alpha_engine:
             return {"success": False, "error": "Alpha engine not initialized"}
         
-        play = await orch.alpha_engine.approve_play(symbol)
+        play = await orch.alpha_engine.approve_play(symbol, is_limit_order=is_limit_order)
         if play:
-            await orch.alpha_engine.publish_to_vip(play)
-            await orch.alpha_engine.publish_teaser_to_free(play)
+            if not play.is_limit_order:
+                await orch.alpha_engine.publish_to_vip(play)
+                await orch.alpha_engine.publish_teaser_to_free(play)
+            else:
+                logger.info(f"Alpha limit order {symbol} approved from dashboard — waiting for entry hit")
             
             return {
                 "success": True,
@@ -886,6 +912,10 @@ async def update_signal_prices(signal_id: str, update: SignalUpdate):
             updates['take_profit_2'] = update.take_profit_2
         if update.take_profit_3 is not None:
             updates['take_profit_3'] = update.take_profit_3
+        if update.order_type is not None:
+            updates['is_limit_order'] = update.order_type.lower() == 'limit'
+            # Also update in-memory signal object if present
+            signal.is_limit_order = updates['is_limit_order']
         
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
@@ -1868,6 +1898,99 @@ async def send_test_signal():
     except Exception as e:
         logger.error(f"Test signal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/test/telegram")
+async def test_telegram_channels():
+    """Test Telegram bot can post to VIP and Free channels. Returns detailed diagnostics."""
+    orch = require_orch()
+    results = {"tests": [], "all_passed": False}
+    all_passed = True
+    
+    # Test 1: Bot instance exists
+    bot = getattr(orch.channel_publisher, 'bot', None)
+    vip_id = getattr(orch.channel_publisher, 'vip_channel_id', None)
+    free_id = getattr(orch.channel_publisher, 'free_channel_id', None)
+    
+    results["tests"].append({
+        "name": "Bot instance",
+        "status": "PASS" if bot else "FAIL",
+        "detail": f"Bot type: {type(bot).__name__}" if bot else "channel_publisher.bot is None"
+    })
+    if not bot:
+        all_passed = False
+    
+    results["tests"].append({
+        "name": "VIP channel ID",
+        "status": "PASS" if vip_id else "FAIL",
+        "detail": str(vip_id) if vip_id else "TELEGRAM_VIP_CHANNEL_ID not set"
+    })
+    if not vip_id:
+        all_passed = False
+    
+    results["tests"].append({
+        "name": "Free channel ID",
+        "status": "PASS" if free_id else "FAIL",
+        "detail": str(free_id) if free_id else "TELEGRAM_FREE_CHANNEL_ID not set"
+    })
+    
+    # Test 2: Send text to VIP
+    if bot and vip_id:
+        try:
+            msg = await bot.send_message(
+                chat_id=vip_id,
+                text="🔧 <b>Test message from dashboard</b>\n\nIf you see this, VIP publishing works.",
+                parse_mode='HTML'
+            )
+            results["tests"].append({
+                "name": "VIP text send",
+                "status": "PASS",
+                "detail": f"Message ID: {msg.message_id}"
+            })
+        except Exception as e:
+            all_passed = False
+            results["tests"].append({
+                "name": "VIP text send",
+                "status": "FAIL",
+                "detail": str(e)
+            })
+    else:
+        all_passed = False
+        results["tests"].append({
+            "name": "VIP text send",
+            "status": "SKIP",
+            "detail": "Bot or VIP channel ID missing"
+        })
+    
+    # Test 3: Send text to Free
+    if bot and free_id:
+        try:
+            msg = await bot.send_message(
+                chat_id=free_id,
+                text="🔧 <b>Test message from dashboard</b>\n\nIf you see this, Free publishing works.",
+                parse_mode='HTML'
+            )
+            results["tests"].append({
+                "name": "Free text send",
+                "status": "PASS",
+                "detail": f"Message ID: {msg.message_id}"
+            })
+        except Exception as e:
+            all_passed = False
+            results["tests"].append({
+                "name": "Free text send",
+                "status": "FAIL",
+                "detail": str(e)
+            })
+    else:
+        results["tests"].append({
+            "name": "Free text send",
+            "status": "SKIP",
+            "detail": "Bot or Free channel ID missing"
+        })
+    
+    results["all_passed"] = all_passed
+    return results
 
 
 # ==================== ENHANCED ANALYTICS ====================

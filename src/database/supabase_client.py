@@ -845,7 +845,10 @@ class SupabaseClient:
                 for meta_field in ['approved_at', 'closed_at', 'tp1_hit_at', 'tp2_hit_at', 'sl_hit_at',
                                     'entry_price', 'stop_loss', 'take_profit_1', 'take_profit_2',
                                     'position_size', 'current_price', 'current_pnl',
-                                    'vip_message_id', 'free_message_id', 'notes']:
+                                    'vip_message_id', 'free_message_id', 'notes', 'is_limit_order', 'actual_entry',
+                                    'entry_liquidity', 'highest_price', 'trailing_stop_pct',
+                                    'time_stop_hours', 'partial_sell_1_done', 'partial_sell_2_done',
+                                    'is_degen']:
                     mv = _get(meta_field)
                     if mv is not None:
                         if isinstance(mv, datetime):

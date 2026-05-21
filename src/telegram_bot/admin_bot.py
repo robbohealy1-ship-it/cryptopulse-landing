@@ -18,11 +18,14 @@ logger = get_logger(__name__)
 
 
 class AdminBot:
-    def __init__(self, signal_callback=None, rejection_callback=None):
+    def __init__(self, signal_callback=None, rejection_callback=None,
+                 alpha_callback=None, alpha_rejection_callback=None):
         self.bot_token = settings.TELEGRAM_BOT_TOKEN
         self.admin_chat_id = settings.TELEGRAM_ADMIN_CHAT_ID
         self.signal_callback = signal_callback
         self.rejection_callback = rejection_callback
+        self.alpha_callback = alpha_callback
+        self.alpha_rejection_callback = alpha_rejection_callback
         
         self.app = None
         self.chart_generator = ChartGenerator()
@@ -30,6 +33,7 @@ class AdminBot:
         self.welcome_sequence = WelcomeSequence()
         
         self.pending_signals = {}
+        self.pending_alpha_plays = {}
     
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Suppress repetitive network error spam; log at debug level only."""
@@ -402,6 +406,30 @@ class AdminBot:
                 await self._handle_payment_selection(query, user_id, crypto)
                 return
         
+        # Handle alpha play approval callbacks
+        if data.startswith("alpha_approve_") or data.startswith("alpha_reject_"):
+            action, symbol = data.split('_', 1)
+            # action will be "alpha/approve" or "alpha/reject" after first split
+            # we need to split again
+            parts = data.split('_', 2)
+            if len(parts) >= 3:
+                action = parts[1]  # "approve" or "reject"
+                symbol = parts[2]
+            else:
+                await query.edit_message_text(text="❌ Invalid alpha callback")
+                return
+            
+            if symbol not in self.pending_alpha_plays:
+                await query.edit_message_text(text="❌ Alpha play expired or already processed")
+                return
+            
+            candidate = self.pending_alpha_plays[symbol]
+            if action == "approve":
+                await self._handle_alpha_approve(query, candidate)
+            elif action == "reject":
+                await self._handle_alpha_reject(query, candidate)
+            return
+        
         # Handle signal approval callbacks
         action, signal_id = data.split('_', 1)
         
@@ -598,6 +626,76 @@ class AdminBot:
             await self.send_signal_for_approval(signal)
         
         logger.info(f"Signal {signal.symbol} delayed by admin")
+    
+    # ============== ALPHA PLAY APPROVAL ==============
+    
+    async def send_alpha_for_approval(self, candidate) -> bool:
+        try:
+            self.pending_alpha_plays[candidate.symbol] = candidate
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"alpha_approve_{candidate.symbol}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"alpha_reject_{candidate.symbol}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴", "degen": "🎰"}.get(candidate.risk_level, "🟡")
+            msg = (
+                f"🎰 <b>New Alpha Play Pending Approval</b>\n\n"
+                f"<b>{candidate.symbol}</b> ({candidate.chain.upper()})\n"
+                f"Type: {candidate.trade_type} | Risk: {risk_emoji} {candidate.risk_level}\n"
+                f"Score: {candidate.overall_score:.1f}/100\n"
+                f"Price: ${candidate.price_usd:.6f}\n"
+                f"Liquidity: ${candidate.liquidity_usd:,.0f}\n\n"
+                f"<i>{candidate.catalyst[:120]}...</i>\n\n"
+                f"{candidate.dex_url or ''}"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.admin_chat_id,
+                text=msg,
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            logger.info(f"Alpha play {candidate.symbol} sent for approval via Telegram")
+            return True
+        except Exception as e:
+            logger.error(f"Error sending alpha play for approval: {e}")
+            return False
+    
+    async def _handle_alpha_approve(self, query, candidate):
+        del self.pending_alpha_plays[candidate.symbol]
+        
+        await query.edit_message_text(
+            text=f"✅ <b>ALPHA APPROVED</b>\n\n{query.message.text}",
+            parse_mode='HTML'
+        )
+        
+        if self.alpha_callback:
+            try:
+                await self.alpha_callback(candidate)
+            except Exception as e:
+                logger.error(f"Alpha approval callback error: {e}")
+        
+        logger.info(f"Alpha play {candidate.symbol} approved by admin via Telegram")
+    
+    async def _handle_alpha_reject(self, query, candidate):
+        del self.pending_alpha_plays[candidate.symbol]
+        
+        await query.edit_message_text(
+            text=f"❌ <b>ALPHA REJECTED</b>\n\n{query.message.text}",
+            parse_mode='HTML'
+        )
+        
+        if self.alpha_rejection_callback:
+            try:
+                await self.alpha_rejection_callback(candidate)
+            except Exception as e:
+                logger.error(f"Alpha rejection callback error: {e}")
+        
+        logger.info(f"Alpha play {candidate.symbol} rejected by admin via Telegram")
     
     async def test_twitter_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin diagnostic: Test Twitter/X API connection"""

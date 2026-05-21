@@ -40,7 +40,9 @@ class CryptoPulseOrchestrator:
         self.signal_engine = SignalEngine()
         self.admin_bot = AdminBot(
             signal_callback=self.on_signal_approved,
-            rejection_callback=self.on_signal_rejected
+            rejection_callback=self.on_signal_rejected,
+            alpha_callback=self.on_alpha_approved,
+            alpha_rejection_callback=self.on_alpha_rejected
         )
         self.vip_bot = VIPBot(
             notification_callback=self._on_vip_notification
@@ -80,6 +82,7 @@ class CryptoPulseOrchestrator:
         self.scheduler = AsyncIOScheduler()
         self.running = False
         self.pending_delayed_signals = {}  # Track signals waiting for free channel delay
+        self._pending_limit_extremes = {}  # Track price extremes for DB-loaded limit orders (survives restart via DB)
         
         # In-memory TP hit tracking (workaround until DB migration is run)
         # Format: {signal_id: {tp1_hit: True, tp2_hit: False, stop_moved: True}}
@@ -218,22 +221,13 @@ class CryptoPulseOrchestrator:
                 logger.info("🔔 Custom alert system linked to VIP bot")
             
             # Initialize Alpha/Degen Plays Engine
-            if not dashboard_only:
-                self.alpha_publisher = AlphaPublisher(bot=self.channel_publisher.bot)
-                self.alpha_engine = AlphaPlaysEngine(
-                    db=self.db,
-                    publisher=self.alpha_publisher,
-                    admin_notification=self.admin_bot.send_notification
-                )
-            else:
-                # Dashboard-only: use channel_publisher's bot (main token) so approvals publish to VIP/Free channels
-                # The admin bot uses a different token and can't post to channels
-                self.alpha_publisher = AlphaPublisher(bot=self.channel_publisher.bot)
-                self.alpha_engine = AlphaPlaysEngine(
-                    db=self.db,
-                    publisher=self.alpha_publisher,
-                    admin_notification=self.admin_bot.send_notification
-                )
+            self.alpha_publisher = AlphaPublisher(bot=self.channel_publisher.bot)
+            self.alpha_engine = AlphaPlaysEngine(
+                db=self.db,
+                publisher=self.alpha_publisher,
+                admin_notification=self.admin_bot.send_notification,
+                admin_bot=self.admin_bot if not dashboard_only else None
+            )
             await self.alpha_engine.initialize()
             logger.info("🎰 Alpha Plays Engine initialized — low-cap degen plays active")
             
@@ -377,10 +371,10 @@ class CryptoPulseOrchestrator:
             replace_existing=True
         )
         
-        # Evening summary: EOD wrap-up (20:00 UTC)
+        # Evening summary: EOD wrap-up (21:00 UTC = 10pm UK/BST)
         self.scheduler.add_job(
             self._post_evening_recap,
-            CronTrigger(hour=20, minute=0),
+            CronTrigger(hour=21, minute=0),
             id='evening_recap',
             name='Evening market summary',
             replace_existing=True
@@ -453,7 +447,7 @@ class CryptoPulseOrchestrator:
         logger.info("🎰 Alpha Plays scheduled: discovery every 6h, tracking every 5m")
         
         logger.info("✅ Scheduler configured")
-        logger.info("📣 Morning overview (08:30) → VIP + Free | Evening summary (20:00) → VIP + Free")
+        logger.info("📣 Morning overview (08:30) → VIP + Free | Evening summary (21:00 UTC / 10pm UK) → VIP + Free")
         logger.info("🐦 Social media: 3x/day (Twitter/X only)")
         logger.info("💎 Pro: custom alerts (5m), giveaways (monthly)")
         logger.info("🚀 Viral: Daily (09:00) + Weekly (Sun 10:00) automated marketing")
@@ -643,15 +637,18 @@ class CryptoPulseOrchestrator:
                 logger.error(f"Error processing candidate {candidate.symbol}: {e}")
     
     async def on_signal_approved(self, signal):
+        logger.info(f"[APPROVE] on_signal_approved START for {signal.symbol} (status={signal.status.value}, source={'dashboard' if self.dashboard_only else 'telegram'})")
         try:
             # Guard against duplicate approvals — only skip if already ACTIVE (published)
-            # APPROVED is set by _handle_approve BEFORE this callback runs, so we must not skip on APPROVED
             if signal.status == SignalStatus.ACTIVE or getattr(signal, 'vip_channel_posted', False):
-                logger.warning(f"Signal {signal.symbol} already published — skipping duplicate publish")
+                logger.warning(f"[APPROVE] Signal {signal.symbol} already ACTIVE/vip_channel_posted — SKIPPING")
                 return
             
             # Check if signal has expired before approval
-            if signal.expires_at and datetime.utcnow() > signal.expires_at:
+            expires_at = signal.expires_at
+            if expires_at and expires_at.tzinfo:
+                expires_at = expires_at.replace(tzinfo=None)
+            if expires_at and datetime.utcnow() > expires_at:
                 signal.cancelled = True
                 signal.cancellation_reason = "Signal expired before admin approval"
                 await self.db.save_signal(signal)
@@ -659,74 +656,72 @@ class CryptoPulseOrchestrator:
                     await self.admin_bot.send_notification(
                         f"⏰ Signal {signal.symbol} expired before approval - not published"
                     )
-                logger.info(f"Signal {signal.symbol} expired - not published")
+                logger.info(f"[APPROVE] Signal {signal.symbol} expired - not published")
                 return
             
             signal.admin_approved = True
             signal.status = SignalStatus.APPROVED
             signal.approved_at = datetime.utcnow()
             
-            # 💾 CRITICAL: Save signal to DB BEFORE publishing
-            # This ensures the signal persists even if Telegram publish fails
+            logger.info(f"[APPROVE] Saving signal {signal.symbol} to DB with status=APPROVED")
             saved = await self.db.save_signal(signal)
             if not saved:
-                logger.error(f"❌ Failed to save signal {signal.symbol} to database before publishing")
+                logger.error(f"[APPROVE] ❌ DB save failed for {signal.symbol}")
                 raise RuntimeError(f"Signal {signal.symbol} could not be saved to database")
+            logger.info(f"[APPROVE] ✅ DB save OK for {signal.symbol}")
             
-            # Check if this is VIP-exclusive (90%+ confidence)
             vip_only = signal.confidence >= 90
-            
-            if vip_only:
-                logger.info(f"🌟 Signal {signal.symbol} is VIP EXCLUSIVE ({signal.confidence:.1f}% confidence)")
-            else:
-                logger.info(f"✅ Signal {signal.symbol} approved - publishing...")
+            logger.info(f"[APPROVE] Signal {signal.symbol} vip_only={vip_only} (confidence={signal.confidence})")
             
             # Publish VIP channel immediately
+            logger.info(f"[APPROVE] Calling channel_publisher.publish_to_vip for {signal.symbol}")
             await self.channel_publisher.publish_to_vip(signal)
             signal.vip_channel_posted = True
+            logger.info(f"[APPROVE] ✅ VIP publish OK for {signal.symbol} (msg_id={signal.vip_channel_message_id})")
             
-            # 💰 Set actual entry price for market orders before tracking
-            # Limit orders will only set actual_entry when the limit price is hit
+            # Set actual entry price for market orders
             if not signal.is_limit_order:
                 try:
                     actual_price = await self._get_current_price(signal.symbol)
                     if actual_price and actual_price > 0:
                         signal.actual_entry = actual_price
-                        logger.info(f"📊 Market order actual entry for {signal.symbol}: ${actual_price:.4f}")
+                        logger.info(f"[APPROVE] Actual entry price for {signal.symbol}: ${actual_price:.4f}")
                 except Exception as price_err:
-                    logger.warning(f"Could not fetch actual entry price for {signal.symbol}: {price_err}")
+                    logger.warning(f"[APPROVE] Could not fetch actual entry price for {signal.symbol}: {price_err}")
             
-            # 🤖 AUTOPILOT: Start tracking signal performance
+            # AUTOPILOT: Start tracking
             if self.autopilot:
+                logger.info(f"[APPROVE] Starting autopilot tracking for {signal.symbol}")
                 await self.autopilot.on_signal_approved(signal)
             
-            # Send teaser to free channel (different approach for VIP-only vs regular)
+            # Free channel teaser
             if not vip_only:
-                # Regular signal: Use campaign engine (sends 1 teaser + Discord + Twitter)
+                logger.info(f"[APPROVE] Sending free channel teaser for {signal.symbol}")
                 if self.campaign_engine:
                     await self.campaign_engine.signal_approved_campaign(signal)
-                
-                if not self.dashboard_only:
-                    await self.admin_bot.send_notification(
-                        f"✅ Signal {signal.symbol} approved!\n"
-                        f"🌟 VIP channel: Published NOW\n"
-                        f"📢 Free channel: Teaser sent (no full card)"
-                    )
+                    logger.info(f"[APPROVE] ✅ Free teaser sent for {signal.symbol}")
+                else:
+                    logger.warning(f"[APPROVE] campaign_engine is None — free teaser NOT sent")
             else:
-                # VIP-only signal: Use simple teaser (no campaign engine to avoid duplicates)
+                logger.info(f"[APPROVE] Sending VIP-exclusive teaser for {signal.symbol}")
                 await self.channel_publisher.send_vip_teaser(signal)
-                if not self.dashboard_only:
-                    await self.admin_bot.send_notification(
-                        f"🌟 VIP EXCLUSIVE: {signal.symbol} published to VIP only!\n"
-                        f"Confidence: {signal.confidence:.1f}%\n"
-                        f"📢 Marketing teaser sent to free channel"
-                    )
+                logger.info(f"[APPROVE] ✅ VIP teaser sent for {signal.symbol}")
             
-            # 📣 Cross-post to Discord, Twitter/X, Webhook (independent error handling)
+            # Admin notification (only in full mode)
+            if not self.dashboard_only:
+                await self.admin_bot.send_notification(
+                    f"✅ Signal {signal.symbol} approved!\n"
+                    f"🌟 VIP channel: Published NOW\n"
+                    f"📢 Free channel: Teaser sent"
+                )
+            
+            # Cross-post
+            logger.info(f"[APPROVE] Cross-posting {signal.symbol}")
             await self._crosspost_signal(signal)
             
             signal.published_at = datetime.utcnow()
             await self.db.save_signal(signal)
+            logger.info(f"[APPROVE] ✅ on_signal_approved COMPLETE for {signal.symbol}")
             
             logger.info(f"✅ Signal {signal.symbol} published successfully")
             
@@ -764,6 +759,35 @@ class CryptoPulseOrchestrator:
             
         except Exception as e:
             logger.error(f"Error handling rejected signal: {e}")
+    
+    async def on_alpha_approved(self, candidate):
+        """Alpha play approved from Telegram admin bot"""
+        try:
+            if self.alpha_engine:
+                # Check if admin set this as a limit order via dashboard edits
+                is_limit = getattr(candidate, 'is_limit_order', False)
+                active_play = await self.alpha_engine.approve_alpha_play(candidate.symbol, is_limit_order=is_limit)
+                if active_play:
+                    if not is_limit:
+                        await self.alpha_engine.publish_to_vip(active_play)
+                        logger.info(f"🎰 Alpha play {candidate.symbol} approved from Telegram and published")
+                    else:
+                        logger.info(f"🎰 Alpha limit order {candidate.symbol} approved from Telegram — waiting for entry hit")
+                else:
+                    logger.warning(f"Alpha play {candidate.symbol} approval returned None")
+            else:
+                logger.warning("Alpha engine not initialized — cannot approve alpha play")
+        except Exception as e:
+            logger.error(f"Error handling alpha approval: {e}")
+    
+    async def on_alpha_rejected(self, candidate):
+        """Alpha play rejected from Telegram admin bot"""
+        try:
+            logger.info(f"🎰 Alpha play {candidate.symbol} rejected from Telegram")
+            if self.alpha_engine and candidate.symbol in self.alpha_engine.pending_plays:
+                del self.alpha_engine.pending_plays[candidate.symbol]
+        except Exception as e:
+            logger.error(f"Error handling alpha rejection: {e}")
     
     async def check_expired_signals(self):
         """Check for pending signals that have expired before admin approval"""
@@ -806,18 +830,63 @@ class CryptoPulseOrchestrator:
                 # --- LIMIT ORDER FIX ---
                 # For limit orders, only check TP/SL after the entry has been filled
                 is_limit = getattr(signal, 'is_limit_order', False)
-                if is_limit:
-                    # LONG limit: filled when price drops TO entry (current <= entry)
-                    # SHORT limit: filled when price rises TO entry (current >= entry)
+                if is_limit and signal.status.value != 'active':
+                    # Track price extremes so brief touches between checks aren't missed
+                    # (mirrors autopilot_system.py behavior for in-memory tracking)
+                    sid = signal.id
+                    extremes = self._pending_limit_extremes.get(sid, {'lowest': float('inf'), 'highest': 0.0})
+                    extremes['lowest'] = min(extremes['lowest'], current_price)
+                    extremes['highest'] = max(extremes['highest'], current_price)
+                    self._pending_limit_extremes[sid] = extremes
+                    
+                    entry = signal.entry_price
+                    limit_filled = False
                     if signal.direction.value == "LONG":
-                        if current_price > signal.entry_price:
-                            # Limit not filled yet — price hasn't dropped to entry
-                            continue
+                        # LONG limit: filled when price drops to or below entry
+                        limit_filled = (current_price <= entry) or (extremes['lowest'] <= entry)
                     else:  # SHORT
-                        if current_price < signal.entry_price:
-                            # Limit not filled yet — price hasn't risen to entry
-                            continue
-                    # If we reach here, limit is filled — proceed with TP/SL checks
+                        # SHORT limit: filled when price rises to or above entry
+                        limit_filled = (current_price >= entry) or (extremes['highest'] >= entry)
+                    
+                    if not limit_filled:
+                        continue  # Limit not filled yet — skip TP/SL checks
+                    
+                    # Limit IS filled — update signal status and notify
+                    signal.status = SignalStatus.ACTIVE
+                    signal.actual_entry = current_price
+                    await self.db.save_signal(signal)
+                    self._pending_limit_extremes.pop(sid, None)  # Clean up
+                    logger.info(f"🎯 Limit order filled for {signal.symbol} at ${current_price:.4f} (DB-loaded after restart)")
+                    
+                    # Notify VIP channel
+                    if self.channel_publisher:
+                        try:
+                            dir_emoji = "🟢 LONG" if signal.direction.value == "LONG" else "🔴 SHORT"
+                            msg = (
+                                f"🎯 <b>LIMIT ORDER FILLED</b>\n\n"
+                                f"{signal.symbol} {dir_emoji}\n"
+                                f"Entry: ${current_price:.4f}\n"
+                                f"SL: ${signal.stop_loss:.4f}\n"
+                                f"TP1: ${signal.take_profit_1:.4f}\n\n"
+                                f"📊 Now tracking TP/SL automatically"
+                            )
+                            await self.channel_publisher.bot.send_message(
+                                chat_id=self.channel_publisher.vip_channel_id,
+                                text=msg,
+                                parse_mode='HTML'
+                            )
+                        except Exception:
+                            pass
+                    
+                    # Also hand off to autopilot for consistent tracking
+                    if self.autopilot:
+                        try:
+                            await self.autopilot.performance.track_signal(signal)
+                        except Exception:
+                            pass
+                
+                # If signal is still a limit but status is already 'active', it was filled earlier
+                # Proceed with TP/SL checks below
                 
                 # Track which TPs have been hit
                 tp1_hit = getattr(signal, 'tp1_hit', False)
@@ -1157,8 +1226,11 @@ Good luck today! 🎯"""
                     current_price = await self._get_current_price(sig.symbol)
                     
                     if current_price:
-                        entry = sig.actual_entry or sig.entry_price
-                        pnl = ((current_price - entry) / entry) * 100
+                        entry = sig.actual_entry or sig.entry_price or 0
+                        if entry and entry > 0:
+                            pnl = ((current_price - entry) / entry) * 100
+                        else:
+                            pnl = 0
                         if sig.direction.value == "SHORT":
                             pnl = -pnl
                         
@@ -1167,9 +1239,10 @@ Good luck today! 🎯"""
                         tp2_status = "✅" if getattr(sig, 'tp2_hit', False) else "⏳"
                         tp3_status = "✅" if getattr(sig, 'tp3_hit', False) else "⏳"
                         
+                        entry_str = f"${entry:.4f}" if entry else "N/A"
                         active_trades_text += f"""
 {sig.symbol} {sig.direction.value}
-Entry: ${entry:.4f} | Current: ${current_price:.4f}
+Entry: {entry_str} | Current: ${current_price:.4f}
 P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
 """
@@ -1184,8 +1257,10 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
                     tp1_status = "✅" if play.tp1_hit_at else "⏳"
                     tp2_status = "✅" if play.tp2_hit_at else "⏳"
                     sl_status = "🛑" if play.sl_hit_at else "🛡"
+                    entry_p = play.entry_price if play.entry_price else 0
+                    curr_p = play.current_price if play.current_price else 0
                     alpha_plays_text += f"""{play.candidate.symbol} ({play.candidate.chain.upper()})
-Entry: ${play.entry_price:.6f} | Current: ${play.current_price:.6f}
+Entry: ${entry_p:.6f} | Current: ${curr_p:.6f}
 P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
 """
@@ -1202,8 +1277,12 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
                 filtered = []
                 for s in signals:
                     close_time = getattr(s, 'closed_at', None) or getattr(s, 'updated_at', None) or getattr(s, 'created_at', None)
-                    if close_time and close_time >= start_time:
-                        filtered.append(s)
+                    if close_time:
+                        # Strip timezone to avoid naive vs aware comparison errors
+                        if hasattr(close_time, 'tzinfo') and close_time.tzinfo is not None:
+                            close_time = close_time.replace(tzinfo=None)
+                        if close_time >= start_time:
+                            filtered.append(s)
                 return filtered
             
             today_signals = _filter_by_close_time(closed_signals, today_start)

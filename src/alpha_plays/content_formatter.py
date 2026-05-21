@@ -43,12 +43,14 @@ class AlphaContentFormatter:
     }
     
     @classmethod
-    def format_vip_alpha(cls, play: AlphaPlayCandidate, 
+    def format_vip_alpha(cls, play: AlphaPlayCandidate,
                          entry_price: float = None,
                          stop_loss: float = None,
                          take_profit_1: float = None,
                          take_profit_2: float = None,
-                         position_size: str = "2-5%") -> str:
+                         position_size: str = "2-5%",
+                         is_limit_order: bool = False,
+                         is_degen: bool = False) -> str:
         """
         Format a full alpha play for VIP channel with trade classification and fundamental report.
         """
@@ -88,31 +90,55 @@ class AlphaContentFormatter:
 • 5min Change: {play.price_change_5min:+.1f}%
 """
         
-        message += f"""
-👥 <b>Holders Data:</b>
-• Holders: {play.holders:,}
-• Holder Growth 24h: {play.holder_growth_24h:+.1f}%
-• Top 10 Concentration: {play.top_holder_concentration:.1f}%
-• Transactions 24h: {play.transactions_24h:,}
-• Buys: {play.buys_24h:,} | Sells: {play.sells_24h:,}
-• Buy/Sell Ratio: {play.buy_sell_ratio:.2f}x
-
-🎯 <b>Trade Setup:</b>
-"""
+        # Build holders section with real data only
+        holders_lines = ["\n👥 <b>Holders Data:</b>"]
+        if play.holders and play.holders > 0:
+            holders_lines.append(f"• Holders: {play.holders:,}")
+        if play.holder_growth_24h != 0.0:
+            holders_lines.append(f"• Holder Growth 24h: {play.holder_growth_24h:+.1f}%")
+        if play.top_holder_concentration and play.top_holder_concentration > 0:
+            holders_lines.append(f"• Top 10 Concentration: {play.top_holder_concentration:.1f}%")
+        if play.transactions_24h and play.transactions_24h > 0:
+            holders_lines.append(f"• Transactions 24h: {play.transactions_24h:,}")
+        if play.buys_24h or play.sells_24h:
+            holders_lines.append(f"• Buys: {play.buys_24h:,} | Sells: {play.sells_24h:,}")
+        if play.buy_sell_ratio > 0:
+            holders_lines.append(f"• Buy/Sell Ratio: {play.buy_sell_ratio:.2f}x")
         
+        # Only show the section if we have at least one real metric
+        if len(holders_lines) > 1:
+            message += "\n".join(holders_lines) + "\n"
+        
+        message += "\n🎯 <b>Trade Setup:</b>\n"
+        order_label = "🎯 LIMIT ORDER" if is_limit_order else "⚡ MARKET ORDER"
+        message += f"• Type: {order_label}\n"
+
         if entry_price:
             message += f"• Entry: ${entry_price:.6f}\n"
         else:
             message += f"• Entry: ~${play.price_usd:.6f} (current)\n"
-        
-        if stop_loss:
-            message += f"• Stop Loss: ${stop_loss:.6f}\n"
-        
-        if take_profit_1:
-            message += f"• Take Profit 1: ${take_profit_1:.6f} ({upside_str})\n"
-        
-        if take_profit_2:
-            message += f"• Take Profit 2: ${take_profit_2:.6f} ({upside_2_str})\n"
+
+        if is_degen:
+            # Degen strategy layout
+            message += f"""
+🎰 <b>DEGEN STRATEGY:</b>
+• TP1 (2x): Sell 50% at ${take_profit_1:.6f}
+• TP2 (5x): Sell 25% at ${take_profit_2:.6f}
+• Runner: 25% with 20% trailing stop
+• ❌ No hard stop loss — rug protection active
+• ⏰ Time stop: 48h if no breakout
+"""
+            # Whale concentration warning
+            if play.top_holder_concentration > 50:
+                message += f"⚠️ <b>WHALE ALERT:</b> Top 10 hold {play.top_holder_concentration:.1f}% — high concentration risk!\n"
+        else:
+            # Standard strategy
+            if stop_loss:
+                message += f"• Stop Loss: ${stop_loss:.6f}\n"
+            if take_profit_1:
+                message += f"• Take Profit 1: ${take_profit_1:.6f} ({upside_str})\n"
+            if take_profit_2:
+                message += f"• Take Profit 2: ${take_profit_2:.6f} ({upside_2_str})\n"
         
         message += f"""
 💰 <b>Position Size:</b> {position_size} of portfolio
@@ -153,9 +179,9 @@ class AlphaContentFormatter:
         # Add DEX links
         message += f"""
 🔗 <b>Quick Links:</b>
-📊 <a href='{play.chart_url}'>Chart (GeckoTerminal)</a>
+📊 <a href='{play.chart_url}'>Chart</a>
 💱 <a href='{play.buy_url}'>Buy</a>
-📋 <a href='{play.dex_url}'>Token Info (DexScreener)</a>
+📋 <a href='{play.dex_url}'>Token Info</a>
 """
         # Always show contract address for manual copy-paste
         if play.token_address:

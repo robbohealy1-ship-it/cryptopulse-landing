@@ -30,18 +30,40 @@ class PerformanceTracker:
     - Generates performance stats for reports
     """
     
-    def __init__(self, scanner=None, db=None, on_signal_result=None):
+    def __init__(self, scanner=None, db=None, on_signal_result=None, channel_publisher=None):
         self.scanner = scanner
         self.db = db
         self.on_signal_result = on_signal_result  # Callback for FOMO campaigns
+        self.channel_publisher = channel_publisher
         self.active_signals: Dict[str, TradingSignal] = {}  # symbol -> signal
         self.pending_limit_orders: Dict[str, TradingSignal] = {}  # waiting for limit hit
+        # Track price extremes for pending limit orders so brief touches aren't missed
+        self.pending_limit_extremes: Dict[str, dict] = {}  # signal_id -> {'lowest': float, 'highest': float}
         self.performance_log: List[Dict] = []
         
     async def track_signal(self, signal: TradingSignal):
         """Start tracking an approved signal for TP/SL hits"""
+        # If limit order is already active (e.g. detected by main.py after restart), track as active
+        if signal.is_limit_order and signal.status.value == 'active':
+            entry = signal.actual_entry if signal.actual_entry is not None else signal.entry_price
+            self.active_signals[signal.id] = {
+                'signal': signal,
+                'entry_price': entry,
+                'highest_price': entry,
+                'lowest_price': entry,
+                'tp1_hit': False,
+                'tp2_hit': False,
+                'tp3_hit': False,
+                'stop_moved_to_breakeven': False,
+                'partial_exits': [],
+                'entry_time': datetime.utcnow()
+            }
+            logger.info(f"🎯 Limit order already filled for {signal.symbol} at ${entry:.4f} — active tracking started")
+            return
+        
         if signal.is_limit_order:
             self.pending_limit_orders[signal.id] = signal
+            self.pending_limit_extremes[signal.id] = {'lowest': float('inf'), 'highest': 0.0}
             logger.info(f"⏳ Limit order pending for {signal.symbol} at ${signal.entry_price:.4f} — tracking will start when limit is hit")
             return
         
@@ -86,13 +108,21 @@ class PerformanceTracker:
         entry = signal.entry_price
         direction = signal.direction.value
         
+        # Update extremes tracking so we don't miss brief touches between checks
+        extremes = self.pending_limit_extremes.get(signal_id, {'lowest': float('inf'), 'highest': 0.0})
+        extremes['lowest'] = min(extremes['lowest'], current_price)
+        extremes['highest'] = max(extremes['highest'], current_price)
+        self.pending_limit_extremes[signal_id] = extremes
+        
         hit = False
         if direction == 'LONG':
             # For LONG limit: price must drop to or below entry
-            hit = current_price <= entry
+            # Check both current price AND the lowest price seen since tracking started
+            hit = (current_price <= entry) or (extremes['lowest'] <= entry)
         else:  # SHORT
             # For SHORT limit: price must rise to or above entry
-            hit = current_price >= entry
+            # Check both current price AND the highest price seen since tracking started
+            hit = (current_price >= entry) or (extremes['highest'] >= entry)
         
         if hit:
             signal.actual_entry = current_price
@@ -110,7 +140,44 @@ class PerformanceTracker:
                 'partial_exits': [],
                 'entry_time': datetime.utcnow()
             }
-            logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} — tracking started")
+            # Log which condition triggered the hit
+            if direction == 'LONG' and current_price > entry:
+                logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} (was briefly at ${extremes['lowest']:.4f} ≤ entry ${entry:.4f}) — tracking started")
+            elif direction == 'SHORT' and current_price < entry:
+                logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} (was briefly at ${extremes['highest']:.4f} ≥ entry ${entry:.4f}) — tracking started")
+            else:
+                logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} — tracking started")
+            
+            # Clean up extremes tracking
+            self.pending_limit_extremes.pop(signal_id, None)
+            
+            # Notify VIP channel
+            if self.channel_publisher:
+                try:
+                    dir_emoji = "🟢 LONG" if signal.direction.value == "LONG" else "🔴 SHORT"
+                    msg = (
+                        f"🎯 <b>LIMIT ORDER FILLED</b>\n\n"
+                        f"{signal.symbol} {dir_emoji}\n"
+                        f"Entry: ${current_price:.4f}\n"
+                        f"SL: ${signal.stop_loss:.4f}\n"
+                        f"TP1: ${signal.take_profit_1:.4f}\n\n"
+                        f"📊 Now tracking TP/SL automatically"
+                    )
+                    await self.channel_publisher.bot.send_message(
+                        chat_id=self.channel_publisher.vip_channel_id,
+                        text=msg,
+                        parse_mode='HTML'
+                    )
+                    logger.info(f"📤 Limit fill notification sent to VIP for {signal.symbol}")
+                except Exception as e:
+                    logger.warning(f"Could not send limit fill VIP notification: {e}")
+            
+            # Save updated signal to DB
+            if self.db:
+                try:
+                    await self.db.save_signal(signal)
+                except Exception as e:
+                    logger.warning(f"Could not save limit-filled signal to DB: {e}")
     
     async def check_all_signals(self):
         """Check all active signals for TP/SL hits and update P&L. Also check pending limit orders."""
@@ -578,7 +645,7 @@ class AutoPilotSystem:
         )
         
         # Sub-systems
-        self.performance = PerformanceTracker(scanner, db)
+        self.performance = PerformanceTracker(scanner, db, channel_publisher=channel_publisher)
         self.public_stats = PublicStatsPoster(social_media, discord, channel_publisher, self.performance, db)
         self.trial_manager = FreeTrialManager(db, channel_publisher, self.payment_orchestrator)
         
