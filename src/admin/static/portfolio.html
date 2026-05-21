@@ -76,6 +76,9 @@ tr:hover { background: #0f172a; }
 .badge.tp2 { background: rgba(34,197,94,0.25); color: #22c55e; }
 .badge.tp3 { background: rgba(34,197,94,0.35); color: #22c55e; }
 .badge.sl { background: rgba(239,68,68,0.15); color: #ef4444; }
+.badge.day_trade { background: rgba(56,189,248,0.15); color: #38bdf8; }
+.badge.swing { background: rgba(168,85,247,0.15); color: #a855f7; }
+.badge.fundamental { background: rgba(34,197,94,0.15); color: #22c55e; }
 
 .pnl { font-weight: 600; }
 .pnl.up { color: #22c55e; }
@@ -143,6 +146,16 @@ tr:hover { background: #0f172a; }
     <div class="value" id="closedCount">--</div>
     <div class="change neutral" id="closedCountLabel">Total history</div>
   </div>
+  <div class="card">
+    <h3>Alpha P&L</h3>
+    <div class="value" id="alphaPnl">--</div>
+    <div class="change" id="alphaPnlLabel">Low-cap plays</div>
+  </div>
+  <div class="card">
+    <h3>Alpha Plays</h3>
+    <div class="value" id="alphaCount">--</div>
+    <div class="change neutral" id="alphaCountLabel">DEX + degen</div>
+  </div>
 </div>
 
 <!-- Trades Table -->
@@ -180,6 +193,38 @@ tr:hover { background: #0f172a; }
       </thead>
       <tbody id="tradesTable">
         <tr><td colspan="13" class="empty-state"><div class="loading"></div> Loading portfolio...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Alpha Plays Section -->
+<div class="section">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <h2>Alpha Plays (DEX / Low-Cap)</h2>
+    <div class="last-updated">Last updated: <span id="alphaLastUpdated">--</span></div>
+  </div>
+  
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Chain</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Entry</th>
+          <th>Current/Exit</th>
+          <th>SL</th>
+          <th>TP1</th>
+          <th>TP2</th>
+          <th>P&L %</th>
+          <th>MC</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody id="alphaTable">
+        <tr><td colspan="12" class="empty-state"><div class="loading"></div> Loading alpha plays...</td></tr>
       </tbody>
     </table>
   </div>
@@ -310,9 +355,91 @@ function filterTrades(filter) {
   renderTrades();
 }
 
+function getChainEmoji(chain) {
+  const map = { sol: '☀️', eth: '💎', base: '🔵', bsc: '🟡', avax: '❄️', arb: '🔷', pol: '💜' };
+  return map[(chain || '').toLowerCase()] || '🔗';
+}
+
+function getAlphaStatusBadge(status, tp1, tp2) {
+  if (status === 'active') return '<span class="badge active">ACTIVE</span>';
+  if (status === 'pending') return '<span class="badge pending">PENDING</span>';
+  if (status === 'closed') {
+    if (tp2) return '<span class="badge tp2">TP2 HIT</span>';
+    if (tp1) return '<span class="badge tp1">TP1 HIT</span>';
+    return '<span class="badge sl">SL HIT</span>';
+  }
+  return `<span class="badge closed">${(status || 'unknown').toUpperCase()}</span>`;
+}
+
+function renderAlphaPlays(plays) {
+  const tbody = document.getElementById('alphaTable');
+  if (!plays || plays.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No alpha plays found</td></tr>';
+    return;
+  }
+  
+  let totalAlphaPnl = 0;
+  
+  tbody.innerHTML = plays.map(p => {
+    totalAlphaPnl += (p.current_pnl || 0);
+    const exitPrice = p.status === 'closed' ? (p.actual_exit || p.exit_price) : p.current_price;
+    return `
+    <tr>
+      <td><strong>${p.symbol}</strong></td>
+      <td>${getChainEmoji(p.chain)} ${(p.chain || '').toUpperCase()}</td>
+      <td><span class="badge ${(p.trade_type || 'swing').toLowerCase()}">${p.trade_type || 'Swing'}</span></td>
+      <td>${getAlphaStatusBadge(p.status, p.tp1_hit, p.tp2_hit)}</td>
+      <td>${formatPrice(p.entry_price)}</td>
+      <td>${formatPrice(exitPrice)}</td>
+      <td>${formatPrice(p.stop_loss)}</td>
+      <td>${formatPrice(p.take_profit_1)}</td>
+      <td>${formatPrice(p.take_profit_2)}</td>
+      <td>${renderPnl(p.current_pnl)}</td>
+      <td>$${p.market_cap ? (p.market_cap / 1e6).toFixed(2) + 'M' : '--'}</td>
+      <td>${formatDate(p.created_at)}</td>
+    </tr>
+  `}).join('');
+  
+  return totalAlphaPnl;
+}
+
+async function loadAlphaPortfolio() {
+  try {
+    const res = await fetch('/api/alpha/plays');
+    const data = await res.json();
+    
+    const allAlpha = [];
+    if (data.active) allAlpha.push(...data.active);
+    if (data.pending) allAlpha.push(...data.pending);
+    
+    const totalAlphaPnl = renderAlphaPlays(allAlpha);
+    
+    // Update summary
+    const setVal = (id, val, suffix = '') => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = (val !== undefined ? val : '--') + suffix;
+    };
+    const setClass = (id, val) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.className = 'change ' + (val > 0 ? 'up' : val < 0 ? 'down' : 'neutral');
+    };
+    
+    setVal('alphaPnl', (totalAlphaPnl > 0 ? '+' : '') + totalAlphaPnl.toFixed(2), '%');
+    setClass('alphaPnlLabel', totalAlphaPnl);
+    setVal('alphaCount', allAlpha.length);
+    
+    document.getElementById('alphaLastUpdated').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('alphaTable').innerHTML = 
+      '<tr><td colspan="12" class="empty-state">Failed to load alpha plays</td></tr>';
+  }
+}
+
 // Initial load and auto-refresh every 30 seconds
 loadPortfolio();
-setInterval(loadPortfolio, 30000);
+loadAlphaPortfolio();
+setInterval(() => { loadPortfolio(); loadAlphaPortfolio(); }, 30000);
 </script>
 </body>
 </html>
