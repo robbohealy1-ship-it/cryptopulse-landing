@@ -84,7 +84,7 @@ class M15Strategy(BaseTimeframeStrategy):
         self.session_required = True
     
     def _get_min_session_score(self) -> float:
-        return 50  # Allow 15m signals in any active session (Asian, London, NY)
+        return 50  # Allow 15m signals in any active session
     
     def find_setup(self, df: pd.DataFrame, direction: SignalDirection) -> Optional[Dict]:
         """
@@ -263,7 +263,7 @@ class H1Strategy(BaseTimeframeStrategy):
     def __init__(self):
         super().__init__('1h')
         self.min_confidence = 85
-        self.min_risk_reward = 2.5
+        self.min_risk_reward = 2.0
         self.session_required = True
     
     def _get_min_session_score(self) -> float:
@@ -375,8 +375,8 @@ class H4Strategy(BaseTimeframeStrategy):
     
     def __init__(self):
         super().__init__('4h')
-        self.min_confidence = 88  # Higher bar for 4h
-        self.min_risk_reward = 3.0
+        self.min_confidence = 85
+        self.min_risk_reward = 2.0
         self.session_required = False  # 4h doesn't care about intraday session
     
     def _get_min_session_score(self) -> float:
@@ -465,8 +465,8 @@ class DailyStrategy(BaseTimeframeStrategy):
     
     def __init__(self):
         super().__init__('1d')
-        self.min_confidence = 90  # Highest bar
-        self.min_risk_reward = 4.0
+        self.min_confidence = 85
+        self.min_risk_reward = 2.0
         self.session_required = False
     
     def _get_min_session_score(self) -> float:

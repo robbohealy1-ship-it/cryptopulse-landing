@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     
     ENVIRONMENT: str = "production"
     LOG_LEVEL: str = "INFO"
-    MIN_CONFIDENCE_SCORE: int = 88
+    MIN_CONFIDENCE_SCORE: int = 85
     MAX_SIGNALS_PER_DAY: int = 5
     MIN_DAILY_VOLUME_USD: float = 10000000
     
