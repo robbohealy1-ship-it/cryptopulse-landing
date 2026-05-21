@@ -252,8 +252,11 @@ class SignalEngine:
                 return None
             
             # 11. MULTI-TIMEFRAME ALIGNMENT GATE
-            if inst_score.multi_tf_score < 60 and timeframe in ['15m', '1h']:
-                logger.info(f"🚫 {symbol} {timeframe}: Higher TF not aligned (score: {inst_score.multi_tf_score:.0f})")
+            # 15m: lower threshold (50) since short-term setups don't need perfect HTF alignment
+            # 1h: standard threshold (60) for swing trades
+            mtf_threshold = 50 if timeframe == '15m' else 60
+            if inst_score.multi_tf_score < mtf_threshold and timeframe in ['15m', '1h']:
+                logger.info(f"🚫 {symbol} {timeframe}: Higher TF not aligned (score: {inst_score.multi_tf_score:.0f} < {mtf_threshold})")
                 return None
             
             # 12. CORRELATION FILTER — avoid double exposure on correlated pairs

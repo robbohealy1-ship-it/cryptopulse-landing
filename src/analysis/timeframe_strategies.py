@@ -51,9 +51,9 @@ class BaseTimeframeStrategy:
         elif current_regime == 'balanced':
             return True, "Balanced volatility"
         elif current_regime == 'expansion':
-            # For higher timeframes, expansion can be good
-            if self.timeframe in ['4h', '1d']:
-                return True, "Volatility expansion — trend forming"
+            # For higher timeframes and 15m momentum, expansion can be good
+            if self.timeframe in ['4h', '1d', '15m']:
+                return True, "Volatility expansion — momentum/trend forming"
             return False, "Volatility expansion too chaotic for this timeframe"
         
         return True, "Volatility acceptable"
@@ -84,62 +84,123 @@ class M15Strategy(BaseTimeframeStrategy):
         self.session_required = True
     
     def _get_min_session_score(self) -> float:
-        return 65  # Need decent session for 15m
+        return 50  # Allow 15m signals in any active session (Asian, London, NY)
     
     def find_setup(self, df: pd.DataFrame, direction: SignalDirection) -> Optional[Dict]:
         """
-        15m setups: Look for liquidity sweep + volume profile discount/premium
+        15m setups: Liquidity sweeps, order blocks, and fair value gaps.
+        Multiple setup types = more signals while keeping quality high.
         """
         structure = self.analyzer.analyze_structure(df)
-        
+
         if structure['trend'] == 'neutral':
             return None
-        
-        # For 15m, we want a clear liquidity sweep in the direction
+
         current_price = df['close'].iloc[-1]
-        
-        # Find liquidity zones
+
+        # ─── SETUP 1: Liquidity Sweep (original, strictest) ───
         zones = self.analyzer.find_liquidity_zones(df)
-        
+
         if direction == SignalDirection.LONG:
-            # Need: downtrend or potential reversal (could reverse up) + swept liquidity below
-            if structure['trend'] not in ['downtrend', 'potential_reversal']:
-                return None
-            
-            # Look for equal lows (liquidity below)
-            equal_lows = [z for z in zones if z.type == 'equal_lows']
-            if not equal_lows:
-                return None
-            
-            # Check if price swept below recent low then reversed
-            recent_low = df['low'].iloc[-10:].min()
-            if df['low'].iloc[-1] <= recent_low * 1.002 and current_price > df['open'].iloc[-1]:
-                return {
-                    'type': SetupType.LIQUIDITY_SWEEP,
-                    'direction': direction,
-                    'entry_zone': (recent_low * 0.998, current_price),
-                    'swept_level': recent_low,
-                    'reason': '15m liquidity sweep + bullish reversal candle'
-                }
-        
+            if structure['trend'] in ['downtrend', 'potential_reversal']:
+                equal_lows = [z for z in zones if z.type == 'equal_lows']
+                if equal_lows:
+                    recent_low = df['low'].iloc[-10:].min()
+                    if df['low'].iloc[-1] <= recent_low * 1.002 and current_price > df['open'].iloc[-1]:
+                        return {
+                            'type': SetupType.LIQUIDITY_SWEEP,
+                            'direction': direction,
+                            'entry_zone': (recent_low * 0.998, current_price),
+                            'swept_level': recent_low,
+                            'reason': '15m liquidity sweep + bullish reversal candle'
+                        }
         else:  # SHORT
-            if structure['trend'] not in ['uptrend', 'potential_reversal']:
-                return None
-            
-            equal_highs = [z for z in zones if z.type == 'equal_highs']
-            if not equal_highs:
-                return None
-            
-            recent_high = df['high'].iloc[-10:].max()
-            if df['high'].iloc[-1] >= recent_high * 0.998 and current_price < df['open'].iloc[-1]:
-                return {
-                    'type': SetupType.LIQUIDITY_SWEEP,
-                    'direction': direction,
-                    'entry_zone': (current_price, recent_high * 1.002),
-                    'swept_level': recent_high,
-                    'reason': '15m liquidity sweep + bearish reversal candle'
-                }
-        
+            if structure['trend'] in ['uptrend', 'potential_reversal']:
+                equal_highs = [z for z in zones if z.type == 'equal_highs']
+                if equal_highs:
+                    recent_high = df['high'].iloc[-10:].max()
+                    if df['high'].iloc[-1] >= recent_high * 0.998 and current_price < df['open'].iloc[-1]:
+                        return {
+                            'type': SetupType.LIQUIDITY_SWEEP,
+                            'direction': direction,
+                            'entry_zone': (current_price, recent_high * 1.002),
+                            'swept_level': recent_high,
+                            'reason': '15m liquidity sweep + bearish reversal candle'
+                        }
+
+        # ─── SETUP 2: Order Block (same as 1h, but tighter) ───
+        if len(df) >= 30:
+            if direction == SignalDirection.LONG:
+                if structure['trend'] in ['uptrend', 'potential_reversal']:
+                    for i in range(-15, -3):
+                        if i < -len(df):
+                            break
+                        price_after = df['close'].iloc[-1]
+                        price_before = df['close'].iloc[i]
+                        if (price_after - price_before) / price_before > 0.015:  # 1.5%+ move (tighter than 1h's 2%)
+                            ob_candle = df.iloc[i]
+                            ob_low, ob_high = ob_candle['low'], ob_candle['high']
+                            if current_price <= ob_high and df['low'].iloc[-1] >= ob_low * 0.995:
+                                return {
+                                    'type': SetupType.ORDER_BLOCK,
+                                    'direction': direction,
+                                    'ob_low': ob_low,
+                                    'ob_high': ob_high,
+                                    'reason': '15m bullish order block + momentum'
+                                }
+            else:  # SHORT
+                if structure['trend'] in ['downtrend', 'potential_reversal']:
+                    for i in range(-15, -3):
+                        if i < -len(df):
+                            break
+                        price_after = df['close'].iloc[-1]
+                        price_before = df['close'].iloc[i]
+                        if (price_before - price_after) / price_before > 0.015:
+                            ob_candle = df.iloc[i]
+                            ob_low, ob_high = ob_candle['low'], ob_candle['high']
+                            if current_price >= ob_low and df['high'].iloc[-1] <= ob_high * 1.005:
+                                return {
+                                    'type': SetupType.ORDER_BLOCK,
+                                    'direction': direction,
+                                    'ob_low': ob_low,
+                                    'ob_high': ob_high,
+                                    'reason': '15m bearish order block + momentum'
+                                }
+
+        # ─── SETUP 3: Fair Value Gap (price leaves a gap, returns to fill it) ───
+        if len(df) >= 10:
+            for i in range(-10, -2):
+                if i < -len(df) + 1:
+                    break
+                candle_i = df.iloc[i]
+                candle_next = df.iloc[i + 1]
+                if direction == SignalDirection.LONG:
+                    # Bullish FVG: next candle low > current candle high (gap up)
+                    if candle_next['low'] > candle_i['high']:
+                        fvg_top = candle_next['low']
+                        fvg_bottom = candle_i['high']
+                        if current_price <= fvg_top and current_price >= fvg_bottom * 0.998:
+                            return {
+                                'type': SetupType.FAIR_VALUE_GAP,
+                                'direction': direction,
+                                'fvg_top': fvg_top,
+                                'fvg_bottom': fvg_bottom,
+                                'reason': '15m bullish FVG retest'
+                            }
+                else:  # SHORT
+                    # Bearish FVG: next candle high < current candle low (gap down)
+                    if candle_next['high'] < candle_i['low']:
+                        fvg_top = candle_i['low']
+                        fvg_bottom = candle_next['high']
+                        if current_price >= fvg_bottom and current_price <= fvg_top * 1.002:
+                            return {
+                                'type': SetupType.FAIR_VALUE_GAP,
+                                'direction': direction,
+                                'fvg_top': fvg_top,
+                                'fvg_bottom': fvg_bottom,
+                                'reason': '15m bearish FVG retest'
+                            }
+
         return None
     
     def calculate_entry_sl_tp(self, df: pd.DataFrame, setup: Dict,
@@ -148,16 +209,40 @@ class M15Strategy(BaseTimeframeStrategy):
         current = df['close'].iloc[-1]
         atr = (df['high'].iloc[-20:] - df['low'].iloc[-20:]).mean()
         
+        setup_type = setup.get('type')
+        
         if direction == SignalDirection.LONG:
-            entry = max(setup['entry_zone'][0], current * 0.998)
-            sl = setup['swept_level'] * 0.997  # Below the sweep
+            if setup_type == SetupType.LIQUIDITY_SWEEP:
+                entry = max(setup['entry_zone'][0], current * 0.998)
+                sl = setup['swept_level'] * 0.997
+            elif setup_type == SetupType.ORDER_BLOCK:
+                entry = setup['ob_low']
+                sl = entry * 0.985
+            elif setup_type == SetupType.FAIR_VALUE_GAP:
+                entry = setup['fvg_bottom']
+                sl = setup['fvg_bottom'] * 0.995
+            else:
+                entry = current * 0.998
+                sl = current * 0.985
+            
             risk = entry - sl
             tp1 = entry + risk * 2.0
             tp2 = entry + risk * 3.0
             tp3 = entry + risk * 4.0
         else:
-            entry = min(setup['entry_zone'][1], current * 1.002)
-            sl = setup['swept_level'] * 1.003  # Above the sweep
+            if setup_type == SetupType.LIQUIDITY_SWEEP:
+                entry = min(setup['entry_zone'][1], current * 1.002)
+                sl = setup['swept_level'] * 1.003
+            elif setup_type == SetupType.ORDER_BLOCK:
+                entry = setup['ob_high']
+                sl = entry * 1.015
+            elif setup_type == SetupType.FAIR_VALUE_GAP:
+                entry = setup['fvg_top']
+                sl = setup['fvg_top'] * 1.005
+            else:
+                entry = current * 1.002
+                sl = current * 1.015
+            
             risk = sl - entry
             tp1 = entry - risk * 2.0
             tp2 = entry - risk * 3.0
