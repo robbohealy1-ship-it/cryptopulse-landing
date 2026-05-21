@@ -59,3 +59,11 @@ htmlcov/
 
 # Docker
 *.pid
+
+# Deploy / Secrets
+*.key
+ssh-key-*
+deploy_oracle.sh
+
+# Generated content
+generated_content/

@@ -85,8 +85,9 @@ class CryptoPulseOrchestrator:
         # Format: {signal_id: {tp1_hit: True, tp2_hit: False, stop_moved: True}}
         self.tp_hit_cache = {}
     
-    async def initialize(self):
+    async def initialize(self, dashboard_only: bool = False):
         logger.info("🚀 Initializing CRYPTO PULSE SIGNALS...")
+        self.dashboard_only = dashboard_only
         
         try:
             # Validate environment first
@@ -94,31 +95,37 @@ class CryptoPulseOrchestrator:
                 raise ValueError("Environment validation failed. Please check your .env file.")
             
             await self.signal_engine.initialize()
-            await self.admin_bot.initialize()
+            if not dashboard_only:
+                await self.admin_bot.initialize()
+            else:
+                # Dashboard-only: init admin bot for sending only (no polling, no conflict with Oracle)
+                await self.admin_bot.initialize_send_only()
             
             # 🔄 Restore pending signals from database (survives restarts)
-            try:
-                pending_from_db = await self.db.get_pending_signals()
-                restored_count = 0
-                resent_count = 0
-                for signal in pending_from_db:
-                    self.admin_bot.pending_signals[signal.id] = signal
-                    restored_count += 1
-                    # Re-send approval request to admin Telegram
-                    try:
-                        await self.admin_bot.send_signal_for_approval(signal)
-                        resent_count += 1
-                    except Exception as send_err:
-                        logger.warning(f"Could not resend {signal.symbol} to admin: {send_err}")
-                if restored_count > 0:
-                    logger.info(f"🔄 Restored {restored_count} pending signals from database")
-                    if resent_count > 0:
-                        logger.info(f"📩 Resent {resent_count} pending signals to admin for approval")
-            except Exception as e:
-                logger.warning(f"Could not restore pending signals from DB: {e}")
+            if not dashboard_only:
+                try:
+                    pending_from_db = await self.db.get_pending_signals()
+                    restored_count = 0
+                    resent_count = 0
+                    for signal in pending_from_db:
+                        self.admin_bot.pending_signals[signal.id] = signal
+                        restored_count += 1
+                        # Re-send approval request to admin Telegram
+                        if self.admin_bot.send_signal_for_approval:
+                            try:
+                                await self.admin_bot.send_signal_for_approval(signal)
+                                resent_count += 1
+                            except Exception as send_err:
+                                logger.warning(f"Could not resend {signal.symbol} to admin: {send_err}")
+                    if restored_count > 0:
+                        logger.info(f"🔄 Restored {restored_count} pending signals from database")
+                        if resent_count > 0:
+                            logger.info(f"📩 Resent {resent_count} pending signals to admin for approval")
+                except Exception as e:
+                    logger.warning(f"Could not restore pending signals from DB: {e}")
             
             # Initialize community engagement (needs bot instance)
-            if self.admin_bot.app and self.admin_bot.app.bot:
+            if not dashboard_only and self.admin_bot.app and self.admin_bot.app.bot:
                 self.community_engagement = CommunityEngagement(
                     bot=self.admin_bot.app.bot,
                     free_channel_id=getattr(settings, 'TELEGRAM_FREE_CHANNEL_ID', None),
@@ -128,7 +135,9 @@ class CryptoPulseOrchestrator:
                 logger.info("✅ Community engagement engine initialized (Telegram + Discord)")
             
             # Start VIP bot if configured
-            vip_started = await self.vip_bot.initialize()
+            vip_started = False
+            if not dashboard_only:
+                vip_started = await self.vip_bot.initialize()
             if vip_started:
                 logger.info("✅ VIP bot started for public signup")
             else:
@@ -157,7 +166,7 @@ class CryptoPulseOrchestrator:
                 channel_publisher=self.channel_publisher,
                 community_engagement=self.community_engagement,
                 viral_generator=self.viral_generator,
-                admin_notification=self.admin_bot.send_notification
+                admin_notification=self.admin_bot.send_notification if not dashboard_only else None
             )
             logger.info("🚀 Campaign Engine initialized — signal marketing active")
             
@@ -183,7 +192,7 @@ class CryptoPulseOrchestrator:
             # Initialize Pro Features
             self.whale_alerts = WhaleAlertSystem(
                 channel_publisher=self.channel_publisher,
-                admin_notification=self.admin_bot.send_notification
+                admin_notification=self.admin_bot.send_notification if not dashboard_only else None
             )
             self.education_engine = EducationalContentEngine(
                 channel_publisher=self.channel_publisher
@@ -209,11 +218,22 @@ class CryptoPulseOrchestrator:
                 logger.info("🔔 Custom alert system linked to VIP bot")
             
             # Initialize Alpha/Degen Plays Engine
-            self.alpha_publisher = AlphaPublisher(bot=self.channel_publisher.bot)
-            self.alpha_engine = AlphaPlaysEngine(
-                db=self.db,
-                publisher=self.alpha_publisher
-            )
+            if not dashboard_only:
+                self.alpha_publisher = AlphaPublisher(bot=self.channel_publisher.bot)
+                self.alpha_engine = AlphaPlaysEngine(
+                    db=self.db,
+                    publisher=self.alpha_publisher,
+                    admin_notification=self.admin_bot.send_notification
+                )
+            else:
+                # Dashboard-only: use channel_publisher's bot (main token) so approvals publish to VIP/Free channels
+                # The admin bot uses a different token and can't post to channels
+                self.alpha_publisher = AlphaPublisher(bot=self.channel_publisher.bot)
+                self.alpha_engine = AlphaPlaysEngine(
+                    db=self.db,
+                    publisher=self.alpha_publisher,
+                    admin_notification=self.admin_bot.send_notification
+                )
             await self.alpha_engine.initialize()
             logger.info("🎰 Alpha Plays Engine initialized — low-cap degen plays active")
             
@@ -554,6 +574,21 @@ class CryptoPulseOrchestrator:
         except Exception as e:
             logger.error(f"Error tracking alpha plays: {e}")
     
+    async def _dashboard_alpha_tracker(self):
+        """Background task for dashboard-only mode: track alpha plays every 5 minutes"""
+        logger.info("🎰 Dashboard alpha tracker started (5-min interval)")
+        while self.running:
+            try:
+                await asyncio.sleep(300)  # 5 minutes
+                if not self.running:
+                    break
+                if self.alpha_engine:
+                    await self.alpha_engine.track_active_plays()
+                    logger.info(f"📊 Dashboard alpha tracker: checked {len(self.alpha_engine.active_plays)} active plays")
+            except Exception as e:
+                logger.error(f"Dashboard alpha tracker error: {e}")
+                await asyncio.sleep(60)
+    
     async def process_candidates(self, candidates):
         if not candidates:
             logger.info("No high-quality candidates found")
@@ -597,7 +632,8 @@ class CryptoPulseOrchestrator:
                 await self.db.save_signal(candidate)
                 
                 # Send to admin for approval ONLY
-                await self.admin_bot.send_signal_for_approval(candidate)
+                if not self.dashboard_only:
+                    await self.admin_bot.send_signal_for_approval(candidate)
                 
                 self.signal_engine.add_signal(candidate)
                 
@@ -608,9 +644,10 @@ class CryptoPulseOrchestrator:
     
     async def on_signal_approved(self, signal):
         try:
-            # Guard against duplicate approvals
-            if signal.status in (SignalStatus.APPROVED, SignalStatus.ACTIVE):
-                logger.warning(f"Signal {signal.symbol} already approved/active — skipping duplicate publish")
+            # Guard against duplicate approvals — only skip if already ACTIVE (published)
+            # APPROVED is set by _handle_approve BEFORE this callback runs, so we must not skip on APPROVED
+            if signal.status == SignalStatus.ACTIVE or getattr(signal, 'vip_channel_posted', False):
+                logger.warning(f"Signal {signal.symbol} already published — skipping duplicate publish")
                 return
             
             # Check if signal has expired before approval
@@ -618,9 +655,10 @@ class CryptoPulseOrchestrator:
                 signal.cancelled = True
                 signal.cancellation_reason = "Signal expired before admin approval"
                 await self.db.save_signal(signal)
-                await self.admin_bot.send_notification(
-                    f"⏰ Signal {signal.symbol} expired before approval - not published"
-                )
+                if not self.dashboard_only:
+                    await self.admin_bot.send_notification(
+                        f"⏰ Signal {signal.symbol} expired before approval - not published"
+                    )
                 logger.info(f"Signal {signal.symbol} expired - not published")
                 return
             
@@ -647,6 +685,17 @@ class CryptoPulseOrchestrator:
             await self.channel_publisher.publish_to_vip(signal)
             signal.vip_channel_posted = True
             
+            # 💰 Set actual entry price for market orders before tracking
+            # Limit orders will only set actual_entry when the limit price is hit
+            if not signal.is_limit_order:
+                try:
+                    actual_price = await self._get_current_price(signal.symbol)
+                    if actual_price and actual_price > 0:
+                        signal.actual_entry = actual_price
+                        logger.info(f"📊 Market order actual entry for {signal.symbol}: ${actual_price:.4f}")
+                except Exception as price_err:
+                    logger.warning(f"Could not fetch actual entry price for {signal.symbol}: {price_err}")
+            
             # 🤖 AUTOPILOT: Start tracking signal performance
             if self.autopilot:
                 await self.autopilot.on_signal_approved(signal)
@@ -657,19 +706,21 @@ class CryptoPulseOrchestrator:
                 if self.campaign_engine:
                     await self.campaign_engine.signal_approved_campaign(signal)
                 
-                await self.admin_bot.send_notification(
-                    f"✅ Signal {signal.symbol} approved!\n"
-                    f"🌟 VIP channel: Published NOW\n"
-                    f"📢 Free channel: Teaser sent (no full card)"
-                )
+                if not self.dashboard_only:
+                    await self.admin_bot.send_notification(
+                        f"✅ Signal {signal.symbol} approved!\n"
+                        f"🌟 VIP channel: Published NOW\n"
+                        f"📢 Free channel: Teaser sent (no full card)"
+                    )
             else:
                 # VIP-only signal: Use simple teaser (no campaign engine to avoid duplicates)
                 await self.channel_publisher.send_vip_teaser(signal)
-                await self.admin_bot.send_notification(
-                    f"🌟 VIP EXCLUSIVE: {signal.symbol} published to VIP only!\n"
-                    f"Confidence: {signal.confidence:.1f}%\n"
-                    f"📢 Marketing teaser sent to free channel"
-                )
+                if not self.dashboard_only:
+                    await self.admin_bot.send_notification(
+                        f"🌟 VIP EXCLUSIVE: {signal.symbol} published to VIP only!\n"
+                        f"Confidence: {signal.confidence:.1f}%\n"
+                        f"📢 Marketing teaser sent to free channel"
+                    )
             
             # 📣 Cross-post to Discord, Twitter/X, Webhook (independent error handling)
             await self._crosspost_signal(signal)
@@ -732,9 +783,10 @@ class CryptoPulseOrchestrator:
                         signal.cancellation_reason = "Auto-cancelled: expired before admin approval"
                         await self.db.save_signal(signal)
                         
-                        await self.admin_bot.send_notification(
-                            f"⏰ Signal {signal.symbol} auto-cancelled - expired before approval"
-                        )
+                        if not self.dashboard_only:
+                            await self.admin_bot.send_notification(
+                                f"⏰ Signal {signal.symbol} auto-cancelled - expired before approval"
+                            )
                         logger.info(f"Signal {signal.symbol} auto-cancelled (expired)")
                     
         except Exception as e:
@@ -898,7 +950,8 @@ class CryptoPulseOrchestrator:
             reports = await self.reporting.generate_daily_report()
             
             # Admin gets full stats
-            await self.admin_bot.send_notification(reports['admin'])
+            if not self.dashboard_only:
+                await self.admin_bot.send_notification(reports['admin'])
             
             # VIP gets performance summary (signals closed today)
             vip_performance = f"""📊 <b>DAILY PERFORMANCE</b>
@@ -924,7 +977,8 @@ class CryptoPulseOrchestrator:
             reports = await self.reporting.generate_weekly_report()
             
             # Send to admin (full report)
-            await self.admin_bot.send_notification(reports['admin'])
+            if not self.dashboard_only:
+                await self.admin_bot.send_notification(reports['admin'])
             
             # Send to VIP channel
             await self.channel_publisher.bot.send_message(
@@ -997,17 +1051,9 @@ class CryptoPulseOrchestrator:
             except Exception as e:
                 logger.error(f"❌ Webhook post failed: {e}")
         
-        # Viral content generation (Telegram free channel)
-        if settings.ENABLE_VIRAL_CONTENT and self.community_engagement:
-            try:
-                card_path = self.viral_generator.create_signal_card(signal)
-                await self.community_engagement.post_viral_content(
-                    card_path,
-                    caption=f"🔥 {signal.symbol} {signal.direction.value} signal! Join VIP for full details."
-                )
-                logger.info(f"📣 Viral content posted: {card_path}")
-            except Exception as e:
-                logger.error(f"❌ Viral content failed: {e}")
+        # Viral content generation disabled for Telegram free channel
+        # Signal cards contain entry/SL/TP details - must not go to free channel
+        # (campaign_engine._free_channel_teaser already handles free channel teaser)
     
     async def _post_morning_outlook(self):
         """Post morning fundamental + technical outlook. VIP gets the full report."""
@@ -1109,6 +1155,7 @@ Good luck today! 🎯"""
                 active_trades_text = "\n\n<b>🔄 ACTIVE TRADES:</b>\n"
                 for sig in active_signals:
                     current_price = await self._get_current_price(sig.symbol)
+                    
                     if current_price:
                         entry = sig.actual_entry or sig.entry_price
                         pnl = ((current_price - entry) / entry) * 100
@@ -1143,6 +1190,47 @@ P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
 """
             
+            # Get performance data for today, week, and month
+            now = datetime.utcnow()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            week_start = now - timedelta(days=7)
+            month_start = now - timedelta(days=30)
+            
+            closed_signals = await self.db.get_closed_signals(days=30)
+            
+            def _filter_by_close_time(signals, start_time):
+                filtered = []
+                for s in signals:
+                    close_time = getattr(s, 'closed_at', None) or getattr(s, 'updated_at', None) or getattr(s, 'created_at', None)
+                    if close_time and close_time >= start_time:
+                        filtered.append(s)
+                return filtered
+            
+            today_signals = _filter_by_close_time(closed_signals, today_start)
+            week_signals = _filter_by_close_time(closed_signals, week_start)
+            month_signals = closed_signals
+            
+            def _format_performance(signals, label):
+                if not signals:
+                    return f"📈 {label}: No closed trades"
+                wins = [s for s in signals if s.pnl_percent > 0]
+                losses = [s for s in signals if s.pnl_percent <= 0]
+                total_pnl = sum(s.pnl_percent for s in signals)
+                win_rate = (len(wins) / len(signals)) * 100 if signals else 0
+                emoji = "🟢" if total_pnl > 0 else "🔴" if total_pnl < 0 else "⚪"
+                return (
+                    f"📈 {label}: {len(wins)}W/{len(losses)}L | "
+                    f"Win Rate: {win_rate:.0f}% | Total P&L: {emoji} {total_pnl:+.2f}%"
+                )
+            
+            performance_text = "\n".join([
+                "",
+                "<b>📊 PERFORMANCE:</b>",
+                _format_performance(today_signals, "TODAY"),
+                _format_performance(week_signals, "THIS WEEK"),
+                _format_performance(month_signals, "THIS MONTH"),
+            ])
+            
             # Key levels from real data
             key_levels = self._get_key_levels(btc_price, btc_24h)
             session = self._get_next_session()
@@ -1158,7 +1246,8 @@ Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
 BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
 BTC Dominance: <b>{btc_dominance:.1f}%</b>
 Funding Rate: <b>{funding_rate*100:.4f}%</b>
-{active_trades_text}{alpha_plays_text}
+{active_trades_text}{alpha_plays_text}{performance_text}
+
 <b>🔮 Tomorrow's Focus:</b>
 • {key_levels}
 • {session}
@@ -1178,12 +1267,21 @@ Funding Rate: <b>{funding_rate*100:.4f}%</b>
             )
             
             # Free gets teaser with more value
+            # Brief performance for free channel
+            free_perf = ""
+            if today_signals:
+                total_pnl_today = sum(s.pnl_percent for s in today_signals)
+                free_perf = f"📈 Today's VIP Signals: {total_pnl_today:+.2f}% P&L\n"
+            elif week_signals:
+                total_pnl_week = sum(s.pnl_percent for s in week_signals)
+                free_perf = f"📈 This Week: {total_pnl_week:+.2f}% P&L\n"
+            
             free_teaser = f"""🌙 <b>MARKET OUTLOOK</b>
 
 <b>📊 Current Conditions:</b>
 Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
 BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
-
+{free_perf}
 <b>⚡ Tomorrow's Bias:</b>
 {self._generate_tomorrow_bias(mctx)[:120]}...
 
@@ -1382,12 +1480,13 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
         
         self.signal_engine.reset_daily_counter()
         
-        await self.admin_bot.send_notification(
-            f"📊 Daily Reset - {datetime.utcnow().strftime('%Y-%m-%d')}\n\n"
-            f"✅ Signal counter reset\n"
-            f"✅ Marketing schedule refreshed\n"
-            f"🚀 Ready for new trading day!"
-        )
+        if not self.dashboard_only:
+            await self.admin_bot.send_notification(
+                f"📊 Daily Reset - {datetime.utcnow().strftime('%Y-%m-%d')}\n\n"
+                f"✅ Signal counter reset\n"
+                f"✅ Marketing schedule refreshed\n"
+                f"🚀 Ready for new trading day!"
+            )
     
     async def daily_cleanup(self):
         logger.info("🧹 Performing daily cleanup...")
@@ -1509,13 +1608,21 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
             except Exception as e:
                 logger.error(f"Viral weekly marketing error: {e}")
     
-    async def start(self):
+    async def start(self, dashboard_only: bool = False):
         logger.info("🚀 Starting CRYPTO PULSE SIGNALS...")
         
-        await self.initialize()
+        if dashboard_only:
+            logger.info("🎛️ DASHBOARD-ONLY mode — no Telegram bots will start")
         
-        self.setup_scheduler()
-        self.scheduler.start()
+        await self.initialize(dashboard_only=dashboard_only)
+        
+        if not dashboard_only:
+            self.setup_scheduler()
+            self.scheduler.start()
+        else:
+            # Dashboard-only: start minimal background tracking for alpha plays
+            asyncio.create_task(self._dashboard_alpha_tracker())
+            logger.info("🎰 Alpha tracking background task started (dashboard-only)")
         
         # Start admin dashboard server in background
         dashboard_port = int(getattr(settings, 'ADMIN_DASHBOARD_PORT', 8080))
@@ -1534,19 +1641,20 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
         logger.info(f"📊 Min Risk/Reward: {settings.MIN_RISK_REWARD}")
         logger.info(f"📊 Free Channel Delay: {settings.FREE_CHANNEL_DELAY_MINUTES} minutes")
         
-        await self.admin_bot.send_notification(
-            "🚀 <b>CRYPTO PULSE SIGNALS Started</b>\n\n"
-            f"✅ System operational — INSTITUTIONAL GRADE\n\n"
-            f"📊 <b>Timeframes:</b>\n"
-            f"• 15m: Intraday swing (1-4h holds, 85%+ conf)\n"
-            f"• 1h: Swing trades (4-24h holds, 85%+ conf)\n"
-            f"• 4h: Position trades (1-3d holds, 88%+ conf)\n"
-            f"• Daily: Macro positions (3-7d holds, 90%+ conf)\n\n"
-            f"🎯 Target: 1-3 quality signals/day\n"
-            f"⏰ Free delay: {settings.FREE_CHANNEL_DELAY_MINUTES} min after VIP\n"
-            f"🤖 Admin approval required for all signals\n\n"
-            f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-        )
+        if not dashboard_only:
+            await self.admin_bot.send_notification(
+                "🚀 <b>CRYPTO PULSE SIGNALS Started</b>\n\n"
+                f"✅ System operational — INSTITUTIONAL GRADE\n\n"
+                f"📊 <b>Timeframes:</b>\n"
+                f"• 15m: Intraday swing (1-4h holds, 85%+ conf)\n"
+                f"• 1h: Swing trades (4-24h holds, 85%+ conf)\n"
+                f"• 4h: Position trades (1-3d holds, 88%+ conf)\n"
+                f"• Daily: Macro positions (3-7d holds, 90%+ conf)\n\n"
+                f"🎯 Target: 1-3 quality signals/day\n"
+                f"⏰ Free delay: {settings.FREE_CHANNEL_DELAY_MINUTES} min after VIP\n"
+                f"🤖 Admin approval required for all signals\n\n"
+                f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            )
         
         try:
             while self.running:
@@ -1562,7 +1670,8 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
     async def _on_vip_notification(self, message: str):
         """Forward VIP bot notifications to admin"""
         try:
-            await self.admin_bot.send_notification(message)
+            if not self.dashboard_only:
+                await self.admin_bot.send_notification(message)
         except Exception as e:
             logger.error(f"Failed to forward VIP notification: {e}")
     
@@ -1571,19 +1680,25 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
         
         self.running = False
         
-        if self.scheduler.running:
+        if self.scheduler and self.scheduler.running:
             self.scheduler.shutdown()
         
         await self.signal_engine.close()
-        await self.admin_bot.close()
-        await self.vip_bot.shutdown()
+        
+        if hasattr(self, 'admin_bot') and self.admin_bot:
+            await self.admin_bot.close()
+        if hasattr(self, 'vip_bot') and self.vip_bot:
+            await self.vip_bot.shutdown()
         
         logger.info("✅ Shutdown complete")
 
 
 async def main():
+    import sys
+    dashboard_only = '--dashboard-only' in sys.argv
+    
     orchestrator = CryptoPulseOrchestrator()
-    await orchestrator.start()
+    await orchestrator.start(dashboard_only=dashboard_only)
 
 
 if __name__ == "__main__":

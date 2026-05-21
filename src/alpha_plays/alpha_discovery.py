@@ -99,11 +99,11 @@ class AlphaDiscovery:
         self.cache_duration = timedelta(minutes=5)
         
         # Minimum thresholds for a play to be considered
-        self.min_liquidity_usd = 30000  # $30k minimum liquidity
-        self.min_volume_24h = 50000     # $50k minimum volume
+        self.min_liquidity_usd = 20000  # $20k minimum liquidity
+        self.min_volume_24h = 25000     # $25k minimum volume
         self.max_market_cap = 100_000_000  # $100M max (low cap)
         self.min_holders = 50
-        self.min_overall_score = 50.0  # Lowered for realistic low-cap scores
+        self.min_overall_score = 35.0  # Realistic for low-cap DEX tokens
         
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session"""
@@ -559,57 +559,96 @@ class AlphaDiscovery:
     
     async def _scan_dexscreener_gainers(self, chain_filter: str = None) -> List[AlphaPlayCandidate]:
         """
-        Scan DexScreener top gainers for momentum plays.
-        Uses the token profiles API to find trending tokens.
+        Scan DexScreener top gainers / trending tokens.
+        Uses the token profiles API to find trending tokens, then batch-fetches
+        pair data to get prices and metrics.
         """
         candidates = []
         
         try:
             session = await self._get_session()
             
-            # Use DexScreener token profiles (trending)
+            # Step 1: Get token profiles (trending)
             url = "https://api.dexscreener.com/token-profiles/latest/v1"
             async with session.get(url, timeout=15) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    profiles = data if isinstance(data, list) else data.get('profiles', [])
-                    
-                    for profile in profiles[:15]:
-                        try:
-                            token = profile.get('tokenAddress', {})
-                            chain = token.get('chainId', 'unknown').lower()
-                            if chain in ['solana', 'sol']:
-                                chain = 'sol'
-                            elif chain in ['ethereum', 'eth']:
-                                chain = 'eth'
-                            elif chain in ['base']:
-                                chain = 'base'
-                            else:
-                                continue
-                            
-                            # Skip if chain filter doesn't match
-                            if chain_filter and chain != chain_filter:
-                                continue
-                            
-                            symbol = token.get('tokenSymbol', 'UNKNOWN')
-                            token_address = token.get('tokenAddress', '')
-                            
-                            # Get links
-                            links = profile.get('links', [])
-                            dex_url = next((l['url'] for l in links if l.get('type') == 'dexscreener'), f"https://dexscreener.com/{chain}/{token_address}")
-                            
-                            # Get description
-                            description = profile.get('description', '')
-                            
-                            # Try to get price data from the profile or skip
-                            # Token profiles don't have price data, so we need to enrich
-                            # For now, skip ones without price (will be caught by DexScreener search)
+                if response.status != 200:
+                    logger.warning(f"DexScreener token profiles returned {response.status}")
+                    return candidates
+                
+                data = await response.json()
+                profiles = data if isinstance(data, list) else data.get('profiles', [])
+                
+                # Step 2: Collect valid token addresses grouped by chain
+                token_infos = []
+                for profile in profiles[:30]:
+                    try:
+                        token = profile.get('tokenAddress', {})
+                        chain = token.get('chainId', 'unknown').lower()
+                        if chain in ['solana', 'sol']:
+                            chain = 'sol'
+                        elif chain in ['ethereum', 'eth']:
+                            chain = 'eth'
+                        elif chain in ['base']:
+                            chain = 'base'
+                        else:
                             continue
+                        
+                        if chain_filter and chain != chain_filter:
+                            continue
+                        
+                        token_address = token.get('tokenAddress', '')
+                        if not token_address:
+                            continue
+                        
+                        token_infos.append({
+                            'address': token_address,
+                            'chain': chain,
+                            'symbol': token.get('tokenSymbol', 'UNKNOWN'),
+                            'links': profile.get('links', []),
+                            'description': profile.get('description', '')
+                        })
+                    except Exception:
+                        continue
+                
+                if not token_infos:
+                    return candidates
+                
+                # Step 3: Batch-fetch pair data (DexScreener supports up to 30 addresses)
+                addresses = [t['address'] for t in token_infos]
+                batch_url = f"https://api.dexscreener.com/latest/dex/tokens/{','.join(addresses[:30])}"
+                
+                async with session.get(batch_url, timeout=20) as batch_resp:
+                    if batch_resp.status != 200:
+                        logger.warning(f"DexScreener batch tokens returned {batch_resp.status}")
+                        return candidates
+                    
+                    batch_data = await batch_resp.json()
+                    pairs = batch_data.get('pairs', [])
+                    
+                    # Build lookup by base token address
+                    addr_to_info = {t['address']: t for t in token_infos}
+                    
+                    for pair in pairs[:60]:
+                        try:
+                            base_addr = pair.get('baseToken', {}).get('address', '')
+                            info = addr_to_info.get(base_addr)
+                            if not info:
+                                # Try quote token
+                                base_addr = pair.get('quoteToken', {}).get('address', '')
+                                info = addr_to_info.get(base_addr)
+                                if not info:
+                                    continue
                             
-                        except Exception as e:
-                            logger.debug(f"Error parsing token profile: {e}")
+                            candidate = self._parse_dexscreener_pair(pair)
+                            if candidate and candidate.symbol != 'UNKNOWN':
+                                # Enhance with profile description
+                                if info.get('description'):
+                                    candidate.description = info['description']
+                                candidates.append(candidate)
+                        except Exception:
                             continue
             
+            logger.info(f"DexScreener gainers: {len(candidates)} candidates from {len(token_infos)} trending tokens")
             return candidates
             
         except Exception as e:

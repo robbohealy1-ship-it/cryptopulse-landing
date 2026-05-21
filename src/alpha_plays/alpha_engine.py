@@ -8,7 +8,7 @@ Isolated from main signal engine to prevent breaking existing functionality.
 """
 
 import uuid
-import random
+import aiohttp
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 from dataclasses import dataclass, field
@@ -62,11 +62,13 @@ class AlphaPlaysEngine:
     6. close() - Mark as closed and send result
     """
     
-    def __init__(self, db=None, publisher=None):
+    def __init__(self, db=None, publisher=None, admin_notification=None):
         self.discovery = AlphaDiscovery()
         self.formatter = AlphaContentFormatter()
         self.db = db
         self.publisher = publisher
+        self._notify_admin = admin_notification
+        self.session: Optional[aiohttp.ClientSession] = None
         
         # Active plays being tracked
         self.active_plays: Dict[str, ActiveAlphaPlay] = {}
@@ -91,6 +93,13 @@ class AlphaPlaysEngine:
     async def initialize(self):
         """Initialize the engine and reload persisted active and pending plays from DB."""
         logger.info("🎰 Initializing Alpha Plays Engine...")
+        
+        # Create aiohttp session for price fetching
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=5, limit_per_host=3),
+                timeout=aiohttp.ClientTimeout(total=15)
+            )
         
         if self.db:
             # Load active plays
@@ -340,6 +349,24 @@ class AlphaPlaysEngine:
                 # Add to pending queue
                 self.pending_plays[candidate.symbol] = candidate
                 logger.info(f"⏳ Alpha play pending approval: {candidate.symbol} (Score: {candidate.overall_score:.1f})")
+                # Notify admin via Telegram
+                if self._notify_admin:
+                    try:
+                        msg = (
+                            f"🎰 <b>New Alpha Play Pending Approval</b>\n\n"
+                            f"<b>{candidate.symbol}</b> ({candidate.chain.upper()})\n"
+                            f"Type: {candidate.trade_type} | Risk: {candidate.risk_level}\n"
+                            f"Score: {candidate.overall_score:.1f}/100\n"
+                            f"Price: ${candidate.price_usd:.6f}\n"
+                            f"Market Cap: ${candidate.market_cap_usd/1e6:.2f}M\n"
+                            f"24h Change: {candidate.price_change_24h:+.1f}%\n\n"
+                            f"Catalyst: {candidate.catalyst}\n\n"
+                            f"👉 Approve from dashboard: /api/alpha/approve\n"
+                            f"or go to Admin Dashboard → Alpha Plays"
+                        )
+                        await self._notify_admin(msg)
+                    except Exception as e:
+                        logger.warning(f"Could not send admin notification for alpha play: {e}")
                 # Persist to DB so it survives restarts
                 if self.db:
                     try:
@@ -649,12 +676,44 @@ class AlphaPlaysEngine:
             return "3-5%"
     
     async def _get_current_price(self, candidate: AlphaPlayCandidate) -> Optional[float]:
-        """Get current price for a token"""
-        # Placeholder - would integrate with price API
-        # For now, simulate small price movement
-        import random
-        drift = random.uniform(-0.02, 0.03)  # -2% to +3%
-        return candidate.price_usd * (1 + drift)
+        """Fetch current price from DEXScreener API using token address or pair address."""
+        if not self.session or self.session.closed:
+            return None
+        
+        # Try token address first (most reliable)
+        token_addr = candidate.token_address
+        pair_addr = candidate.pair_address
+        chain = candidate.chain
+        
+        # Endpoint priority: token address > pair address
+        urls = []
+        if token_addr:
+            urls.append(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}")
+        if pair_addr and chain:
+            urls.append(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair_addr}")
+        
+        if not urls:
+            logger.warning(f"No token/pair address for {candidate.symbol}, cannot fetch price")
+            return None
+        
+        for url in urls:
+            try:
+                async with self.session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        pairs = data.get('pairs', [])
+                        if pairs:
+                            # Get the pair with highest liquidity
+                            best = max(pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0) or 0))
+                            price = float(best.get('priceUsd', 0) or 0)
+                            if price > 0:
+                                return price
+            except Exception as e:
+                logger.debug(f"Price fetch failed for {candidate.symbol} via {url}: {e}")
+                continue
+        
+        logger.warning(f"Could not fetch current price for {candidate.symbol} from DEXScreener")
+        return None
     
     def _reset_counts_if_needed(self):
         """Reset daily/weekly counters if needed"""
@@ -735,5 +794,7 @@ class AlphaPlaysEngine:
     
     async def close(self):
         """Clean up resources"""
+        if self.session and not self.session.closed:
+            await self.session.close()
         await self.discovery.close()
         logger.info("🎰 Alpha Plays Engine closed")

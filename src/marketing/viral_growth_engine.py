@@ -31,7 +31,7 @@ class ViralGrowthEngine:
             'reddit': has_reddit_creds,  # Auto-enable when credentials exist
             'telegram_groups': True,
             'discord_servers': True,
-            'twitter_threads': False,
+            'twitter_threads': False,  # Requires X paid API tier ($100+/mo)
             'crypto_forums': True,
         }
         

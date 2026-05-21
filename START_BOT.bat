@@ -1,14 +1,32 @@
 @echo off
 title CRYPTO PULSE SIGNALS - Starting...
+color 0C
+
+echo.
+echo ========================================
+echo   WARNING: FULL BOT START
+echo ========================================
+echo.
+echo This starts the COMPLETE bot including:
+echo   - Telegram bots (admin, VIP)
+echo   - Market scanning and signal generation
+echo   - Dashboard
+echo.
+echo If the Oracle Cloud bot is already running,
+echo THIS WILL CONFLICT and kick it offline!
+echo.
+echo For local dashboard viewing ONLY, use:
+echo   START_DASHBOARD.bat
+echo.
+echo Are you sure you want to start the FULL bot? (y/n)
+set /p CONFIRM=
+if /I not "%CONFIRM%"=="y" (
+    echo Cancelled.
+    pause
+    exit /b 0
+)
+
 color 0A
-
-echo.
-echo ========================================
-echo   CRYPTO PULSE SIGNALS
-echo   Starting Platform...
-echo ========================================
-echo.
-
 cd /d "%~dp0"
 
 set PYTHONPATH=%CD%

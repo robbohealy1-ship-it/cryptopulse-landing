@@ -35,12 +35,32 @@ class PerformanceTracker:
         self.db = db
         self.on_signal_result = on_signal_result  # Callback for FOMO campaigns
         self.active_signals: Dict[str, TradingSignal] = {}  # symbol -> signal
+        self.pending_limit_orders: Dict[str, TradingSignal] = {}  # waiting for limit hit
         self.performance_log: List[Dict] = []
         
     async def track_signal(self, signal: TradingSignal):
         """Start tracking an approved signal for TP/SL hits"""
-        self.active_signals[signal.symbol] = signal
-        logger.info(f"🎯 Performance tracking started for {signal.symbol} {signal.direction.value}")
+        if signal.is_limit_order:
+            self.pending_limit_orders[signal.id] = signal
+            logger.info(f"⏳ Limit order pending for {signal.symbol} at ${signal.entry_price:.4f} — tracking will start when limit is hit")
+            return
+        
+        # For market orders, use actual_entry if set, otherwise fall back to planned entry_price
+        entry = signal.actual_entry if signal.actual_entry is not None else signal.entry_price
+        self.active_signals[signal.id] = {
+            'signal': signal,
+            'entry_price': entry,
+            'highest_price': entry,
+            'lowest_price': entry,
+            'tp1_hit': False,
+            'tp2_hit': False,
+            'tp3_hit': False,
+            'stop_moved_to_breakeven': False,
+            'partial_exits': [],
+            'entry_time': datetime.utcnow()
+        }
+        
+        logger.info(f"🎯 Performance tracking started for {signal.symbol} {signal.direction.value} at ${entry:.4f}")
         
         # Save to DB as "active"
         if self.db:
@@ -49,19 +69,78 @@ class PerformanceTracker:
                 status=SignalStatus.ACTIVE
             )
     
-    async def check_all_signals(self):
-        """Check all active signals against current market prices"""
-        if not self.active_signals:
+    async def _check_limit_order_hit(self, signal_id: str):
+        """Check if a limit order's entry price has been hit. If so, move to active tracking."""
+        signal = self.pending_limit_orders.get(signal_id)
+        if not signal:
             return
-            
-        for symbol, signal in list(self.active_signals.items()):
-            try:
-                await self._check_signal(signal)
-            except Exception as e:
-                logger.error(f"Error checking {symbol}: {e}")
+        
+        try:
+            ticker = await self.scanner.fetch_ticker(signal.symbol)
+            current_price = ticker.get('last', 0)
+            if not current_price or current_price <= 0:
+                return
+        except Exception:
+            return
+        
+        entry = signal.entry_price
+        direction = signal.direction.value
+        
+        hit = False
+        if direction == 'LONG':
+            # For LONG limit: price must drop to or below entry
+            hit = current_price <= entry
+        else:  # SHORT
+            # For SHORT limit: price must rise to or above entry
+            hit = current_price >= entry
+        
+        if hit:
+            signal.actual_entry = current_price
+            signal.status = SignalStatus.ACTIVE
+            del self.pending_limit_orders[signal_id]
+            self.active_signals[signal_id] = {
+                'signal': signal,
+                'entry_price': current_price,
+                'highest_price': current_price,
+                'lowest_price': current_price,
+                'tp1_hit': False,
+                'tp2_hit': False,
+                'tp3_hit': False,
+                'stop_moved_to_breakeven': False,
+                'partial_exits': [],
+                'entry_time': datetime.utcnow()
+            }
+            logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} — tracking started")
     
-    async def _check_signal(self, signal: TradingSignal):
+    async def check_all_signals(self):
+        """Check all active signals for TP/SL hits and update P&L. Also check pending limit orders."""
+        # Check pending limit orders - move to active when limit price is hit
+        for signal_id in list(self.pending_limit_orders.keys()):
+            await self._check_limit_order_hit(signal_id)
+        
+        # Check active signals
+        for signal_id in list(self.active_signals.keys()):
+            await self._check_signal(signal_id)
+        
+        # Save updated signals to DB
+        signals = [data['signal'] for data in self.active_signals.values()]
+        if signals:
+            await self.db.save_signals_batch(signals)
+    
+    async def _check_signal(self, signal_id: str):
         """Check if a signal has hit TP or SL"""
+        signal_data = self.active_signals[signal_id]
+        signal = signal_data['signal']
+        entry_price = signal_data['entry_price']
+        highest_price = signal_data['highest_price']
+        lowest_price = signal_data['lowest_price']
+        tp1_hit = signal_data['tp1_hit']
+        tp2_hit = signal_data['tp2_hit']
+        tp3_hit = signal_data['tp3_hit']
+        stop_moved_to_breakeven = signal_data['stop_moved_to_breakeven']
+        partial_exits = signal_data['partial_exits']
+        entry_time = signal_data['entry_time']
+        
         try:
             ticker = await self.scanner.fetch_ticker(signal.symbol)
             current_price = ticker.get('last', 0)
@@ -70,7 +149,7 @@ class PerformanceTracker:
                 return
             
             direction = signal.direction
-            entry = signal.entry_price
+            entry = entry_price
             sl = signal.stop_loss
             tp1 = signal.take_profit_1
             tp2 = signal.take_profit_2
@@ -129,7 +208,7 @@ class PerformanceTracker:
                 }
                 
                 self.performance_log.append(result)
-                del self.active_signals[signal.symbol]
+                del self.active_signals[signal_id]
                 
                 status = SignalStatus.TP_HIT if hit_tp else SignalStatus.SL_HIT
                 emoji = "🏆" if hit_tp else "🛑"

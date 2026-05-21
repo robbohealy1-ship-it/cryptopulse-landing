@@ -83,6 +83,22 @@ class AdminBot:
         
         logger.info("Admin bot initialized and running")
     
+    async def initialize_send_only(self):
+        """Initialize a send-only bot (no polling) for dashboard-only mode.
+        
+        This creates a standalone telegram.Bot for sending messages without
+        starting polling, so it won't conflict with Oracle's bot instance."""
+        from telegram import Bot
+        self._send_only_bot = Bot(token=self.bot_token)
+        logger.info("Admin bot initialized in send-only mode (dashboard-only)")
+    
+    @property
+    def bot(self):
+        """Get bot for sending messages. Works in both full and send-only modes."""
+        if self.app and self.app.bot:
+            return self.app.bot
+        return getattr(self, '_send_only_bot', None)
+    
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         

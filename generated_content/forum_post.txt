@@ -2,10 +2,10 @@
 [b][size=14pt]🎯 CryptoPulse Signals - Weekly Performance Report[/size][/b]
 
 [b]This Week's Results:[/b]
-✅ Win Rate: 100.0%
-📊 Total Signals: 1
-💰 Total P&L: +4.23%
-🔥 Best Trade: LAYER/USDT (+4.23%)
+✅ Win Rate: 69.2%
+📊 Total Signals: 13
+💰 Total P&L: +64.68%
+🔥 Best Trade: BTCUSDT (+18.62%)
 
 [b]What We Offer:[/b]
 • AI-powered signal generation

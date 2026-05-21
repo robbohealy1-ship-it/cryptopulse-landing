@@ -34,6 +34,21 @@ if %ERRORLEVEL%==0 (
 
 echo Dashboard not running. Starting system now...
 echo.
+echo ========================================
+echo   WHAT THIS DOES:
+echo ========================================
+echo.
+echo This opens a LOCAL copy of the admin dashboard.
+echo It reads data from the SAME database as Oracle.
+echo.
+echo It does NOT start any Telegram bots.
+echo It does NOT scan markets or generate signals.
+echo It does NOT conflict with Oracle.
+echo.
+echo Oracle Cloud VM (production) still does ALL the work.
+echo This is just a viewer connected to the same DB.
+echo ========================================
+echo.
 
 REM ==== USE PYTHON 3.11 EXPLICITLY ====
 REM We know py -3.11 works because py (3.14) is broken on this system
@@ -115,59 +130,22 @@ exit /b 1
 :deps_ok
 echo.
 
-REM ==== KILL STALE PROCESSES ====
-echo Checking for stale bot instances...
-for /f "tokens=2 delims=," %%p in ('wmic process where "name='python.exe' and CommandLine like '%%src/main.py%%'" get ProcessId^,CommandLine /format:csv 2^>nul ^| findstr "[0-9]"') do (
-    echo   Stopping stale bot PID %%p...
-    taskkill /PID %%p /F >nul 2>nul
-)
+REM ==== KILL STALE PROCESSES (Simple) ====
+echo Checking for stale instances...
+taskkill /F /FI "WINDOWTITLE eq CryptoPulse Dashboard" >nul 2>nul
+taskkill /F /FI "WINDOWTITLE eq CryptoPulse System + Dashboard" >nul 2>nul
 timeout /t 2 /nobreak >nul
 echo Done.
 echo.
 
 REM ==== START THE SYSTEM ====
-echo Starting system + dashboard in a new window...
+echo Starting dashboard directly in this window...
 echo URL: %URL%
 echo.
-echo IMPORTANT: If a new window appears then closes,
-echo              read the red error text before it disappears.
+echo NOTE: First startup takes 3-4 minutes (loads market data).
+echo DO NOT CLOSE this window. The dashboard runs here.
+echo Press Ctrl+C to stop when done.
 echo.
+echo ========================================
 
-start "CryptoPulse System + Dashboard" cmd /k "%PYTHON_CMD% src/main.py"
-
-echo.
-echo Waiting for dashboard to start (30 seconds)...
-timeout /t 30 /nobreak >nul
-
-REM Verify it started
-powershell -Command "try { $r=Invoke-WebRequest -Uri '%URL%/health' -TimeoutSec 5 -UseBasicParsing; if($r.StatusCode -eq 200){exit 0}} catch {exit 1}" >nul 2>nul
-if %ERRORLEVEL%==0 (
-    echo.
-    echo ========================================
-    echo   DASHBOARD IS LIVE!
-    echo ========================================
-    echo.
-    echo Opening browser to %URL% ...
-    start %URL%
-) else (
-    echo.
-    echo ========================================
-    echo   WARNING: Dashboard not responding
-    echo ========================================
-    echo.
-    echo The system window may show an error.
-    echo Check the "CryptoPulse System + Dashboard" window.
-    echo.
-    echo Common fixes:
-    echo 1. Wait 30 seconds and refresh the browser
-    echo 2. Check that port %DASH_PORT% is not blocked
-    echo 3. Check the .env file has valid API keys
-    echo.
-)
-
-echo.
-echo You can close this launcher window.
-echo The system is running in the other window.
-echo.
-
-pause
+%PYTHON_CMD% src/main.py --dashboard-only

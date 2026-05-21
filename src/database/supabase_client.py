@@ -1,6 +1,6 @@
 from supabase import create_client, Client
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 import uuid
 import re
@@ -229,6 +229,22 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error getting signal by ID: {e}")
             return None
+    
+    async def get_closed_signals(self, days: int = 30) -> List[TradingSignal]:
+        """Get signals that have closed with P&L in the last N days."""
+        try:
+            start = datetime.utcnow() - timedelta(days=days)
+            result = self.client.table('signals').select('*')\
+                .gte('created_at', start.isoformat())\
+                .order('created_at', desc=True)\
+                .limit(200)\
+                .execute()
+            signals = [self._dict_to_signal(data) for data in result.data]
+            # Filter to only those with a P&L result
+            return [s for s in signals if getattr(s, 'pnl_percent', None) is not None]
+        except Exception as e:
+            logger.error(f"Error getting closed signals: {e}")
+            return []
     
     async def update_signal(self, signal_id: str, updates: dict) -> bool:
         """Update signal fields (generic update method)"""

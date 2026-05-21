@@ -128,7 +128,7 @@ async def system_status():
         "status": "running",
         "timestamp": datetime.utcnow().isoformat(),
         "scheduler": scheduler_running,
-        "admin_bot": orch.admin_bot.app is not None if orch.admin_bot else False,
+        "admin_bot": (orch.admin_bot.app is not None or orch.admin_bot.bot is not None) if orch.admin_bot else False,
         "vip_bot": orch.vip_bot.app is not None if orch.vip_bot else False,
         "components": {
             "signal_engine": True,
@@ -170,7 +170,10 @@ async def pending_signals():
     """Signals waiting for admin approval."""
     orch = require_orch()
     try:
-        pending = list(orch.admin_bot.pending_signals.values())
+        # Always use DB as source of truth — in-memory dict gets stale
+        # when signals are approved via Telegram bot on Oracle
+        pending = await orch.db.get_pending_signals()
+        
         return {
             "count": len(pending),
             "signals": [
@@ -190,6 +193,7 @@ async def pending_signals():
             ]
         }
     except Exception as e:
+        logger.error(f"Error getting pending signals: {e}")
         return {"count": 0, "signals": [], "error": str(e)}
 
 
@@ -255,8 +259,24 @@ async def alpha_plays():
         active = []
         pending = []
         
+        # Primary: read from in-memory alpha engine (when bot is running)
         if orch.alpha_engine:
             for play_id, play in orch.alpha_engine.active_plays.items():
+                # Fetch live price on-demand if not yet tracked
+                current_price = play.current_price
+                current_pnl = play.current_pnl
+                if current_price == 0 and play.candidate.token_address:
+                    try:
+                        fetched = await orch.alpha_engine._get_current_price(play.candidate)
+                        if fetched and fetched > 0:
+                            current_price = fetched
+                            if play.entry_price > 0:
+                                current_pnl = ((current_price - play.entry_price) / play.entry_price) * 100
+                            play.current_price = current_price
+                            play.current_pnl = current_pnl
+                    except Exception as e:
+                        logger.debug(f"On-demand price fetch failed for {play.candidate.symbol}: {e}")
+                
                 active.append({
                     "id": play_id,
                     "symbol": play.candidate.symbol,
@@ -267,8 +287,8 @@ async def alpha_plays():
                     "risk_level": play.candidate.risk_level,
                     "time_frame": play.candidate.time_frame,
                     "entry_price": play.entry_price,
-                    "current_price": play.current_price,
-                    "current_pnl": round(play.current_pnl, 2),
+                    "current_price": current_price if current_price > 0 else play.candidate.price_usd,
+                    "current_pnl": round(current_pnl, 2),
                     "stop_loss": play.stop_loss,
                     "take_profit_1": play.take_profit_1,
                     "take_profit_2": play.take_profit_2,
@@ -322,6 +342,73 @@ async def alpha_plays():
                     "buy_url": candidate.buy_url,
                     "dex_source": candidate.dex_source,
                 })
+        else:
+            # Fallback: read from database when alpha engine not initialized (dashboard-only mode)
+            try:
+                import json
+                db_plays = await orch.db.get_alpha_plays(status=None, limit=100)
+                for p in db_plays:
+                    cd = p.get('candidate_data')
+                    candidate = {}
+                    if cd:
+                        try:
+                            candidate = json.loads(cd) if isinstance(cd, str) else cd
+                        except Exception:
+                            pass
+                    status = p.get('status', 'active')
+                    
+                    def _val(field, default=0):
+                        """Get value from DB row or candidate, preserving falsy numeric values like 0.0."""
+                        v = p.get(field)
+                        if v is not None:
+                            return v
+                        v = candidate.get(field)
+                        if v is not None:
+                            return v
+                        return default
+                    
+                    play_obj = {
+                        "id": p.get('id'),
+                        "symbol": p.get('symbol') or candidate.get('symbol', 'UNKNOWN'),
+                        "name": p.get('name') or candidate.get('name', ''),
+                        "chain": p.get('chain') or candidate.get('chain', 'unknown'),
+                        "status": status,
+                        "trade_type": candidate.get('trade_type', ''),
+                        "risk_level": candidate.get('risk_level', 'unknown'),
+                        "time_frame": candidate.get('time_frame', ''),
+                        "entry_price": _val('entry_price', 0),
+                        "current_price": _val('current_price', 0),
+                        "current_pnl": round(float(_val('current_pnl', 0)), 2),
+                        "stop_loss": _val('stop_loss', 0),
+                        "take_profit_1": _val('take_profit_1', 0),
+                        "take_profit_2": _val('take_profit_2', 0),
+                        "position_size": _val('position_size', '2-5%'),
+                        "market_cap": float(candidate.get('market_cap', 0) or 0),
+                        "volume_24h": float(candidate.get('volume_24h', 0) or 0),
+                        "liquidity": float(candidate.get('liquidity_usd', 0) or 0),
+                        "price_change_24h": round(float(candidate.get('price_change_24h', 0) or 0), 1),
+                        "price_change_1h": round(float(candidate.get('price_change_1h', 0) or 0), 1),
+                        "price_change_5min": round(float(candidate.get('price_change_5min', 0) or 0), 1),
+                        "buy_sell_ratio": round(float(candidate.get('buy_sell_ratio', 1) or 1), 2),
+                        "overall_score": round(float(candidate.get('overall_score', 0) or 0), 1),
+                        "catalyst": candidate.get('catalyst', ''),
+                        "narrative": candidate.get('narrative', ''),
+                        "why_trending": candidate.get('why_trending', ''),
+                        "short_term_potential": candidate.get('short_term_potential', ''),
+                        "long_term_potential": candidate.get('long_term_potential', ''),
+                        "dex_url": candidate.get('dex_url', ''),
+                        "chart_url": candidate.get('chart_url', ''),
+                        "buy_url": candidate.get('buy_url', ''),
+                        "red_flags": candidate.get('red_flags', []),
+                        "dex_source": candidate.get('dex_source', ''),
+                        "approved_at": p.get('approved_at'),
+                    }
+                    if status == 'pending':
+                        pending.append(play_obj)
+                    elif status in ('active', 'tp1_hit', 'tp2_hit'):
+                        active.append(play_obj)
+            except Exception as e:
+                logger.warning(f"Could not load alpha plays from DB fallback: {e}")
         
         return {
             "active_count": len(active),
@@ -370,20 +457,30 @@ async def reject_alpha(symbol: str):
     """Reject (discard) a pending alpha/DEX play from dashboard."""
     orch = require_orch()
     try:
-        if not orch.alpha_engine:
-            return {"success": False, "error": "Alpha engine not initialized"}
-        
-        candidate = orch.alpha_engine.pending_plays.pop(symbol, None)
-        if candidate:
-            # Also mark DB row as rejected so it doesn't reappear on restart
+        if orch.alpha_engine:
+            candidate = orch.alpha_engine.pending_plays.pop(symbol, None)
+            if candidate:
+                # Also mark DB row as rejected so it doesn't reappear on restart
+                if orch.db:
+                    try:
+                        orch.db.client.table('alpha_plays').update({'status': 'rejected'}).eq('symbol', symbol).eq('status', 'pending').execute()
+                    except Exception:
+                        pass
+                return {"success": True, "symbol": symbol, "message": f"Alpha play {symbol} rejected and removed"}
+            else:
+                return {"success": False, "error": f"Alpha play {symbol} not found in pending queue"}
+        else:
+            # Fallback: update DB directly when alpha engine not initialized (dashboard-only mode)
             if orch.db:
                 try:
-                    orch.db.client.table('alpha_plays').update({'status': 'rejected'}).eq('symbol', symbol).eq('status', 'pending').execute()
+                    # Find pending play by symbol, update by its ID
+                    result = orch.db.client.table('alpha_plays').select('id').eq('symbol', symbol).eq('status', 'pending').limit(1).execute()
+                    if result.data:
+                        play_id = result.data[0]['id']
+                        await orch.db.update_alpha_play(play_id, {'status': 'rejected'})
                 except Exception:
                     pass
-            return {"success": True, "symbol": symbol, "message": f"Alpha play {symbol} rejected and removed"}
-        else:
-            return {"success": False, "error": f"Alpha play {symbol} not found in pending queue"}
+            return {"success": True, "symbol": symbol, "message": f"Alpha play {symbol} rejected via DB"}
     except Exception as e:
         logger.error(f"Error rejecting alpha play: {e}")
         return {"success": False, "error": str(e)}
@@ -394,14 +491,20 @@ async def close_alpha(play_id: str, reason: str = "manual"):
     """Manually close an active alpha play from dashboard."""
     orch = require_orch()
     try:
-        if not orch.alpha_engine:
-            return {"success": False, "error": "Alpha engine not initialized"}
-        
-        result = await orch.alpha_engine.close_play(play_id, reason=reason)
-        if result:
-            return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} closed"}
+        if orch.alpha_engine:
+            result = await orch.alpha_engine.close_play(play_id, reason=reason)
+            if result:
+                return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} closed"}
+            else:
+                return {"success": False, "error": f"Alpha play {play_id} not found or already closed"}
         else:
-            return {"success": False, "error": f"Alpha play {play_id} not found or already closed"}
+            # Fallback: update DB directly when alpha engine not initialized (dashboard-only mode)
+            from datetime import datetime
+            await orch.db.update_alpha_play(play_id, {
+                'status': 'closed',
+                'closed_at': datetime.utcnow().isoformat(),
+            })
+            return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} closed via DB"}
     except Exception as e:
         logger.error(f"Error closing alpha play: {e}")
         return {"success": False, "error": str(e)}
@@ -412,14 +515,16 @@ async def update_alpha(play_id: str, updates: dict = Body(...)):
     """Update an active alpha play's parameters (SL, TP, entry, position size)."""
     orch = require_orch()
     try:
-        if not orch.alpha_engine:
-            return {"success": False, "error": "Alpha engine not initialized"}
-        
-        result = await orch.alpha_engine.update_play(play_id, updates)
-        if result:
-            return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} updated", "updates": updates}
+        if orch.alpha_engine:
+            result = await orch.alpha_engine.update_play(play_id, updates)
+            if result:
+                return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} updated", "updates": updates}
+            else:
+                return {"success": False, "error": f"Alpha play {play_id} not found"}
         else:
-            return {"success": False, "error": f"Alpha play {play_id} not found"}
+            # Fallback: update DB directly when alpha engine not initialized (dashboard-only mode)
+            await orch.db.update_alpha_play(play_id, updates)
+            return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} updated via DB", "updates": updates}
     except Exception as e:
         logger.error(f"Error updating alpha play: {e}")
         return {"success": False, "error": str(e)}
@@ -494,7 +599,19 @@ async def alpha_performance(days: int = 90):
         from datetime import datetime
         import json
         
-        total = len(plays)
+        valid_plays = []
+        for p in plays:
+            cd = p.get('candidate_data')
+            entry_price = p.get('entry_price')
+            symbol = p.get('symbol', '')
+            # Skip obviously broken records: no candidate_data, no entry_price, and symbol looks like a UUID fragment
+            if not cd and not entry_price:
+                continue
+            if not cd and (not symbol or len(symbol) < 2 or symbol in ('UNKNOWN', 'unknown', '')):
+                continue
+            valid_plays.append(p)
+        
+        total = len(valid_plays)
         wins = 0
         big_wins = 0
         losses = 0
@@ -508,7 +625,15 @@ async def alpha_performance(days: int = 90):
         best = None
         worst = None
         
-        for p in plays:
+        if not valid_plays:
+            return {
+                "total_plays": 0, "win_rate": 0, "big_win_rate": 0,
+                "avg_pnl": 0, "avg_hold_hours": 0, "best_play": None, "worst_play": None,
+                "by_chain": {}, "by_trade_type": {}, "by_risk": {},
+                "history": [], "active": [], "message": "No valid alpha play data yet. Plays will appear once alpha scans discover and approve candidates."
+            }
+        
+        for p in valid_plays:
             status = p.get('status', 'active')
             
             # Parse candidate_data for extra metadata
@@ -902,12 +1027,12 @@ async def send_marketing_post(post: MarketingPost):
         sent = []
         for ch in channels:
             if ch:
-                msg = await orch.admin_bot.app.bot.send_message(
+                msg = await orch.admin_bot.bot.send_message(
                     chat_id=ch, text=post.message, parse_mode='HTML'
                 )
                 sent.append({"channel": ch, "message_id": msg.message_id})
                 if post.pin:
-                    await orch.admin_bot.app.bot.pin_chat_message(ch, msg.message_id)
+                    await orch.admin_bot.bot.pin_chat_message(ch, msg.message_id)
         
         return {"success": True, "sent": sent}
     except Exception as e:
@@ -921,35 +1046,41 @@ async def trigger_campaign(campaign: CampaignTrigger):
     orch = require_orch()
     try:
         if campaign.campaign_type == "fomo":
-            # Build FOMO with real stats — active signals + recent wins
-            since = datetime.utcnow() - timedelta(days=7)
-            result = orch.db.client.table('signals').select('*').gte('created_at', since.isoformat()).execute()
+            # Build FOMO with TODAY's results — trades/wins/losses/P&L
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            result = orch.db.client.table('signals').select('*')\
+                .gte('created_at', today_start.isoformat())\
+                .in_('status', ['active', 'closed', 'target_hit', 'stopped'])\
+                .execute()
             rows = result.data if hasattr(result, 'data') else []
+            closed_rows = [r for r in rows if r.get('pnl_percent') is not None]
             
-            active = [r for r in rows if r.get('status') == 'active']
-            closed = [r for r in rows if r.get('status') == 'closed']
-            wins = [r for r in closed if (r.get('pnl_percent') or 0) > 0]
+            total = len(closed_rows)
+            wins = sum(1 for r in closed_rows if (r.get('pnl_percent') or 0) > 0)
+            losses = sum(1 for r in closed_rows if (r.get('pnl_percent') or 0) < 0)
+            breakeven = total - wins - losses
+            total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in closed_rows)
             
-            # Find best recent trade
-            best = max(wins, key=lambda x: x.get('pnl_percent', 0) or 0) if wins else None
+            # Find best trade today
+            best = max(closed_rows, key=lambda x: x.get('pnl_percent', 0) or 0) if closed_rows else None
             
             text = "🔥 <b>VIP JUST BANKED IT!</b>\n\n"
             
-            if best:
+            if best and best.get('pnl_percent', 0) > 0:
                 text += (
                     f"📊 <b>{best.get('symbol', 'Unknown')}</b> hit TP — "
-                    f"<b>+{best.get('pnl_percent', 0):.1f}%</b>\n"
+                    f"<b>+{best.get('pnl_percent', 0):.1f}%</b>\n\n"
                 )
             
-            if active:
-                text += f"🎯 {len(active)} active signal{'s' if len(active) > 1 else ''} running right now\n"
-            
-            if wins:
-                total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in wins)
-                text += f"💰 {len(wins)} winner{'s' if len(wins) > 1 else ''} this week (+{total_pnl:.1f}%)\n"
+            text += "📊 <b>Today's Results</b>\n"
+            text += f"Trades: {total}\n"
+            text += f"Wins: {wins} | Losses: {losses}"
+            if breakeven > 0:
+                text += f" | BE: {breakeven}"
+            text += f"\nTotal P&L: {total_pnl:+.1f}%\n\n"
             
             text += (
-                f"\nWhile free channel watched the teaser...\n"
+                f"While free channel watched the teaser...\n"
                 f"VIP members executed the full plan.\n\n"
                 f"💎 <a href='https://t.me/{settings.TELEGRAM_VIP_BOT_USERNAME}'>Join VIP for the next one</a>"
             )
@@ -961,41 +1092,50 @@ async def trigger_campaign(campaign: CampaignTrigger):
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-            return {"success": True, "type": "fomo", "active_signals": len(active), "recent_wins": len(wins)}
+            return {"success": True, "type": "fomo", "trades": total, "wins": wins, "losses": losses, "pnl": total_pnl}
         
         elif campaign.campaign_type == "social_proof":
-            # Use same DB query as Performance page for accurate stats
+            # Query only EXECUTED trades (not pending/rejected) from the last 7 days
             since = datetime.utcnow() - timedelta(days=7)
-            result = orch.db.client.table('signals').select('*').gte('created_at', since.isoformat()).execute()
+            result = orch.db.client.table('signals').select('*')\
+                .gte('created_at', since.isoformat())\
+                .in_('status', ['active', 'closed', 'target_hit', 'stopped'])\
+                .execute()
             rows = result.data if hasattr(result, 'data') else []
-            total = len(rows)
-            wins = sum(1 for r in rows if (r.get('pnl_percent') or 0) > 0)
-            losses = sum(1 for r in rows if (r.get('pnl_percent') or 0) < 0)
-            win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-            total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in rows)
+            # Only count trades with a P&L result (closed) or still active
+            closed_rows = [r for r in rows if r.get('pnl_percent') is not None]
+            total = len(closed_rows)
+            wins = sum(1 for r in closed_rows if (r.get('pnl_percent') or 0) > 0)
+            losses = sum(1 for r in closed_rows if (r.get('pnl_percent') or 0) < 0)
+            breakeven = total - wins - losses
+            total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in closed_rows)
             
             # Fallback to all-time if week is empty
             if total == 0:
-                result_all = orch.db.client.table('signals').select('*').execute()
+                result_all = orch.db.client.table('signals').select('*')\
+                    .in_('status', ['active', 'closed', 'target_hit', 'stopped'])\
+                    .execute()
                 rows_all = result_all.data if hasattr(result_all, 'data') else []
-                total = len(rows_all)
-                wins = sum(1 for r in rows_all if (r.get('pnl_percent') or 0) > 0)
-                losses = sum(1 for r in rows_all if (r.get('pnl_percent') or 0) < 0)
-                win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-                total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in rows_all)
+                closed_all = [r for r in rows_all if r.get('pnl_percent') is not None]
+                total = len(closed_all)
+                wins = sum(1 for r in closed_all if (r.get('pnl_percent') or 0) > 0)
+                losses = sum(1 for r in closed_all if (r.get('pnl_percent') or 0) < 0)
+                breakeven = total - wins - losses
+                total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in closed_all)
                 period_label = "All Time"
             else:
                 period_label = "This Week"
             
-            text = (
-                f"📊 <b>{period_label}'s Results</b>\n\n"
-                f"Signals: {total}\n"
-                f"Win Rate: {win_rate:.1f}%\n"
-                f"Total P&L: {total_pnl:+.1f}%\n\n"
-                f"💎 See full plans in VIP"
-            )
+            text = f"📊 <b>{period_label}'s Results</b>\n\n"
+            text += f"Trades: {total}\n"
+            text += f"Wins: {wins} | Losses: {losses}"
+            if breakeven > 0:
+                text += f" | BE: {breakeven}"
+            text += f"\nTotal P&L: {total_pnl:+.1f}%\n\n"
+            text += f"💎 See full plans in VIP"
+            
             await orch.channel_publisher.send_free_channel_message(text)
-            return {"success": True, "type": "social_proof"}
+            return {"success": True, "type": "social_proof", "trades": total, "wins": wins, "losses": losses, "pnl": total_pnl}
         
         elif campaign.campaign_type == "urgency":
             text = (
@@ -1159,28 +1299,32 @@ async def send_performance_to_channel(days: int = Query(7, ge=1, le=365), channe
     """Send current performance stats to a Telegram channel (free or vip)."""
     orch = require_orch()
     try:
-        # Re-use the same query as the Performance page
+        # Query only EXECUTED trades (not pending/rejected)
         since = datetime.utcnow() - timedelta(days=days)
-        result = orch.db.client.table('signals').select('*').gte('created_at', since.isoformat()).execute()
+        result = orch.db.client.table('signals').select('*')\
+            .gte('created_at', since.isoformat())\
+            .in_('status', ['active', 'closed', 'target_hit', 'stopped'])\
+            .execute()
         rows = result.data if hasattr(result, 'data') else []
+        closed_rows = [r for r in rows if r.get('pnl_percent') is not None]
         
-        total = len(rows)
-        wins = sum(1 for r in rows if (r.get('pnl_percent') or 0) > 0)
-        losses = sum(1 for r in rows if (r.get('pnl_percent') or 0) < 0)
-        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-        total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in rows)
+        total = len(closed_rows)
+        wins = sum(1 for r in closed_rows if (r.get('pnl_percent') or 0) > 0)
+        losses = sum(1 for r in closed_rows if (r.get('pnl_percent') or 0) < 0)
+        breakeven = total - wins - losses
+        total_pnl = sum(r.get('pnl_percent', 0) or 0 for r in closed_rows)
         
         period_label = f"Last {days} Days" if days != 7 else "This Week"
         if days >= 365:
             period_label = "All Time"
         
-        text = (
-            f"📊 <b>{period_label}'s Results</b>\n\n"
-            f"Signals: {total}\n"
-            f"Win Rate: {win_rate:.1f}%\n"
-            f"Total P&L: {total_pnl:+.1f}%\n\n"
-            f"💎 See full plans in VIP"
-        )
+        text = f"📊 <b>{period_label}'s Results</b>\n\n"
+        text += f"Trades: {total}\n"
+        text += f"Wins: {wins} | Losses: {losses}"
+        if breakeven > 0:
+            text += f" | BE: {breakeven}"
+        text += f"\nTotal P&L: {total_pnl:+.1f}%\n\n"
+        text += f"💎 See full plans in VIP"
         
         target_id = settings.TELEGRAM_VIP_CHANNEL_ID if channel == 'vip' else settings.TELEGRAM_FREE_CHANNEL_ID
         await orch.channel_publisher.bot.send_message(
@@ -1189,8 +1333,8 @@ async def send_performance_to_channel(days: int = Query(7, ge=1, le=365), channe
             parse_mode='HTML'
         )
         
-        logger.info(f"Performance stats sent to {channel} channel: {total} signals, {win_rate:.1f}% WR")
-        return {"success": True, "channel": channel, "stats": {"total": total, "win_rate": win_rate, "total_pnl": total_pnl}}
+        logger.info(f"Performance stats sent to {channel} channel: {total} trades, {wins}W/{losses}L, {total_pnl:+.1f}% P&L")
+        return {"success": True, "channel": channel, "stats": {"trades": total, "wins": wins, "losses": losses, "pnl": total_pnl}}
         
     except Exception as e:
         logger.error(f"Send performance error: {e}")
@@ -1355,7 +1499,7 @@ async def marketing_templates():
     return {
         "templates": [
             {"id": "fomo", "name": "FOMO Alert", "text": "🔥 VIP members just hit targets. Full signals exclusively in VIP."},
-            {"id": "social_proof", "name": "Social Proof", "text": "📊 This week's results: {win_rate}% win rate, +{total_pnl}% P&L."},
+            {"id": "social_proof", "name": "Social Proof", "text": "📊 This week's results: X trades, Y wins, Z losses, +N% P&L."},
             {"id": "urgency", "name": "Urgency", "text": "⏰ Limited VIP spots available. Join before we close signups."},
             {"id": "welcome", "name": "Welcome", "text": "🚀 Welcome to CryptoPulse! Here's what to expect..."},
             {"id": "education", "name": "Education", "text": "📚 Trading tip: Never risk more than 2% per trade."},
@@ -1490,9 +1634,9 @@ async def add_beta_tester(tester: AddBetaTester):
                 except Exception as e:
                     logger.warning(f"VIP bot welcome failed, falling back to admin: {e}")
             # Fall back to admin bot
-            if not sent and orch.admin_bot and orch.admin_bot.app and orch.admin_bot.app.bot:
+            if not sent and orch.admin_bot and orch.admin_bot.bot:
                 try:
-                    await orch.admin_bot.app.bot.send_message(
+                    await orch.admin_bot.bot.send_message(
                         chat_id=int(tester.telegram_user_id),
                         text=welcome_text,
                         parse_mode='HTML',
@@ -1561,7 +1705,7 @@ async def cancel_subscriber_endpoint(user_id: str):
         if success:
             # Notify user if possible
             try:
-                await orch.admin_bot.app.bot.send_message(
+                await orch.admin_bot.bot.send_message(
                     chat_id=int(user_id),
                     text="⚠️ Your VIP access has been cancelled. Contact admin if this was a mistake.",
                     parse_mode='HTML'
@@ -1595,7 +1739,7 @@ async def subscriber_dm_blast(blast: DmBlast):
             try:
                 user_id = sub.get('telegram_user_id')
                 if user_id:
-                    await orch.admin_bot.app.bot.send_message(chat_id=user_id, text=blast.message, parse_mode='HTML')
+                    await orch.admin_bot.bot.send_message(chat_id=user_id, text=blast.message, parse_mode='HTML')
                     sent += 1
             except Exception as inner:
                 failed += 1

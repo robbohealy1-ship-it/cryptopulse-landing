@@ -25,6 +25,7 @@ python-dateutil==2.8.2
 
 # Database
 supabase==2.3.4
+gotrue==2.1.0          # Pinned: versions 2.5+ use httpx 'proxy' param unsupported by httpx 0.25.x
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.25
 
@@ -43,6 +44,7 @@ newsapi-python==0.2.7
 requests==2.31.0
 
 # Utilities
+packaging==23.2
 python-dotenv==1.0.0
 pytz==2023.3.post1
 

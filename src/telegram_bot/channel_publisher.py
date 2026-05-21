@@ -82,36 +82,35 @@ class ChannelPublisher:
             raise
     
     async def publish_to_free(self, signal: TradingSignal):
-        """Publish simplified signal to free channel"""
+        """Publish text-only teaser to free channel — NEVER send full signal cards or charts to free"""
         try:
-            free_message = self._format_signal_for_channel(signal, vip_only=False)
+            direction_emoji = "🟢 LONG" if signal.direction.value == "LONG" else "🔴 SHORT"
+            ticker = signal.symbol.replace('/', '')
             
-            # Generate chart with fallback to text-only if it fails
-            chart_path = None
-            try:
-                chart_path = await self.chart_generator.generate_chart(signal)
-            except Exception as chart_err:
-                logger.warning(f"Chart generation failed for {signal.symbol}, sending text-only: {chart_err}")
+            # Text-only teaser — no prices, no chart, no targets
+            text = (
+                f"🔥 <b>{direction_emoji} SIGNAL ALERT</b>\n\n"
+                f"📊 <b>#{ticker}</b> | Confidence: {signal.confidence:.0f}%\n"
+                f"⏱ Timeframe: {signal.timeframe}\n\n"
+                f"💡 <b>Free channel gets the teaser.</b>\n"
+                f"💎 <b>VIP gets the full plan:</b>\n"
+                f"   ✅ Exact entry price\n"
+                f"   ✅ Stop loss level\n"
+                f"   ✅ 3 profit targets\n"
+                f"   ✅ Live updates\n\n"
+                f"🔐 <a href='https://t.me/CryptoPulseVIPAccessBot'>Join VIP Instantly</a>\n"
+                f"or DM @CryptoPulseVIPAccessBot"
+            )
             
-            if chart_path:
-                with open(chart_path, 'rb') as photo:
-                    msg = await self.bot.send_photo(
-                        chat_id=self.free_channel_id,
-                        photo=photo,
-                        caption=free_message,
-                        parse_mode='HTML'
-                    )
-                    signal.free_channel_message_id = msg.message_id
-            else:
-                msg = await self.bot.send_message(
-                    chat_id=self.free_channel_id,
-                    text=free_message,
-                    parse_mode='HTML'
-                )
-                signal.free_channel_message_id = msg.message_id
-            
+            msg = await self.bot.send_message(
+                chat_id=self.free_channel_id,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=False
+            )
+            signal.free_channel_message_id = msg.message_id
             signal.free_channel_posted = True
-            logger.info(f"Published signal {signal.symbol} to FREE channel")
+            logger.info(f"Published text teaser for {signal.symbol} to FREE channel")
             
         except Exception as e:
             logger.error(f"Error publishing to free channel: {e}")
