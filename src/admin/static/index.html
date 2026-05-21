@@ -778,14 +778,12 @@ function renderActiveSignals(signals) {
     const entryColor = s.is_limit_order ? '#fbbf24' : '#22c55e';
     const slMoved = s.stop_moved_to_breakeven ? '🔒 Breakeven' : 'Active';
     
-    // For limit orders, show fill status
+    // For limit orders, show fill status based on BACKEND status (not current price)
     let fillStatus = '';
     if (s.is_limit_order) {
-      const isLong = s.direction === 'LONG';
-      const current = s.current_price || 0;
-      const entry = s.entry_price || 0;
-      const filled = isLong ? (current <= entry) : (current >= entry);
-      if (!filled) {
+      // Trust backend status — prevents flickering when price bounces around entry
+      const backendActive = (s.status === 'active');
+      if (!backendActive) {
         fillStatus = '<div style="background:#451a03;border:1px solid #92400e;color:#fbbf24;padding:6px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;text-align:center;">⏳ Waiting for limit fill — TP/SL tracking paused until entry is hit</div>';
       } else {
         fillStatus = '<div style="background:#064e3b;border:1px solid #059669;color:#34d399;padding:6px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;text-align:center;">✅ Limit filled — now tracking TP/SL</div>';

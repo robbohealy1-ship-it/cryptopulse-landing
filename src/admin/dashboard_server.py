@@ -230,6 +230,7 @@ async def active_signals():
                 "timeframe": s.timeframe,
                 "setup_type": s.setup_type.value if hasattr(s.setup_type, 'value') else str(s.setup_type),
                 "is_limit_order": getattr(s, 'is_limit_order', False),
+                "status": s.status.value if hasattr(s.status, 'value') else str(s.status),
                 "confidence": s.confidence,
                 "risk_reward": s.risk_reward,
                 "entry_price": entry,
