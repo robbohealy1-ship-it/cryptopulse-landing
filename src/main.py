@@ -3,7 +3,7 @@ import os
 import random
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from src.engine.signal_engine import SignalEngine
 from src.telegram_bot.admin_bot import AdminBot
 from src.telegram_bot.vip_bot import VIPBot
@@ -1277,12 +1277,30 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
                 filtered = []
                 for s in signals:
                     close_time = getattr(s, 'closed_at', None) or getattr(s, 'updated_at', None) or getattr(s, 'created_at', None)
-                    if close_time:
-                        # Strip timezone to avoid naive vs aware comparison errors
-                        if hasattr(close_time, 'tzinfo') and close_time.tzinfo is not None:
-                            close_time = close_time.replace(tzinfo=None)
-                        if close_time >= start_time:
-                            filtered.append(s)
+                    if close_time and isinstance(close_time, datetime):
+                        try:
+                            # Convert both to UTC timestamps for timezone-agnostic comparison
+                            if close_time.tzinfo is not None:
+                                close_ts = close_time.timestamp()
+                            else:
+                                close_ts = close_time.replace(tzinfo=timezone.utc).timestamp()
+                            
+                            if start_time.tzinfo is not None:
+                                start_ts = start_time.timestamp()
+                            else:
+                                start_ts = start_time.replace(tzinfo=timezone.utc).timestamp()
+                            
+                            if close_ts >= start_ts:
+                                filtered.append(s)
+                        except Exception:
+                            # Fallback: strip timezone and compare naively
+                            try:
+                                close_naive = close_time.replace(tzinfo=None) if close_time.tzinfo else close_time
+                                start_naive = start_time.replace(tzinfo=None) if start_time.tzinfo else start_time
+                                if close_naive >= start_naive:
+                                    filtered.append(s)
+                            except Exception:
+                                pass
                 return filtered
             
             today_signals = _filter_by_close_time(closed_signals, today_start)
