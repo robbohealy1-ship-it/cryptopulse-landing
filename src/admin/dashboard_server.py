@@ -119,6 +119,12 @@ async def marketing_dashboard():
     return FileResponse(os.path.join(_STATIC_DIR, "marketing.html"))
 
 
+@app.get("/portfolio")
+async def portfolio_page():
+    """Serve the full portfolio page with all trades and live P&L."""
+    return FileResponse(os.path.join(_STATIC_DIR, "portfolio.html"))
+
+
 @app.get("/api/status")
 async def system_status():
     """Overall system health and status."""
@@ -247,6 +253,91 @@ async def active_signals():
         }
     except Exception as e:
         logger.error(f"Error getting active signals: {e}")
+        return {"count": 0, "signals": [], "error": str(e)}
+
+
+@app.get("/api/portfolio")
+async def portfolio_data():
+    """Full portfolio: all signals (active + closed + pending) with live P&L and aggregate stats."""
+    orch = require_orch()
+    try:
+        all_signals = await orch.db.get_all_signals(limit=500)
+        
+        active_pnl_total = 0.0
+        closed_pnl_total = 0.0
+        wins = 0
+        losses = 0
+        portfolio_items = []
+        
+        for s in all_signals:
+            entry = s.actual_entry or s.entry_price or 0
+            status = getattr(s, 'status', None)
+            status_val = status.value if hasattr(status, 'value') else str(status) if status else 'unknown'
+            
+            # Calculate P&L
+            pnl = 0.0
+            current_price = None
+            
+            if status_val == 'active' or status_val == 'approved':
+                # Live P&L for active trades
+                current_price = await orch._get_current_price(s.symbol)
+                if current_price and entry and entry != 0:
+                    pnl = ((current_price - entry) / entry) * 100
+                    if s.direction.value == "SHORT":
+                        pnl = -pnl
+                active_pnl_total += pnl
+            elif status_val == 'closed':
+                # Realized P&L for closed trades
+                pnl = getattr(s, 'pnl_percent', 0) or 0
+                current_price = s.actual_exit or entry
+                closed_pnl_total += pnl
+                if pnl > 0:
+                    wins += 1
+                else:
+                    losses += 1
+            
+            portfolio_items.append({
+                "id": s.id,
+                "symbol": s.symbol,
+                "direction": s.direction.value if hasattr(s.direction, 'value') else str(s.direction),
+                "timeframe": s.timeframe,
+                "status": status_val,
+                "entry_price": entry,
+                "current_price": current_price,
+                "actual_exit": getattr(s, 'actual_exit', None),
+                "stop_loss": s.stop_loss,
+                "take_profit_1": s.take_profit_1,
+                "take_profit_2": s.take_profit_2,
+                "take_profit_3": s.take_profit_3,
+                "pnl_percent": round(pnl, 2),
+                "confidence": s.confidence,
+                "risk_reward": s.risk_reward,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "closed_at": getattr(s, 'closed_at', None).isoformat() if getattr(s, 'closed_at', None) else None,
+                "tp1_hit": getattr(s, 'tp1_hit', False),
+                "tp2_hit": getattr(s, 'tp2_hit', False),
+                "tp3_hit": getattr(s, 'tp3_hit', False),
+            })
+        
+        total_closed = wins + losses
+        win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+        total_pnl = active_pnl_total + closed_pnl_total
+        
+        return {
+            "count": len(portfolio_items),
+            "active_count": sum(1 for p in portfolio_items if p['status'] in ['active', 'approved']),
+            "closed_count": sum(1 for p in portfolio_items if p['status'] == 'closed'),
+            "pending_count": sum(1 for p in portfolio_items if p['status'] == 'pending'),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(win_rate, 1),
+            "active_pnl": round(active_pnl_total, 2),
+            "closed_pnl": round(closed_pnl_total, 2),
+            "total_pnl": round(total_pnl, 2),
+            "signals": portfolio_items
+        }
+    except Exception as e:
+        logger.error(f"Error getting portfolio: {e}")
         return {"count": 0, "signals": [], "error": str(e)}
 
 

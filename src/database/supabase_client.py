@@ -246,6 +246,18 @@ class SupabaseClient:
             logger.error(f"Error getting closed signals: {e}")
             return []
     
+    async def get_all_signals(self, limit: int = 500) -> List[TradingSignal]:
+        """Get all signals (active + closed + pending + rejected) for portfolio view."""
+        try:
+            result = self.client.table('signals').select('*')\
+                .order('created_at', desc=True)\
+                .limit(limit)\
+                .execute()
+            return [self._dict_to_signal(data) for data in result.data]
+        except Exception as e:
+            logger.error(f"Error getting all signals: {e}")
+            return []
+    
     async def update_signal(self, signal_id: str, updates: dict) -> bool:
         """Update signal fields (generic update method)"""
         try:
