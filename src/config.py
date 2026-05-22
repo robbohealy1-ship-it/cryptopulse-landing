@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     VIP_MIN_CONFIDENCE: int = 90
     FREE_MAX_SIGNALS_PER_DAY: int = 2
     
-    SIGNAL_EXPIRY_MINUTES: int = 30
+    SIGNAL_EXPIRY_MINUTES: int = 120
     MIN_RISK_REWARD: float = 2.0
     
     # Free channel delay after VIP (minutes)

@@ -644,20 +644,18 @@ class CryptoPulseOrchestrator:
                 logger.warning(f"[APPROVE] Signal {signal.symbol} already ACTIVE/vip_channel_posted — SKIPPING")
                 return
             
-            # Check if signal has expired before approval
+            # Admin manually approved — their judgment overrides auto-expiry
             expires_at = signal.expires_at
             if expires_at and expires_at.tzinfo:
                 expires_at = expires_at.replace(tzinfo=None)
             if expires_at and datetime.utcnow() > expires_at:
-                signal.cancelled = True
-                signal.cancellation_reason = "Signal expired before admin approval"
-                await self.db.save_signal(signal)
+                logger.warning(f"[APPROVE] Signal {signal.symbol} is past expiry but admin approved — publishing anyway")
+                # Extend expiry to now so periodic check won't cancel it
+                signal.expires_at = datetime.utcnow() + timedelta(minutes=30)
                 if not self.dashboard_only:
                     await self.admin_bot.send_notification(
-                        f"⏰ Signal {signal.symbol} expired before approval - not published"
+                        f"⚠️ Signal {signal.symbol} was past expiry but you approved it — published to channels"
                     )
-                logger.info(f"[APPROVE] Signal {signal.symbol} expired - not published")
-                return
             
             signal.admin_approved = True
             signal.status = SignalStatus.APPROVED
