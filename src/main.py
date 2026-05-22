@@ -677,7 +677,7 @@ class CryptoPulseOrchestrator:
             signal.vip_channel_posted = True
             logger.info(f"[APPROVE] ✅ VIP publish OK for {signal.symbol} (msg_id={signal.vip_channel_message_id})")
             
-            # Set actual entry price for market orders
+            # Set actual entry price and status for market orders
             if not signal.is_limit_order:
                 try:
                     actual_price = await self._get_current_price(signal.symbol)
@@ -686,6 +686,9 @@ class CryptoPulseOrchestrator:
                         logger.info(f"[APPROVE] Actual entry price for {signal.symbol}: ${actual_price:.4f}")
                 except Exception as price_err:
                     logger.warning(f"[APPROVE] Could not fetch actual entry price for {signal.symbol}: {price_err}")
+                # Market orders are active immediately after VIP publish
+                signal.status = SignalStatus.ACTIVE
+            # Limit orders stay as APPROVED until the limit price is actually hit
             
             # AUTOPILOT: Start tracking
             if self.autopilot:

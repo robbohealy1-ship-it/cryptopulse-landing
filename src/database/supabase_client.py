@@ -278,6 +278,16 @@ class SupabaseClient:
             logger.error(f"Error updating signal status: {e}")
             return False
     
+    async def save_signals_batch(self, signals: List[TradingSignal]) -> bool:
+        """Save multiple signals to DB (used by autopilot performance tracker)."""
+        try:
+            for signal in signals:
+                await self.save_signal(signal)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving signals batch: {e}")
+            return False
+    
     async def mark_tp_hit(self, signal_id: str, tp_level: int) -> bool:
         """Mark a TP level as hit"""
         try:

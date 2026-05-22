@@ -74,7 +74,7 @@ class ChannelPublisher:
                 signal.vip_channel_message_id = msg.message_id
             
             signal.vip_channel_posted = True
-            signal.status = SignalStatus.ACTIVE
+            # NOTE: Do NOT set status here — on_signal_approved handles status based on order type
             logger.info(f"Published signal {signal.symbol} to VIP channel")
             
         except Exception as e:
@@ -307,24 +307,10 @@ TP1: ${signal.take_profit_1:.8f}
 📊 <b>Risk/Reward:</b> 1:{signal.risk_reward:.2f}
 ⚡ <b>Confidence:</b> {signal.confidence:.1f}%
 {chart_section}
-<b>Analysis:</b>
-🎯 {setup_name} on {signal.symbol} ({signal.timeframe})
-   🔥 {confluence}
-   Regime: {regime}
-📈 Direction: {signal.direction.value}
-📊 Structure: {structure}
-⚡ Institutional Score: {signal.technical_score.total_score:.1f}/100
-   • Structure: {signal.technical_score.structure_score:.0f}
-   • Volume Profile: {signal.technical_score.volume_score:.0f}
-   • Liquidity: {signal.technical_score.momentum_score:.0f}
-   • Session: {signal.technical_score.trend_score:.0f}
-   • Multi-TF: {signal.context_score.total_score:.0f}
-🌍 Context: {signal.context_score.total_score:.1f}/100
-✅ Break of Structure confirmed
-✅ Entry at volume profile premium
-✅ Liquidity swept before entry
+<b>� Institutional Analysis:</b>
+{signal.reasoning or 'Analysis loading...'}
 
-<b>Market Context:</b>
+<b>📊 Market Context:</b>
 {fear_greed}
 {btc_24h}
 {market_24h}

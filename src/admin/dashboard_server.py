@@ -281,14 +281,18 @@ async def portfolio_data():
             pnl = 0.0
             current_price = None
             
-            if status_val == 'active' or status_val == 'approved':
-                # Live P&L for active trades
+            if status_val == 'active':
+                # Live P&L for active trades (entry has been hit)
                 current_price = await orch._get_current_price(s.symbol)
                 if current_price and entry and entry != 0:
                     pnl = ((current_price - entry) / entry) * 100
                     if s.direction.value == "SHORT":
                         pnl = -pnl
                 active_pnl_total += pnl
+            elif status_val == 'approved':
+                # Approved but not yet triggered (limit orders waiting for fill)
+                current_price = await orch._get_current_price(s.symbol)
+                pnl = 0.0  # No P&L until entry is hit
             elif status_val == 'closed':
                 # Realized P&L for closed trades
                 pnl = getattr(s, 'pnl_percent', 0) or 0
@@ -328,7 +332,8 @@ async def portfolio_data():
         
         return {
             "count": len(portfolio_items),
-            "active_count": sum(1 for p in portfolio_items if p['status'] in ['active', 'approved']),
+            "active_count": sum(1 for p in portfolio_items if p['status'] == 'active'),
+            "pending_entry_count": sum(1 for p in portfolio_items if p['status'] == 'approved'),
             "closed_count": sum(1 for p in portfolio_items if p['status'] == 'closed'),
             "pending_count": sum(1 for p in portfolio_items if p['status'] == 'pending'),
             "wins": wins,

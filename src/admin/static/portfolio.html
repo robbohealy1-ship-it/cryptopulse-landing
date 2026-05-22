@@ -279,7 +279,8 @@ function renderPnl(pnl) {
 }
 
 function getStatusBadge(status, tp1, tp2, tp3) {
-  if (status === 'active' || status === 'approved') return '<span class="badge active">ACTIVE</span>';
+  if (status === 'active') return '<span class="badge active">ACTIVE</span>';
+  if (status === 'approved') return '<span class="badge pending">PENDING ENTRY</span>';
   if (status === 'pending') return '<span class="badge pending">PENDING</span>';
   if (status === 'closed') {
     if (tp3) return '<span class="badge tp3">TP3 HIT</span>';
@@ -348,6 +349,10 @@ function updateSummary(data) {
   setVal('winRateLabel', `${data.wins}W / ${data.losses}L`);
   
   setVal('activeCount', data.active_count);
+  const pendingLabel = data.pending_entry_count > 0
+    ? `+ ${data.pending_entry_count} pending entry`
+    : 'Currently open';
+  setVal('activeCountLabel', pendingLabel);
   setVal('closedCount', data.closed_count);
 }
 
