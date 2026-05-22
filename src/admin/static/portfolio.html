@@ -158,6 +158,30 @@ tr:hover { background: #0f172a; }
   </div>
 </div>
 
+<!-- Account Overview (Live Exchange Data) -->
+<div class="section">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <h2>Account Overview</h2>
+    <div class="last-updated">Last updated: <span id="accountLastUpdated">--</span></div>
+  </div>
+  <div id="accountCards">
+    <div class="empty-state"><div class="loading"></div> Loading account data...</div>
+  </div>
+  <div id="accountPositions" style="margin-top:16px;">
+    <h3 style="font-size:14px;color:#94a3b8;margin-bottom:10px;">Open Positions</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Account</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>Current</th><th>Size</th><th>Unrealized P&L</th><th>Open Time</th></tr>
+        </thead>
+        <tbody id="positionsTable">
+          <tr><td colspan="8" class="empty-state">No open positions</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <!-- Trades Table -->
 <div class="section">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
@@ -436,10 +460,107 @@ async function loadAlphaPortfolio() {
   }
 }
 
+async function loadAccountData() {
+  try {
+    const res = await fetch('/api/account');
+    const data = await res.json();
+    renderAccounts(data.accounts || []);
+    document.getElementById('accountLastUpdated').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('accountCards').innerHTML = 
+      '<div class="empty-state">Failed to load account data</div>';
+  }
+}
+
+function renderAccounts(accounts) {
+  const cardsEl = document.getElementById('accountCards');
+  const tbody = document.getElementById('positionsTable');
+  
+  if (!accounts || accounts.length === 0) {
+    cardsEl.innerHTML = '<div class="empty-state">No exchange accounts configured.<br><small style="color:#64748b;">Add CTRADER_ACCESS_TOKEN or MEXC_API_KEY to your .env file.</small></div>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No exchange accounts configured</td></tr>';
+    return;
+  }
+  
+  // Build account summary cards
+  let cardsHtml = '<div class="grid">';
+  let allPositions = [];
+  
+  for (const acc of accounts) {
+    if (acc.error) {
+      cardsHtml += `
+        <div class="card">
+          <h3>${acc.label || 'Unknown'}</h3>
+          <div class="value" style="font-size:16px;color:#ef4444;">Disconnected</div>
+          <div class="change down">${acc.error}</div>
+        </div>`;
+      continue;
+    }
+    
+    const account = acc.account || {};
+    const positions = acc.positions || [];
+    const label = acc.label || 'Exchange';
+    
+    if (acc.source === 'ctrader') {
+      const balance = account.balance || 0;
+      const equity = account.equity || 0;
+      const unrealized = account.unrealized_pnl || 0;
+      cardsHtml += `
+        <div class="card">
+          <h3>${label}</h3>
+          <div class="value">$${balance.toLocaleString('en', {maximumFractionDigits: 2})}</div>
+          <div class="change ${equity >= balance ? 'up' : 'down'}">Equity: $${equity.toLocaleString('en', {maximumFractionDigits: 2})}</div>
+          <div style="font-size:12px;color:#64748b;margin-top:8px;">Unrealized: <span class="${unrealized >= 0 ? 'pnl up' : 'pnl down'}">${unrealized >= 0 ? '+' : ''}${unrealized.toFixed(2)}</span></div>
+        </div>`;
+    } else if (acc.source === 'mexc') {
+      const balances = account.balances || [];
+      const mainAsset = balances.find(b => b.asset === 'USDT') || balances[0] || {};
+      const total = mainAsset.total || 0;
+      cardsHtml += `
+        <div class="card">
+          <h3>${label}</h3>
+          <div class="value">$${total.toLocaleString('en', {maximumFractionDigits: 2})}</div>
+          <div class="change neutral">${balances.length} assets held</div>
+          <div style="font-size:12px;color:#64748b;margin-top:8px;">Top: ${balances.slice(0, 3).map(b => b.asset).join(', ')}</div>
+        </div>`;
+    }
+    
+    // Collect positions for combined table
+    for (const p of positions) {
+      allPositions.push({ ...p, account_label: label });
+    }
+  }
+  cardsHtml += '</div>';
+  cardsEl.innerHTML = cardsHtml;
+  
+  // Render positions table
+  if (allPositions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No open positions on any account</td></tr>';
+  } else {
+    tbody.innerHTML = allPositions.map(p => {
+      const pnlClass = (p.unrealized_pnl || 0) >= 0 ? 'up' : 'down';
+      const pnlSign = (p.unrealized_pnl || 0) >= 0 ? '+' : '';
+      return `
+        <tr>
+          <td><span style="font-size:11px;color:#64748b;">${p.account_label}</span></td>
+          <td><strong>${p.symbol}</strong></td>
+          <td><span class="badge ${p.direction.toLowerCase()}">${p.direction}</span></td>
+          <td>${formatPrice(p.entry_price)}</td>
+          <td>${formatPrice(p.current_price)}</td>
+          <td>${p.volume || p.quantity || '--'}</td>
+          <td><span class="pnl ${pnlClass}">${pnlSign}${(p.unrealized_pnl || 0).toFixed(2)}</span></td>
+          <td>${p.open_time ? new Date(p.open_time).toLocaleDateString('en-GB', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'}) : '--'}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+}
+
 // Initial load and auto-refresh every 30 seconds
 loadPortfolio();
 loadAlphaPortfolio();
-setInterval(() => { loadPortfolio(); loadAlphaPortfolio(); }, 30000);
+loadAccountData();
+setInterval(() => { loadPortfolio(); loadAlphaPortfolio(); loadAccountData(); }, 30000);
 </script>
 </body>
 </html>

@@ -16,6 +16,8 @@ from src.config import settings
 from src.utils.logger import get_logger
 from src.admin.analytics_engine import AnalyticsEngine
 from src.admin.content_generator import ContentGenerator
+from src.exchange.ctrader_client import CTraderClient
+from src.exchange.mexc_client import MEXCClient
 
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -340,6 +342,54 @@ async def portfolio_data():
     except Exception as e:
         logger.error(f"Error getting portfolio: {e}")
         return {"count": 0, "signals": [], "error": str(e)}
+
+
+@app.get("/api/account")
+async def account_data():
+    """Fetch live account data from cTrader (BEM Funding) and MEXC (personal)."""
+    accounts = []
+    
+    # cTrader / BEM Funding
+    if settings.CTRADER_ACCESS_TOKEN and settings.CTRADER_ACCOUNT_ID:
+        try:
+            client = CTraderClient(
+                access_token=settings.CTRADER_ACCESS_TOKEN,
+                account_id=settings.CTRADER_ACCOUNT_ID,
+                server=settings.CTRADER_SERVER,
+            )
+            data = await client.get_all_data()
+            await client.close()
+            accounts.append(data)
+        except Exception as e:
+            logger.error(f"cTrader account fetch failed: {e}")
+            accounts.append({
+                "source": "ctrader",
+                "label": "BEM Funding Challenge",
+                "error": str(e),
+            })
+    
+    # MEXC Personal
+    if settings.MEXC_API_KEY and settings.MEXC_API_SECRET:
+        try:
+            client = MEXCClient(
+                api_key=settings.MEXC_API_KEY,
+                api_secret=settings.MEXC_API_SECRET,
+            )
+            data = await client.get_all_data()
+            await client.close()
+            accounts.append(data)
+        except Exception as e:
+            logger.error(f"MEXC account fetch failed: {e}")
+            accounts.append({
+                "source": "mexc",
+                "label": "MEXC Personal",
+                "error": str(e),
+            })
+    
+    return {
+        "accounts": accounts,
+        "connected_count": sum(1 for a in accounts if "error" not in a),
+    }
 
 
 # ==================== ALPHA/DEX PLAYS ENDPOINTS ====================

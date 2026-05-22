@@ -164,6 +164,16 @@ class Settings(BaseSettings):
     # NOTE: Uniswap and 1inch have NO swap referral programs. Only Jupiter works.
     JUPITER_REFERRAL_CODE: Optional[str] = None
     
+    # ==================== EXCHANGE ACCOUNT MONITORING (READ-ONLY) ====================
+    # cTrader (BEM Funding) — OAuth2 access token + account ID
+    CTRADER_ACCESS_TOKEN: Optional[str] = None
+    CTRADER_ACCOUNT_ID: Optional[str] = None
+    CTRADER_SERVER: str = "live"  # "live" or "demo"
+    
+    # MEXC Personal — API key + secret (READ-ONLY permissions recommended)
+    MEXC_API_KEY: Optional[str] = None
+    MEXC_API_SECRET: Optional[str] = None
+    
     model_config = {
         "env_file": ".env",
         "case_sensitive": True,
