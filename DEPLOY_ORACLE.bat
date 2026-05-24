@@ -7,10 +7,23 @@ echo   CryptoPulse Oracle Cloud Deployer
 echo ==========================================
 echo.
 
-set KEY="c:\CascadeProjects\windsurf-project\CryptoPulse-Signals\ssh-key-2026-05-20 (2).key"
+set KEY="c:\CascadeProjects\windsurf-project\CryptoPulse-Signals\ssh-keys-backup\ssh-key-2026-05-20 (2).key"
 set HOST=opc@141.147.114.169
 set PROJECT=/home/opc/CryptoPulse-Signals
 set VENV=/home/opc/venv
+
+echo [0/5] Checking SSH key...
+if not exist %KEY% (
+    echo   ERROR: SSH key not found at:
+    echo   %KEY%
+    echo.
+    echo   Fix: Update KEY= variable in this script
+    echo   Your key is backed up in: ssh-keys-backup\
+    pause
+    exit /b 1
+)
+echo   SSH key found.
+echo.
 
 echo [1/5] Stopping bot on Oracle...
 ssh -i %KEY% -o StrictHostKeyChecking=no %HOST% "pkill -9 -f 'python3 -m src.main' 2>/dev/null; pkill -9 -f 'python3 src/main.py' 2>/dev/null; pkill -9 -f 'src.main' 2>/dev/null; sleep 3; echo stopped"
