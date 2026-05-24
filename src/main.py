@@ -28,6 +28,7 @@ from src.utils.logger import get_logger
 from src.utils.validators import run_all_validations
 from src.utils.cleanup import CleanupManager
 from src.utils.signal_validator import SignalValidator
+from src.utils.ai_content_generator import AIContentGenerator
 from src.config import settings
 from src.admin.dashboard_server import start_dashboard
 from src.alpha_plays import AlphaPlaysEngine, AlphaPublisher
@@ -37,7 +38,10 @@ logger = get_logger(__name__)
 
 class CryptoPulseOrchestrator:
     def __init__(self):
-        self.signal_engine = SignalEngine()
+        # Initialize DB first (needed by other components)
+        self.db = SupabaseClient()
+        
+        self.signal_engine = SignalEngine(db=self.db)
         self.admin_bot = AdminBot(
             signal_callback=self.on_signal_approved,
             rejection_callback=self.on_signal_rejected,
@@ -48,7 +52,6 @@ class CryptoPulseOrchestrator:
             notification_callback=self._on_vip_notification
         )
         self.channel_publisher = ChannelPublisher()
-        self.db = SupabaseClient()
         self.cleanup_manager = CleanupManager()
         self.signal_validator = SignalValidator()
         self.marketing = MarketingAutomation(db=self.db)
@@ -58,6 +61,7 @@ class CryptoPulseOrchestrator:
         self.social_media = SocialMediaPoster()
         self.discord_publisher = DiscordPublisher()
         self.viral_generator = ViralContentGenerator()
+        self.ai_generator = AIContentGenerator()
         self.traffic_tracker = TrafficTracker(db=self.db)
         self.referral_tracker = ReferralTracker(db=self.db)
         self.community_engagement = None  # Initialized after admin bot starts (needs bot instance)
@@ -127,6 +131,20 @@ class CryptoPulseOrchestrator:
                 except Exception as e:
                     logger.warning(f"Could not restore pending signals from DB: {e}")
             
+            # 🔄 Restore ACTIVE signals to autopilot (survives restarts)
+            if self.autopilot:
+                try:
+                    active_from_db = await self.db.get_active_signals()
+                    restored_active = 0
+                    for signal in active_from_db:
+                        if signal.id not in self.autopilot.performance.active_signals:
+                            await self.autopilot.performance.track_signal(signal)
+                            restored_active += 1
+                    if restored_active > 0:
+                        logger.info(f"🎯 Restored {restored_active} active signals to autopilot tracking")
+                except Exception as e:
+                    logger.warning(f"Could not restore active signals to autopilot: {e}")
+            
             # Initialize community engagement (needs bot instance)
             if not dashboard_only and self.admin_bot.app and self.admin_bot.app.bot:
                 self.community_engagement = CommunityEngagement(
@@ -180,7 +198,8 @@ class CryptoPulseOrchestrator:
                 social_media=self.social_media,
                 discord=self.discord_publisher,
                 channel_publisher=self.channel_publisher,
-                community_engagement=self.community_engagement
+                community_engagement=self.community_engagement,
+                on_channel_notification=self._on_autopilot_channel_notification
             )
             # Wire FOMO campaign: when TP hits, blast to all channels
             self.autopilot.performance.on_signal_result = self.campaign_engine.signal_result_campaign
@@ -292,6 +311,15 @@ class CryptoPulseOrchestrator:
             CronTrigger(minute='*/1'),
             id='check_expired',
             name='Check expired pending signals',
+            replace_existing=True
+        )
+        
+        # Check for stale limit orders (approved but not filled within timeout)
+        self.scheduler.add_job(
+            self.check_stale_limit_orders,
+            CronTrigger(hour='*/1'),
+            id='check_stale_limits',
+            name='Check stale limit orders',
             replace_existing=True
         )
         
@@ -425,6 +453,17 @@ class CryptoPulseOrchestrator:
             replace_existing=True
         )
         
+        # 🧠 AI Content Generation (if enabled)
+        if settings.AI_EDUCATION_ENABLED:
+            self.scheduler.add_job(
+                self._post_ai_education,
+                CronTrigger(day_of_week='mon,wed,fri', hour=14, minute=0),
+                id='ai_education',
+                name='AI: Educational content post',
+                replace_existing=True
+            )
+            logger.info("🧠 AI educational content scheduled: Mon/Wed/Fri 14:00 UTC")
+
         # 🎰 ALPHA/DEGEN PLAYS SCHEDULER JOBS
         # Alpha discovery: Every 6 hours (finds low-cap plays)
         self.scheduler.add_job(
@@ -444,7 +483,16 @@ class CryptoPulseOrchestrator:
             replace_existing=True
         )
         
-        logger.info("🎰 Alpha Plays scheduled: discovery every 6h, tracking every 5m")
+        # Portfolio holds summary: Weekly (Sunday 18:00 UTC)
+        self.scheduler.add_job(
+            self._send_portfolio_summary,
+            CronTrigger(day_of_week='sun', hour=18, minute=0),
+            id='portfolio_summary',
+            name='Alpha: Weekly portfolio summary',
+            replace_existing=True
+        )
+        
+        logger.info("🎰 Alpha Plays scheduled: discovery every 6h, tracking every 5m, portfolio summary weekly")
         
         logger.info("✅ Scheduler configured")
         logger.info("📣 Morning overview (08:30) → VIP + Free | Evening summary (21:00 UTC / 10pm UK) → VIP + Free")
@@ -564,9 +612,26 @@ class CryptoPulseOrchestrator:
                 return
             
             await self.alpha_engine.track_active_plays()
+            await self.alpha_engine.track_portfolio_holds()
             
         except Exception as e:
             logger.error(f"Error tracking alpha plays: {e}")
+    
+    async def _send_portfolio_summary(self):
+        """Send weekly portfolio holds summary to VIP (called by scheduler Sunday 18:00 UTC)"""
+        try:
+            if not self.alpha_engine or not self.alpha_engine.portfolio_holds:
+                return
+            
+            holds = list(self.alpha_engine.portfolio_holds.values())
+            total_pnl = sum(h.current_pnl for h in holds)
+            
+            if self.alpha_engine.publisher:
+                await self.alpha_engine.publisher.send_portfolio_summary(holds, total_pnl)
+                logger.info(f"📊 Weekly portfolio summary sent: {len(holds)} holds, {total_pnl:+.1f}% total P&L")
+            
+        except Exception as e:
+            logger.error(f"Error sending portfolio summary: {e}")
     
     async def _dashboard_alpha_tracker(self):
         """Background task for dashboard-only mode: track alpha plays every 5 minutes"""
@@ -578,7 +643,8 @@ class CryptoPulseOrchestrator:
                     break
                 if self.alpha_engine:
                     await self.alpha_engine.track_active_plays()
-                    logger.info(f"📊 Dashboard alpha tracker: checked {len(self.alpha_engine.active_plays)} active plays")
+                    await self.alpha_engine.track_portfolio_holds()
+                    logger.info(f"📊 Dashboard alpha tracker: checked {len(self.alpha_engine.active_plays)} active plays, {len(self.alpha_engine.portfolio_holds)} portfolio holds")
             except Exception as e:
                 logger.error(f"Dashboard alpha tracker error: {e}")
                 await asyncio.sleep(60)
@@ -661,6 +727,15 @@ class CryptoPulseOrchestrator:
             signal.status = SignalStatus.APPROVED
             signal.approved_at = datetime.utcnow()
             
+            # Audit log: signal approved
+            if self.db:
+                await self.db.log_trade_event(
+                    signal_id=signal.id,
+                    event_type='signal_approved',
+                    details={'symbol': signal.symbol, 'direction': signal.direction.value, 'setup_type': str(signal.setup_type), 'grade': signal.grade.value, 'confidence': signal.confidence},
+                    price=signal.entry_price
+                )
+            
             logger.info(f"[APPROVE] Saving signal {signal.symbol} to DB with status=APPROVED")
             saved = await self.db.save_signal(signal)
             if not saved:
@@ -688,6 +763,13 @@ class CryptoPulseOrchestrator:
                     logger.warning(f"[APPROVE] Could not fetch actual entry price for {signal.symbol}: {price_err}")
                 # Market orders are active immediately after VIP publish
                 signal.status = SignalStatus.ACTIVE
+                if self.db:
+                    await self.db.log_trade_event(
+                        signal_id=signal.id,
+                        event_type='signal_active',
+                        details={'symbol': signal.symbol, 'reason': 'market_order', 'actual_entry': signal.actual_entry},
+                        price=signal.actual_entry
+                    )
             # Limit orders stay as APPROVED until the limit price is actually hit
             
             # AUTOPILOT: Start tracking
@@ -756,6 +838,14 @@ class CryptoPulseOrchestrator:
             
             await self.db.save_signal(signal)
             
+            if self.db:
+                await self.db.log_trade_event(
+                    signal_id=signal.id,
+                    event_type='signal_rejected',
+                    details={'symbol': signal.symbol, 'reason': signal.rejection_reason, 'grade': signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade)},
+                    price=signal.entry_price
+                )
+            
             logger.info(f"❌ Signal {signal.symbol} rejected - logged to database")
             
         except Exception as e:
@@ -808,6 +898,13 @@ class CryptoPulseOrchestrator:
                         signal.cancellation_reason = "Auto-cancelled: expired before admin approval"
                         await self.db.save_signal(signal)
                         
+                        if self.db:
+                            await self.db.log_trade_event(
+                                signal_id=signal.id,
+                                event_type='signal_expired',
+                                details={'symbol': signal.symbol, 'reason': 'expired_before_approval', 'expires_at': signal.expires_at.isoformat() if signal.expires_at else None}
+                            )
+                        
                         if not self.dashboard_only:
                             await self.admin_bot.send_notification(
                                 f"⏰ Signal {signal.symbol} auto-cancelled - expired before approval"
@@ -817,23 +914,78 @@ class CryptoPulseOrchestrator:
         except Exception as e:
             logger.error(f"Error checking expired signals: {e}")
     
+    async def check_stale_limit_orders(self):
+        """Auto-cancel APPROVED limit orders that haven't filled within timeout"""
+        try:
+            all_active = await self.db.get_active_signals()
+            stale = [s for s in all_active if getattr(s, 'is_limit_order', False) and s.status.value == 'approved']
+            
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            timeout = getattr(settings, 'LIMIT_ORDER_TIMEOUT_HOURS', 24)
+            
+            for signal in stale:
+                approved_at = getattr(signal, 'approved_at', None)
+                if not approved_at:
+                    continue
+                if approved_at.tzinfo is None:
+                    approved_at = approved_at.replace(tzinfo=timezone.utc)
+                
+                if (now - approved_at).total_seconds() > timeout * 3600:
+                    signal.status = SignalStatus.EXPIRED
+                    signal.cancelled = True
+                    signal.cancellation_reason = f"Auto-cancelled: limit order not filled within {timeout}h"
+                    await self.db.save_signal(signal)
+                    
+                    if self.db:
+                        await self.db.log_trade_event(
+                            signal_id=signal.id,
+                            event_type='limit_expired',
+                            details={'symbol': signal.symbol, 'reason': f'stale_limit_{timeout}h', 'approved_at': approved_at.isoformat() if approved_at else None}
+                        )
+                    
+                    # Remove from autopilot pending if tracked
+                    if self.autopilot and signal.id in self.autopilot.performance.pending_limit_orders:
+                        del self.autopilot.performance.pending_limit_orders[signal.id]
+                        self.autopilot.performance.pending_limit_extremes.pop(signal.id, None)
+                    
+                    if not self.dashboard_only:
+                        await self.admin_bot.send_notification(
+                            f"⏰ {signal.symbol} limit order auto-cancelled — not filled within {timeout}h"
+                        )
+                    logger.info(f"⏰ {signal.symbol} limit order auto-cancelled (stale > {timeout}h)")
+                    
+        except Exception as e:
+            logger.error(f"Error checking stale limit orders: {e}")
+    
     async def check_active_signals(self):
-        """Check all active signals for TP/SL hits and send real-time updates"""
+        """Check active signals for limit order fills. TP/SL tracking is handled exclusively by autopilot."""
         try:
             active_signals = await self.db.get_active_signals()
             
             for signal in active_signals:
                 current_price = await self._get_current_price(signal.symbol)
-                
                 if not current_price:
                     continue
                 
-                # --- LIMIT ORDER FIX ---
-                # For limit orders, only check TP/SL after the entry has been filled
                 is_limit = getattr(signal, 'is_limit_order', False)
+                
+                # --- LIMIT ORDER FILL DETECTION ---
+                # Only for APPROVED limit orders that haven't filled yet
                 if is_limit and signal.status.value != 'active':
-                    # Track price extremes so brief touches between checks aren't missed
-                    # (mirrors autopilot_system.py behavior for in-memory tracking)
+                    # CRITICAL FIX: If actual_entry is already set, the limit was filled earlier
+                    # (e.g., before a restart when in-memory extremes were lost). Activate immediately.
+                    if getattr(signal, 'actual_entry', None) is not None:
+                        signal.status = SignalStatus.ACTIVE
+                        await self.db.update_signal_status(signal_id=signal.id, status=SignalStatus.ACTIVE)
+                        logger.info(f"🎯 Limit order for {signal.symbol} already filled (actual_entry={signal.actual_entry}), activating")
+                        if self.autopilot and signal.id not in self.autopilot.performance.active_signals:
+                            try:
+                                await self.autopilot.performance.track_signal(signal)
+                            except Exception:
+                                pass
+                        continue
+                    
                     sid = signal.id
                     extremes = self._pending_limit_extremes.get(sid, {'lowest': float('inf'), 'highest': 0.0})
                     extremes['lowest'] = min(extremes['lowest'], current_price)
@@ -842,22 +994,50 @@ class CryptoPulseOrchestrator:
                     
                     entry = signal.entry_price
                     limit_filled = False
+                    fill_reason = ""
+                    
+                    # Check 1: Current price at or beyond entry (normal case)
                     if signal.direction.value == "LONG":
-                        # LONG limit: filled when price drops to or below entry
-                        limit_filled = (current_price <= entry) or (extremes['lowest'] <= entry)
+                        if current_price <= entry:
+                            limit_filled = True
+                            fill_reason = f"current_price ${current_price:.4f} <= entry ${entry:.4f}"
+                        elif extremes['lowest'] <= entry:
+                            limit_filled = True
+                            fill_reason = f"extreme low ${extremes['lowest']:.4f} touched entry ${entry:.4f}"
+                        # Check 2: Retrospective fill — price is now ABOVE entry, meaning it must have
+                        # crossed UP through entry after dipping down to fill the limit (while bot was down)
+                        elif current_price > entry * 1.003:
+                            limit_filled = True
+                            fill_reason = f"retrospective LONG fill — price ${current_price:.4f} now above entry ${entry:.4f} (must have crossed through)"
+                            logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now above LONG entry")
                     else:  # SHORT
-                        # SHORT limit: filled when price rises to or above entry
-                        limit_filled = (current_price >= entry) or (extremes['highest'] >= entry)
+                        if current_price >= entry:
+                            limit_filled = True
+                            fill_reason = f"current_price ${current_price:.4f} >= entry ${entry:.4f}"
+                        elif extremes['highest'] >= entry:
+                            limit_filled = True
+                            fill_reason = f"extreme high ${extremes['highest']:.4f} touched entry ${entry:.4f}"
+                        # Check 2: Retrospective fill — price is now ABOVE entry, meaning it must have
+                        # crossed UP through entry after spiking to fill the SHORT limit (while bot was down)
+                        elif current_price > entry * 1.003:
+                            limit_filled = True
+                            fill_reason = f"retrospective SHORT fill — price ${current_price:.4f} now above entry ${entry:.4f} (must have crossed through)"
+                            logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now above SHORT entry")
                     
                     if not limit_filled:
-                        continue  # Limit not filled yet — skip TP/SL checks
+                        continue
                     
-                    # Limit IS filled — update signal status and notify
+                    # Limit filled — update status and hand off to autopilot
                     signal.status = SignalStatus.ACTIVE
-                    signal.actual_entry = current_price
+                    # For retrospective fills, use entry price as actual fill price
+                    # (current price may be far from entry since fill happened while bot was down)
+                    if "retrospective" in fill_reason:
+                        signal.actual_entry = entry
+                    else:
+                        signal.actual_entry = current_price
                     await self.db.save_signal(signal)
-                    self._pending_limit_extremes.pop(sid, None)  # Clean up
-                    logger.info(f"🎯 Limit order filled for {signal.symbol} at ${current_price:.4f} (DB-loaded after restart)")
+                    self._pending_limit_extremes.pop(sid, None)
+                    logger.info(f"🎯 Limit order filled for {signal.symbol} at ${signal.actual_entry:.4f} ({fill_reason})")
                     
                     # Notify VIP channel
                     if self.channel_publisher:
@@ -866,9 +1046,9 @@ class CryptoPulseOrchestrator:
                             msg = (
                                 f"🎯 <b>LIMIT ORDER FILLED</b>\n\n"
                                 f"{signal.symbol} {dir_emoji}\n"
-                                f"Entry: ${current_price:.4f}\n"
-                                f"SL: ${signal.stop_loss:.4f}\n"
-                                f"TP1: ${signal.take_profit_1:.4f}\n\n"
+                                f"Entry: ${signal.actual_entry:.8f}\n"
+                                f"SL: ${signal.stop_loss:.8f}\n"
+                                f"TP1: ${signal.take_profit_1:.8f}\n\n"
                                 f"📊 Now tracking TP/SL automatically"
                             )
                             await self.channel_publisher.bot.send_message(
@@ -879,47 +1059,35 @@ class CryptoPulseOrchestrator:
                         except Exception:
                             pass
                     
-                    # Also hand off to autopilot for consistent tracking
+                    # Hand off to autopilot for TP/SL tracking
                     if self.autopilot:
                         try:
                             await self.autopilot.performance.track_signal(signal)
                         except Exception:
                             pass
+                    continue
                 
-                # If signal is still a limit but status is already 'active', it was filled earlier
-                # Proceed with TP/SL checks below
+                # --- ACTIVE SIGNALS: ensure autopilot is tracking ---
+                # TP/SL detection is handled exclusively by autopilot to avoid dual tracking
+                # GUARD: skip signals that already have final targets hit (stale DB state)
+                if getattr(signal, 'tp3_hit', False) or getattr(signal, 'stop_hit', False):
+                    hit_type = 'TP3' if getattr(signal, 'tp3_hit', False) else 'SL'
+                    logger.warning(f"🛡️ Skipping re-track for {signal.symbol}: already has {hit_type} hit flag. DB status should be CLOSED.")
+                    # Attempt to fix DB status if it's still 'active'
+                    if signal.status.value == 'active':
+                        try:
+                            await self.db.update_signal_status(signal_id=signal.id, status=SignalStatus.CLOSED)
+                            logger.info(f"🔧 Fixed stale DB status for {signal.symbol}: marked as CLOSED")
+                        except Exception:
+                            pass
+                    continue
                 
-                # Track which TPs have been hit
-                tp1_hit = getattr(signal, 'tp1_hit', False)
-                tp2_hit = getattr(signal, 'tp2_hit', False)
-                tp3_hit = getattr(signal, 'tp3_hit', False)
-                
-                if signal.direction.value == "LONG":
-                    # Check TP3 first (highest target)
-                    if not tp3_hit and signal.take_profit_3 is not None and current_price >= signal.take_profit_3:
-                        await self.handle_tp_hit(signal, 3, current_price)
-                    # Check TP2
-                    elif not tp2_hit and signal.take_profit_2 is not None and current_price >= signal.take_profit_2:
-                        await self.handle_tp_hit(signal, 2, current_price)
-                    # Check TP1
-                    elif not tp1_hit and signal.take_profit_1 is not None and current_price >= signal.take_profit_1:
-                        await self.handle_tp_hit(signal, 1, current_price)
-                    # Check Stop Loss
-                    elif signal.stop_loss is not None and current_price <= signal.stop_loss:
-                        await self.handle_stop_hit(signal, current_price)
-                else:  # SHORT
-                    # Check TP3 first (lowest target for shorts)
-                    if not tp3_hit and signal.take_profit_3 is not None and current_price <= signal.take_profit_3:
-                        await self.handle_tp_hit(signal, 3, current_price)
-                    # Check TP2
-                    elif not tp2_hit and signal.take_profit_2 is not None and current_price <= signal.take_profit_2:
-                        await self.handle_tp_hit(signal, 2, current_price)
-                    # Check TP1
-                    elif not tp1_hit and signal.take_profit_1 is not None and current_price <= signal.take_profit_1:
-                        await self.handle_tp_hit(signal, 1, current_price)
-                    # Check Stop Loss
-                    elif signal.stop_loss is not None and current_price >= signal.stop_loss:
-                        await self.handle_stop_hit(signal, current_price)
+                if self.autopilot and signal.id not in self.autopilot.performance.active_signals:
+                    try:
+                        await self.autopilot.performance.track_signal(signal)
+                        logger.info(f"🎯 Handed off {signal.symbol} to autopilot tracking")
+                    except Exception:
+                        pass
                 
         except Exception as e:
             logger.error(f"Error checking active signals: {e}")
@@ -1145,7 +1313,26 @@ class CryptoPulseOrchestrator:
                     headlines += f"{emoji} {article['title'][:80]}...\n"
 
             now = datetime.utcnow()
-            vip_outlook = f"""🌅 <b>MORNING MARKET OUTLOOK</b>
+            market_data = {
+                'fear_class': fear.get('classification', 'Neutral'),
+                'fear_value': fear.get('value', 'N/A'),
+                'total_market_cap': global_data.get('total_market_cap', 'N/A'),
+                'btc_dominance': global_data.get('btc_dominance', 'N/A'),
+                'btc_price': global_data.get('btc_price'),
+                'btc_24h': global_data.get('btc_24h_change', 0),
+                'funding_rate': funding.get('funding_rate', 0),
+            }
+
+            # Try AI-generated summary first (if enabled & API key available)
+            ai_summary = None
+            if hasattr(self, 'ai_generator') and self.ai_generator:
+                ai_summary = await self.ai_generator.generate_daily_summary(market_data)
+
+            if ai_summary:
+                vip_outlook = f"🌅 <b>AI MORNING OUTLOOK</b>\n<b>{now.strftime('%A, %d %B %Y')}</b>\n\n{ai_summary}"
+                logger.info("Posted AI-generated morning outlook")
+            else:
+                vip_outlook = f"""🌅 <b>MORNING MARKET OUTLOOK</b>
 <b>{now.strftime('%A, %d %B %Y')}</b>
 
 <b>📊 Market Sentiment:</b>
@@ -1349,8 +1536,19 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
             volatility = self._assess_volatility(btc_24h, market_change)
             bias = self._generate_tomorrow_bias(mctx)
             
-            # Build tomorrow's market outlook
-            outlook = f"""🌙 <b>EVENING MARKET OUTLOOK</b>
+            # Try AI-generated evening recap first
+            ai_recap = None
+            if hasattr(self, 'ai_generator') and self.ai_generator:
+                pnl_today = sum(s.pnl_percent for s in today_signals) if today_signals else 0
+                closed_meta = [{'symbol': s.symbol, 'pnl_percent': s.pnl_percent, 'result': 'TP Hit' if s.pnl_percent > 0 else 'SL Hit' if s.pnl_percent < 0 else 'Closed'} for s in today_signals[:5]]
+                ai_recap = await self.ai_generator.generate_evening_recap(mctx, closed_meta, pnl_today)
+
+            if ai_recap:
+                outlook = f"🌙 <b>AI EVENING RECAP</b>\n📅 {datetime.utcnow().strftime('%A, %B %d, %Y')}\n\n{ai_recap}"
+                logger.info("Posted AI-generated evening recap")
+            else:
+                # Build tomorrow's market outlook
+                outlook = f"""🌙 <b>EVENING MARKET OUTLOOK</b>
 📅 {datetime.utcnow().strftime('%A, %B %d, %Y')}
 
 <b>📊 Market Sentiment:</b>
@@ -1702,6 +1900,22 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
             except Exception as e:
                 logger.error(f"Custom alerts error: {e}")
     
+    async def _post_ai_education(self):
+        """AI-generated educational content for the free channel."""
+        if not hasattr(self, 'ai_generator') or not self.ai_generator:
+            return
+        try:
+            post = await self.ai_generator.generate_educational_post()
+            if post and self.channel_publisher and self.channel_publisher.bot:
+                await self.channel_publisher.bot.send_message(
+                    chat_id=settings.TELEGRAM_FREE_CHANNEL_ID,
+                    text=post,
+                    parse_mode='HTML'
+                )
+                logger.info("🧠 AI educational post sent to free channel")
+        except Exception as e:
+            logger.error(f"AI education post error: {e}")
+
     async def _run_viral_daily_marketing(self):
         """Viral Growth: Daily automated marketing to all platforms"""
         if self.viral_growth:
@@ -1710,7 +1924,7 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                 logger.info("🚀 Daily viral marketing executed")
             except Exception as e:
                 logger.error(f"Viral daily marketing error: {e}")
-    
+
     async def _run_viral_weekly_marketing(self):
         """Viral Growth: Weekly marketing blitz (Reddit, Discord, Forums)"""
         if self.viral_growth:
@@ -1786,6 +2000,49 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                 await self.admin_bot.send_notification(message)
         except Exception as e:
             logger.error(f"Failed to forward VIP notification: {e}")
+    
+    async def _on_autopilot_channel_notification(self, signal, tp_level: int, sl_hit: bool, current_price: float):
+        """Send channel notifications when autopilot detects TP/SL hit.
+        Deduplication is handled in ChannelPublisher to prevent stale recovery duplicates."""
+        try:
+            if sl_hit:
+                entry = signal.actual_entry or signal.entry_price
+                pnl = 0.0
+                if entry and entry != 0:
+                    pnl = ((current_price - entry) / entry) * 100
+                    if signal.direction.value == "SHORT":
+                        pnl = -pnl
+                await self.channel_publisher.send_trade_closed(signal, "Stop Loss Hit", pnl)
+                return
+            
+            # TP3: trade is closing — just send close message (no separate TP3 hit)
+            if tp_level == 3:
+                entry = signal.actual_entry or signal.entry_price
+                pnl = 0.0
+                if entry and entry != 0:
+                    pnl = ((current_price - entry) / entry) * 100
+                    if signal.direction.value == "SHORT":
+                        pnl = -pnl
+                await self.channel_publisher.send_trade_closed(signal, "TP3 Hit", pnl)
+                return
+            
+            # TP1 / TP2: send hit update
+            await self.channel_publisher.send_tp_hit(signal, tp_level)
+            
+            # Free channel teasers for TP2
+            if tp_level == 2:
+                await self.channel_publisher.send_tp_hit_free(signal, tp_level)
+            
+            # Breakeven SL move after TP1
+            if tp_level == 1:
+                await self.channel_publisher.send_stop_moved(signal, signal.entry_price)
+                try:
+                    await self.db.update_stop_loss(signal.id, signal.entry_price)
+                except Exception:
+                    pass
+                
+        except Exception as e:
+            logger.error(f"Failed to send channel notification: {e}")
     
     async def shutdown(self):
         logger.info("🛑 Shutting down CRYPTO PULSE SIGNALS...")

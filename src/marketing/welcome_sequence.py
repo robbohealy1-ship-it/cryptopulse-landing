@@ -53,6 +53,9 @@ class WelcomeSequence:
     async def _send_step_1(self, user_id: int, username: str = None):
         """Immediate welcome - set expectations, no hard sell."""
         name = f"@{username}" if username else "there"
+        mexc_url = getattr(settings, 'AFFILIATE_CUSTOM_URL', None)
+        mexc_line = f"\n💎 <a href='{mexc_url}'>Trade on MEXC</a> — low fees, deep liquidity\n" if mexc_url else ""
+        
         text = (
             f"🚀 <b>Welcome to CryptoPulse, {name}!</b>\n\n"
             f"You just joined the <b>only</b> free signals channel that doesn't spam.\n\n"
@@ -69,6 +72,7 @@ class WelcomeSequence:
             f"✅ 85%+ confidence, institutional-grade analysis\n\n"
             f"🤖 <a href='https://t.me/CryptoPulseVIPAccessBot'>@CryptoPulseVIPAccessBot</a>\n"
             f"💳 Card or Crypto — instant access"
+            f"{mexc_line}"
         )
         try:
             await self.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')

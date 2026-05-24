@@ -8,11 +8,13 @@ from src.analysis.technical_analyzer import TechnicalAnalyzer
 from src.analysis.institutional_analyzer import InstitutionalAnalyzer
 from src.analysis.timeframe_strategies import TimeframeStrategyFactory
 from src.analysis.enhanced_context_engine import EnhancedContextEngine as ContextEngine
+from src.engine.signal_ranker import SignalRanker
 from src.models.signal import (
     TradingSignal, SignalDirection, SetupType, SignalStatus
 )
 from src.config import settings
 from src.utils.logger import get_logger
+from src.utils.signal_validation_pipeline import SignalValidationPipeline
 
 logger = get_logger(__name__)
 
@@ -33,18 +35,21 @@ CORRELATION_GROUPS = {
 
 
 class SignalEngine:
-    def __init__(self):
+    def __init__(self, db=None):
         self.scanner = MarketScanner()
         self.technical_analyzer = TechnicalAnalyzer()
         self.institutional_analyzer = InstitutionalAnalyzer()
         self.context_engine = ContextEngine()
         self.strategy_factory = TimeframeStrategyFactory()
+        self.signal_ranker = SignalRanker()  # NEW: Ranks signals, selects best 3/day
+        self.db = db
+        self.validation_pipeline = SignalValidationPipeline(db=db)
         
         self.signals_today = []
         self.last_reset = datetime.utcnow().date()
         
         self.min_confidence = settings.MIN_CONFIDENCE_SCORE
-        self.max_signals_per_day = settings.MAX_SIGNALS_PER_DAY
+        self.max_signals_per_day = 3  # CHANGED: Always 3 signals per day
         self.min_risk_reward = settings.MIN_RISK_REWARD
         
         # Dynamic threshold adjustment based on rolling win rate
@@ -56,6 +61,21 @@ class SignalEngine:
     async def initialize(self):
         logger.info("Initializing signal engine...")
         await self.scanner.initialize()
+        # Reload today's active/pending signals from DB to prevent duplicates after restart
+        if self.db:
+            try:
+                from datetime import datetime, timedelta
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                db_signals = await self.db.get_signals_by_date(today_start, datetime.utcnow())
+                loaded = 0
+                for s in db_signals:
+                    if s.status in [SignalStatus.PENDING, SignalStatus.APPROVED, SignalStatus.ACTIVE]:
+                        self.signals_today.append(s)
+                        loaded += 1
+                if loaded:
+                    logger.info(f"🔄 Reloaded {loaded} active/pending signals from DB into memory")
+            except Exception as e:
+                logger.warning(f"Could not reload signals from DB: {e}")
         logger.info("Signal engine initialized")
     
     def reset_daily_counter(self):
@@ -86,20 +106,31 @@ class SignalEngine:
         logger.info(f"🔍 Scanning {timeframe} timeframe (institutional analysis, min confidence: {min_confidence}%)...")
         
         pairs = await self.scanner.get_liquid_pairs()
-        candidates = []
         
-        for symbol in pairs[:100]:
-            try:
-                signal = await self.analyze_pair(symbol, timeframe)
-                if signal and signal.confidence >= min_confidence:
-                    candidates.append(signal)
-                    logger.info(f"🎯 Candidate: {symbol} {timeframe} — Confidence: {signal.confidence:.1f}% | R:R {signal.risk_reward:.1f}")
-                
-                await asyncio.sleep(0.2)
-                
-            except Exception as e:
-                logger.debug(f"Error analyzing {symbol}: {e}")
+        # Parallel scan with semaphore to avoid rate limits
+        semaphore = asyncio.Semaphore(8)
+        
+        async def _analyze_with_limit(symbol: str) -> Optional[TradingSignal]:
+            async with semaphore:
+                try:
+                    # Small delay to avoid hammering the exchange
+                    await asyncio.sleep(0.05)
+                    return await self.analyze_pair(symbol, timeframe)
+                except Exception as e:
+                    logger.debug(f"Error analyzing {symbol}: {e}")
+                    return None
+        
+        # Run all analyses concurrently
+        tasks = [_analyze_with_limit(symbol) for symbol in pairs[:100]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        candidates = []
+        for signal in results:
+            if isinstance(signal, Exception):
                 continue
+            if signal and signal.confidence >= min_confidence:
+                candidates.append(signal)
+                logger.info(f"🎯 Candidate: {signal.symbol} {timeframe} — Confidence: {signal.confidence:.1f}% | R:R {signal.risk_reward:.1f}")
         
         candidates.sort(key=lambda x: x.confidence, reverse=True)
         
@@ -113,25 +144,36 @@ class SignalEngine:
             logger.info(f"Found {len(top_candidates)} candidates: {vip_count} VIP-only (90%+), {dual_count} dual-channel (85-89%)")
             
             # Filter out duplicates (same symbol already pending/active)
-            top_candidates = self._filter_duplicates(top_candidates)
+            top_candidates = await self._filter_duplicates(top_candidates)
             logger.info(f"After dedup: {len(top_candidates)} unique candidates")
         else:
             logger.info(f"No candidates found above {min_confidence}% confidence")
         
         return top_candidates
     
-    def _filter_duplicates(self, candidates):
-        """Remove candidates for symbols that already have pending/active signals"""
-        # Check in-memory signals (today's signals)
+    async def _filter_duplicates(self, candidates):
+        """Remove candidates for symbols that already have pending/active signals in memory AND DB."""
         active_symbols = set()
+        # Check in-memory signals
         for s in self.signals_today:
             if s.status in [SignalStatus.PENDING, SignalStatus.APPROVED, SignalStatus.ACTIVE]:
                 active_symbols.add(s.symbol)
         
+        # Check DB for active signals (catches duplicates after restarts)
+        if self.db:
+            try:
+                db_active = await self.db.get_active_signals(limit=100)
+                for row in db_active:
+                    sym = getattr(row, 'symbol', '') or getattr(row, 'trading_pair', '')
+                    if sym:
+                        active_symbols.add(sym)
+            except Exception as e:
+                logger.debug(f"DB duplicate check failed: {e}")
+        
         filtered = []
         for c in candidates:
             if c.symbol in active_symbols:
-                logger.info(f"⏭️  Skipping {c.symbol} - signal already pending/active")
+                logger.info(f"⏭️  Skipping {c.symbol} - signal already pending/active (in DB or memory)")
                 continue
             filtered.append(c)
         
@@ -277,9 +319,12 @@ class SignalEngine:
             else:
                 perf_tag = ""
             
+            # Extract stop warning if present
+            stop_warning = setup.get('stop_warning', None)
+            
             reasoning = self._generate_reasoning(
                 symbol, setup_type, direction, structure,
-                inst_score, context_score, timeframe, confluence_tag, regime, perf_tag
+                inst_score, context_score, timeframe, confluence_tag, regime, perf_tag, stop_warning
             )
             
             from src.models.signal import TechnicalScore, ContextScore
@@ -361,17 +406,37 @@ class SignalEngine:
                 expires_at=datetime.utcnow() + timedelta(minutes=settings.SIGNAL_EXPIRY_MINUTES)
             )
             
+            # Run 8-stage validation pipeline
+            val_result = await self.validation_pipeline.validate(signal)
+            
+            if not val_result.passed:
+                logger.warning(
+                    f"🚫 {symbol} {timeframe} signal REJECTED by pipeline: "
+                    f"Grade={signal.grade.value}, Score={signal.validation_score:.1f} | "
+                    f"Reasons: {', '.join(val_result.rejection_reasons[:3])}"
+                )
+                return None
+            
             # Track for performance analysis
             self._track_signal_generated(signal)
             
             logger.info(
                 f"🎯 {symbol} {timeframe} signal: {direction.value} | "
                 f"Confidence: {confidence:.1f}% | R:R {risk_reward:.1f} | "
+                f"Grade: {signal.grade.value} | Score: {signal.validation_score:.1f} | "
                 f"Structure: {inst_score.structure_score:.0f} | "
                 f"MTF: {inst_score.multi_tf_score:.0f}"
             )
             
-            return signal
+            # RANKING: Add to ranker - only return if approved for top 3
+            should_publish = self.signal_ranker.add_candidate(signal, inst_score, context_score)
+            
+            if should_publish:
+                logger.info(f"✅ {symbol} approved for publishing (top 3 signal)")
+                return signal
+            else:
+                logger.info(f"⏸️  {symbol} held for ranking - not in top 3 yet")
+                return None  # Signal found but not published yet
             
         except Exception as e:
             logger.error(f"Error analyzing {symbol}: {e}")
@@ -406,42 +471,146 @@ class SignalEngine:
         timeframe: str,
         confluence_tag: str = "",
         regime: str = "",
-        perf_tag: str = ""
+        perf_tag: str = "",
+        stop_warning: str = None
     ) -> str:
-        reasoning_parts = []
-        
-        reasoning_parts.append(f"🎯 {setup_type.value.replace('_', ' ').title()} on {symbol} ({timeframe})")
+        """Generate institutional-grade trade entry analysis."""
+        parts = []
+        d = direction.value
+        st = structure
+        vol = inst_score.volume_details
+        liq = inst_score.liquidity_details
+        sess = inst_score.session_details
+
+        # ─── EXECUTIVE SUMMARY ───
+        setup_name = setup_type.value.replace('_', ' ').title()
+        parts.append(f"<b>📋 TRADE PLAN: {symbol} {d} — {setup_name} ({timeframe})</b>")
+
+        # ─── MARKET STRUCTURE NARRATIVE ───
+        trend = st.get('trend', 'neutral')
+        bos = st.get('bos', False)
+        choch = st.get('choch', False)
+        inducement = st.get('inducement', False)
+        swing_high = st.get('recent_swing_high')
+        swing_low = st.get('recent_swing_low')
+
+        structure_lines = []
+        if trend == 'uptrend':
+            structure_lines.append(f"Price is in a confirmed uptrend with Higher Highs + Higher Lows.")
+        elif trend == 'downtrend':
+            structure_lines.append(f"Price is in a confirmed downtrend with Lower Highs + Lower Lows.")
+        elif trend == 'potential_reversal':
+            structure_lines.append(f"Potential reversal zone — price showing early signs of structure shift.")
+
+        if bos:
+            structure_lines.append(f"✅ <b>Break of Structure (BOS)</b> confirmed — trend continuation is valid.")
+        if choch:
+            structure_lines.append(f"⚠️ <b>Change of Character (CHoCH)</b> detected — prior structure may be breaking.")
+        if inducement:
+            structure_lines.append(f"🎣 <b>Inducement</b> identified — liquidity was swept before this setup formed.")
+
+        if swing_high and swing_low:
+            structure_lines.append(f"� Recent swing high: ${swing_high:,.4f} | swing low: ${swing_low:,.4f}")
+
+        if structure_lines:
+            parts.append(f"\n<b>🏗️ MARKET STRUCTURE</b>")
+            parts.extend(structure_lines)
+
+        # ─── VOLUME PROFILE POSITIONING ───
+        poc = vol.get('poc')
+        vah = vol.get('vah')
+        val = vol.get('val')
+        entry = vol.get('entry')
+        vquality = vol.get('quality', '')
+
+        if poc and vah and val:
+            parts.append(f"\n<b>📊 VOLUME PROFILE</b>")
+            parts.append(f"POC (most traded): ${poc:,.4f} | VAH: ${vah:,.4f} | VAL: ${val:,.4f}")
+            if entry:
+                if 'discount' in vquality.lower():
+                    parts.append(f"🟢 Entry at <b>discount</b> below VAL — high-probability buy zone where institutions accumulate.")
+                elif 'premium' in vquality.lower():
+                    parts.append(f"🔴 Entry at <b>premium</b> above VAH — high-probability sell zone where institutions distribute.")
+                elif 'fair value' in vquality.lower():
+                    parts.append(f"🟡 Entry near <b>POC fair value</b> — acceptable but not at an extreme.")
+                else:
+                    parts.append(f"Entry relative to volume profile: {vquality}")
+
+        # ─── LIQUIDITY CONTEXT ───
+        zones_found = liq.get('liquidity_zones_found', 0)
+        swept = liq.get('swept_liquidity', False)
+        swept_level = liq.get('swept_level')
+        stop_beyond = liq.get('stop_beyond_liquidity', False)
+
+        if zones_found > 0 or swept or stop_beyond:
+            parts.append(f"\n<b>💧 LIQUIDITY ANALYSIS</b>")
+            if swept and swept_level:
+                parts.append(f"🎯 <b>Liquidity swept</b> at ${swept_level:,.4f} before entry — Smart Money trap confirmed.")
+            elif stop_beyond:
+                parts.append(f"🛡️ Stop loss sits <b>beyond liquidity</b> — protected from stop-hunts.")
+            if zones_found:
+                parts.append(f"{zones_found} liquidity zone(s) identified in recent price action.")
+
+        # ─── SESSION & TIMING ───
+        session = sess.get('session', 'unknown')
+        hour_utc = sess.get('hour_utc')
+        if session != 'unknown':
+            parts.append(f"\n<b>⏰ SESSION CONTEXT</b>")
+            parts.append(f"Current session: <b>{session}</b> ({hour_utc}:00 UTC)")
+            if 'Overlap' in session:
+                parts.append(f"🔥 Prime time — highest volume and liquidity of the day.")
+            elif 'New York' in session:
+                parts.append(f"🗽 NY session active — strong directional moves likely.")
+            elif 'London' in session:
+                parts.append(f"🇬🇧 London session active — good liquidity, momentum building.")
+
+        # ─── MULTI-TIMEFRAME ALIGNMENT ───
+        mtf = inst_score.multi_tf_score
+        parts.append(f"\n<b>🔭 MULTI-TIMEFRAME ALIGNMENT</b>")
+        if mtf >= 80:
+            parts.append(f"✅ HTF strongly aligned (score: {mtf:.0f}/100) — top-down confluence is excellent.")
+        elif mtf >= 60:
+            parts.append(f"✅ HTF aligned (score: {mtf:.0f}/100) — higher timeframe supports this direction.")
+        elif mtf >= 40:
+            parts.append(f"⚠️ HTF neutral (score: {mtf:.0f}/100) — trade valid but watch for HTF rejection.")
+        else:
+            parts.append(f"⚠️ HTF weak (score: {mtf:.0f}/100) — counter-trend on higher timeframe; use tight risk.")
+
+        # ─── CONFLUENCE & CONTEXT ───
+        parts.append(f"\n<b>⚡ CONFLUENCE SCORECARD</b>")
+        parts.append(f"Structure: {inst_score.structure_score:.0f}/100 | Volume: {inst_score.volume_profile_score:.0f}/100 | Liquidity: {inst_score.liquidity_score:.0f}/100")
+        parts.append(f"Session: {inst_score.session_score:.0f}/100 | Multi-TF: {inst_score.multi_tf_score:.0f}/100 | Context: {context_score.total_score:.1f}/100")
         if confluence_tag:
-            reasoning_parts.append(f"   {confluence_tag}")
+            parts.append(f"{confluence_tag}")
         if regime:
-            reasoning_parts.append(f"   Regime: {regime.title()}")
-        reasoning_parts.append(f"📈 Direction: {direction.value}")
-        reasoning_parts.append(f"📊 Structure: {structure.get('trend', 'neutral').title()}")
-        reasoning_parts.append(f"⚡ Institutional Score: {inst_score.total_score:.1f}/100")
-        reasoning_parts.append(f"   • Structure: {inst_score.structure_score:.0f}")
-        reasoning_parts.append(f"   • Volume Profile: {inst_score.volume_profile_score:.0f}")
-        reasoning_parts.append(f"   • Liquidity: {inst_score.liquidity_score:.0f}")
-        reasoning_parts.append(f"   • Session: {inst_score.session_score:.0f}")
-        reasoning_parts.append(f"   • Multi-TF: {inst_score.multi_tf_score:.0f}")
-        reasoning_parts.append(f"🌍 Context: {context_score.total_score:.1f}/100")
+            parts.append(f"Market regime: {regime.title()}")
         if perf_tag:
-            reasoning_parts.append(f"   {perf_tag}")
+            parts.append(f"{perf_tag}")
+
+        # ─── CONTEXT OVERLAY ───
+        if context_score.total_score >= 70:
+            parts.append(f"\n<b>🌍 MACRO CONTEXT</b>")
+            parts.append(f"Context score: {context_score.total_score:.0f}/100 — fundamentals support this direction.")
+        elif context_score.total_score < 50:
+            parts.append(f"\n<b>🌍 MACRO CONTEXT</b>")
+            parts.append(f"⚠️ Context score: {context_score.total_score:.0f}/100 — weak macro/news support; rely on technicals only.")
+
+        # ─── WHAT TO WATCH (INVALIDATION) ───
+        parts.append(f"\n<b>👁️ WHAT TO WATCH</b>")
         
-        if inst_score.structure_details.get('bos'):
-            reasoning_parts.append("✅ Break of Structure confirmed")
+        # Add stop warning if present (tight structure, etc.)
+        if stop_warning:
+            parts.append(f"• {stop_warning}")
         
-        if inst_score.volume_details.get('quality', '').startswith('Below VAL'):
-            reasoning_parts.append("✅ Entry at volume profile discount")
-        elif inst_score.volume_details.get('quality', '').startswith('Above VAH'):
-            reasoning_parts.append("✅ Entry at volume profile premium")
-        
-        if inst_score.liquidity_details.get('swept_liquidity'):
-            reasoning_parts.append("✅ Liquidity swept before entry")
-        
-        if context_score.news_score < 50:
-            reasoning_parts.append("⚠️ Weak news sentiment")
-        
-        return '\n'.join(reasoning_parts)
+        if bos and trend in ['uptrend', 'downtrend']:
+            parts.append(f"• Invalidation: If price reclaims the broken structure level, the setup is void.")
+        if choch:
+            parts.append(f"• Confirmation needed: Wait for the next candle close to confirm CHoCH holds.")
+        if inducement:
+            parts.append(f"• Trap risk: Inducement setups can re-sweep — don't add to a losing position.")
+        parts.append(f"• Session end: If the trade hasn't moved by session close, consider reducing size or exiting.")
+
+        return '\n'.join(parts)
     
     def _has_correlated_active_signal(self, symbol: str) -> bool:
         """Check if a correlated pair already has an active/pending signal"""

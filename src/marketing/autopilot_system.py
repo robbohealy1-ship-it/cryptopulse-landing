@@ -30,11 +30,11 @@ class PerformanceTracker:
     - Generates performance stats for reports
     """
     
-    def __init__(self, scanner=None, db=None, on_signal_result=None, channel_publisher=None):
+    def __init__(self, scanner=None, db=None, on_signal_result=None, on_channel_notification=None):
         self.scanner = scanner
         self.db = db
         self.on_signal_result = on_signal_result  # Callback for FOMO campaigns
-        self.channel_publisher = channel_publisher
+        self.on_channel_notification = on_channel_notification  # Callback for TP/SL channel messages
         self.active_signals: Dict[str, TradingSignal] = {}  # symbol -> signal
         self.pending_limit_orders: Dict[str, TradingSignal] = {}  # waiting for limit hit
         # Track price extremes for pending limit orders so brief touches aren't missed
@@ -43,6 +43,20 @@ class PerformanceTracker:
         
     async def track_signal(self, signal: TradingSignal):
         """Start tracking an approved signal for TP/SL hits"""
+        # GUARD: Don't track signals that are already closed or have hit final targets
+        if signal.status == SignalStatus.CLOSED:
+            logger.debug(f"🛡️ Skipping track_signal for {signal.symbol}: already CLOSED")
+            return
+        if getattr(signal, 'tp3_hit', False):
+            logger.debug(f"🛡️ Skipping track_signal for {signal.symbol}: TP3 already hit")
+            return
+        if getattr(signal, 'stop_hit', False):
+            logger.debug(f"🛡️ Skipping track_signal for {signal.symbol}: SL already hit")
+            return
+        if signal.id in self.active_signals:
+            logger.debug(f"🛡️ Skipping track_signal for {signal.symbol}: already being tracked")
+            return
+        
         # If limit order is already active (e.g. detected by main.py after restart), track as active
         if signal.is_limit_order and signal.status.value == 'active':
             entry = signal.actual_entry if signal.actual_entry is not None else signal.entry_price
@@ -115,24 +129,49 @@ class PerformanceTracker:
         self.pending_limit_extremes[signal_id] = extremes
         
         hit = False
+        fill_reason = ""
+        
         if direction == 'LONG':
             # For LONG limit: price must drop to or below entry
             # Check both current price AND the lowest price seen since tracking started
-            hit = (current_price <= entry) or (extremes['lowest'] <= entry)
+            if current_price <= entry:
+                hit = True
+                fill_reason = f"current_price ${current_price:.4f} <= entry ${entry:.4f}"
+            elif extremes['lowest'] <= entry:
+                hit = True
+                fill_reason = f"extreme low ${extremes['lowest']:.4f} touched entry ${entry:.4f}"
+            # Retrospective fill: price is now ABOVE entry, meaning it must have crossed through
+            elif current_price > entry * 1.003:
+                hit = True
+                fill_reason = f"retrospective LONG fill — price ${current_price:.4f} now above entry ${entry:.4f} (must have crossed through)"
+                logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now above LONG entry")
         else:  # SHORT
             # For SHORT limit: price must rise to or above entry
-            # Check both current price AND the highest price seen since tracking started
-            hit = (current_price >= entry) or (extremes['highest'] >= entry)
+            if current_price >= entry:
+                hit = True
+                fill_reason = f"current_price ${current_price:.4f} >= entry ${entry:.4f}"
+            elif extremes['highest'] >= entry:
+                hit = True
+                fill_reason = f"extreme high ${extremes['highest']:.4f} touched entry ${entry:.4f}"
+            # Retrospective fill: price is now BELOW entry, meaning it must have crossed through
+            elif current_price < entry * 0.997:
+                hit = True
+                fill_reason = f"retrospective SHORT fill — price ${current_price:.4f} now below entry ${entry:.4f} (must have crossed through)"
+                logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now below SHORT entry")
         
         if hit:
-            signal.actual_entry = current_price
+            # For retrospective fills, use entry price as actual fill price
+            if "retrospective" in fill_reason:
+                signal.actual_entry = entry
+            else:
+                signal.actual_entry = current_price
             signal.status = SignalStatus.ACTIVE
             del self.pending_limit_orders[signal_id]
             self.active_signals[signal_id] = {
                 'signal': signal,
-                'entry_price': current_price,
-                'highest_price': current_price,
-                'lowest_price': current_price,
+                'entry_price': signal.actual_entry,
+                'highest_price': signal.actual_entry,
+                'lowest_price': signal.actual_entry,
                 'tp1_hit': False,
                 'tp2_hit': False,
                 'tp3_hit': False,
@@ -140,13 +179,7 @@ class PerformanceTracker:
                 'partial_exits': [],
                 'entry_time': datetime.utcnow()
             }
-            # Log which condition triggered the hit
-            if direction == 'LONG' and current_price > entry:
-                logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} (was briefly at ${extremes['lowest']:.4f} ≤ entry ${entry:.4f}) — tracking started")
-            elif direction == 'SHORT' and current_price < entry:
-                logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} (was briefly at ${extremes['highest']:.4f} ≥ entry ${entry:.4f}) — tracking started")
-            else:
-                logger.info(f"🎯 Limit order hit for {signal.symbol} at ${current_price:.4f} — tracking started")
+            logger.info(f"🎯 Limit order hit for {signal.symbol} at ${signal.actual_entry:.4f} ({fill_reason}) — tracking started")
             
             # Clean up extremes tracking
             self.pending_limit_extremes.pop(signal_id, None)
@@ -158,9 +191,9 @@ class PerformanceTracker:
                     msg = (
                         f"🎯 <b>LIMIT ORDER FILLED</b>\n\n"
                         f"{signal.symbol} {dir_emoji}\n"
-                        f"Entry: ${current_price:.4f}\n"
-                        f"SL: ${signal.stop_loss:.4f}\n"
-                        f"TP1: ${signal.take_profit_1:.4f}\n\n"
+                        f"Entry: ${signal.actual_entry:.8f}\n"
+                        f"SL: ${signal.stop_loss:.8f}\n"
+                        f"TP1: ${signal.take_profit_1:.8f}\n\n"
                         f"📊 Now tracking TP/SL automatically"
                     )
                     await self.channel_publisher.bot.send_message(
@@ -178,6 +211,16 @@ class PerformanceTracker:
                     await self.db.save_signal(signal)
                 except Exception as e:
                     logger.warning(f"Could not save limit-filled signal to DB: {e}")
+                # Audit log: limit order filled
+                try:
+                    await self.db.log_trade_event(
+                        signal_id=signal.id,
+                        event_type='limit_filled',
+                        details={'symbol': signal.symbol, 'direction': signal.direction.value, 'entry': entry, 'actual_entry': signal.actual_entry},
+                        price=signal.actual_entry
+                    )
+                except Exception:
+                    pass
     
     async def check_all_signals(self):
         """Check all active signals for TP/SL hits and update P&L. Also check pending limit orders."""
@@ -187,6 +230,40 @@ class PerformanceTracker:
         
         # Check active signals
         for signal_id in list(self.active_signals.keys()):
+            signal_data = self.active_signals[signal_id]
+            signal = signal_data['signal']
+            
+            # Stale recovery: signal loaded from DB with TP/SL already hit but not closed
+            # (previous _close_signal may have crashed before updating DB status)
+            # GUARD: only recover if signal status is NOT already CLOSED in DB
+            if signal.status != SignalStatus.CLOSED and getattr(signal, 'tp3_hit', False):
+                tp3 = signal.take_profit_3 or signal.take_profit_2 or signal.take_profit_1
+                entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
+                if entry and entry != 0 and tp3:
+                    if signal.direction.value == "SHORT":
+                        pnl = ((entry - tp3) / entry) * 100
+                    else:
+                        pnl = ((tp3 - entry) / entry) * 100
+                else:
+                    pnl = 0.0
+                logger.warning(f"🔄 Stale signal recovery: {signal.symbol} has TP3 hit but was not closed. Closing now.")
+                await self._close_signal(signal_id, tp3 or entry, pnl, tp_level=3)
+                continue
+            
+            if signal.status != SignalStatus.CLOSED and getattr(signal, 'stop_hit', False):
+                entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
+                sl = signal.stop_loss
+                if entry and entry != 0 and sl:
+                    if signal.direction.value == "SHORT":
+                        pnl = ((entry - sl) / entry) * 100
+                    else:
+                        pnl = ((sl - entry) / entry) * 100
+                else:
+                    pnl = 0.0
+                logger.warning(f"🔄 Stale signal recovery: {signal.symbol} has SL hit but was not closed. Closing now.")
+                await self._close_signal(signal_id, sl or entry, pnl, sl_hit=True)
+                continue
+            
             await self._check_signal(signal_id)
         
         # Save updated signals to DB
@@ -222,89 +299,113 @@ class PerformanceTracker:
             tp2 = signal.take_profit_2
             tp3 = signal.take_profit_3
             
-            # Determine if hit
-            hit_tp = None
-            hit_sl = False
-            pnl_percent = None
+            # Update tracked price extremes for this signal
+            signal_data['highest_price'] = max(highest_price, current_price)
+            signal_data['lowest_price'] = min(lowest_price, current_price)
+            
+            # Track MDD / MAE / MFE on the signal object
+            if entry and entry != 0:
+                if direction == SignalDirection.LONG:
+                    # MFE = best unrealized profit
+                    mfe_pct = ((signal_data['highest_price'] - entry) / entry) * 100
+                    # MAE = worst unrealized loss
+                    mae_pct = ((signal_data['lowest_price'] - entry) / entry) * 100
+                    # MDD = max drawdown from peak
+                    if signal_data['highest_price'] > entry:
+                        mdd_pct = ((current_price - signal_data['highest_price']) / signal_data['highest_price']) * 100
+                    else:
+                        mdd_pct = mae_pct
+                else:
+                    mfe_pct = ((entry - signal_data['lowest_price']) / entry) * 100
+                    mae_pct = ((entry - signal_data['highest_price']) / entry) * 100
+                    if signal_data['lowest_price'] < entry:
+                        mdd_pct = ((signal_data['lowest_price'] - current_price) / signal_data['lowest_price']) * 100
+                    else:
+                        mdd_pct = mae_pct
+                
+                signal.max_favorable_excursion = max(signal.max_favorable_excursion or mfe_pct, mfe_pct)
+                signal.max_adverse_excursion = min(signal.max_adverse_excursion or mae_pct, mae_pct)
+                signal.max_drawdown_percent = min(signal.max_drawdown_percent or mdd_pct, mdd_pct)
             
             safe_entry = entry if entry and entry != 0 else 1.0  # avoid div by zero
             
+            # Check SL first (after breakeven move, SL = entry_price)
+            sl_price = signal.entry_price if stop_moved_to_breakeven else sl
             if direction == SignalDirection.LONG:
-                # Check TP hits (highest first)
-                if tp3 and current_price >= tp3:
-                    hit_tp = 3
-                    pnl_percent = ((tp3 - safe_entry) / safe_entry) * 100
-                elif tp2 and current_price >= tp2:
-                    hit_tp = 2
-                    pnl_percent = ((tp2 - safe_entry) / safe_entry) * 100
-                elif current_price >= tp1:
-                    hit_tp = 1
-                    pnl_percent = ((tp1 - safe_entry) / safe_entry) * 100
-                elif current_price <= sl:
-                    hit_sl = True
-                    pnl_percent = ((sl - safe_entry) / safe_entry) * 100
-            else:  # SHORT
-                if tp3 and current_price <= tp3:
-                    hit_tp = 3
-                    pnl_percent = ((safe_entry - tp3) / safe_entry) * 100
-                elif tp2 and current_price <= tp2:
-                    hit_tp = 2
-                    pnl_percent = ((safe_entry - tp2) / safe_entry) * 100
-                elif current_price <= tp1:
-                    hit_tp = 1
-                    pnl_percent = ((safe_entry - tp1) / safe_entry) * 100
-                elif current_price >= sl:
-                    hit_sl = True
-                    pnl_percent = ((safe_entry - sl) / safe_entry) * 100
+                if current_price <= sl_price:
+                    pnl = ((current_price - safe_entry) / safe_entry) * 100
+                    await self._close_signal(signal_id, current_price, pnl, sl_hit=True)
+                    return
+            else:
+                if current_price >= sl_price:
+                    pnl = ((safe_entry - current_price) / safe_entry) * 100
+                    await self._close_signal(signal_id, current_price, pnl, sl_hit=True)
+                    return
             
-            # If hit, record and remove from tracking
-            if hit_tp or hit_sl:
-                result = {
-                    'symbol': signal.symbol,
-                    'direction': signal.direction.value,
-                    'entry': entry,
-                    'exit_price': current_price,
-                    'tp_hit': hit_tp,
-                    'sl_hit': hit_sl,
-                    'pnl_percent': round(pnl_percent, 2),
-                    'timeframe': signal.timeframe,
-                    'confidence': signal.confidence,
-                    'created_at': signal.created_at.isoformat() if signal.created_at else None,
-                    'closed_at': datetime.utcnow().isoformat(),
-                    'is_win': hit_tp is not None
-                }
+            # Check TP hits — direction-aware (highest first for LONG, lowest first for SHORT)
+            hit_tp = None
+            if direction == SignalDirection.LONG:
+                if tp3 and not tp3_hit and current_price >= tp3:
+                    hit_tp = 3
+                elif tp2 and not tp2_hit and current_price >= tp2:
+                    hit_tp = 2
+                elif not tp1_hit and current_price >= tp1:
+                    hit_tp = 1
+            else:  # SHORT
+                if tp3 and not tp3_hit and current_price <= tp3:
+                    hit_tp = 3
+                elif tp2 and not tp2_hit and current_price <= tp2:
+                    hit_tp = 2
+                elif not tp1_hit and current_price <= tp1:
+                    hit_tp = 1
+            
+            if hit_tp:
+                tp_price = tp1 if hit_tp == 1 else (tp2 if hit_tp == 2 else tp3)
+                if direction == SignalDirection.LONG:
+                    pnl = ((tp_price - safe_entry) / safe_entry) * 100
+                else:
+                    pnl = ((safe_entry - tp_price) / safe_entry) * 100
+                logger.info(f"🎯 {signal.symbol} hit TP{hit_tp}! P&L: {pnl:+.2f}%")
                 
-                self.performance_log.append(result)
-                del self.active_signals[signal_id]
-                
-                status = SignalStatus.TP_HIT if hit_tp else SignalStatus.SL_HIT
-                emoji = "🏆" if hit_tp else "🛑"
-                target = f"TP{hit_tp}" if hit_tp else "SL"
-                
-                logger.info(
-                    f"{emoji} {signal.symbol} hit {target}! "
-                    f"P&L: {pnl_percent:+.2f}% | Confidence: {signal.confidence:.0f}%"
-                )
-                
-                # Save to database
+                # Mark TP as hit
+                signal_data[f'tp{hit_tp}_hit'] = True
                 if self.db:
-                    await self.db.update_signal_result(
-                        signal_id=signal.id,
-                        status=status,
-                        actual_exit=current_price,
-                        pnl_percent=pnl_percent,
-                        tp_level=hit_tp
-                    )
-                
-                # Auto-notify admin
-                await self._notify_admin(signal, result)
-                
-                # 🚀 Trigger FOMO campaign if callback registered
-                if self.on_signal_result:
                     try:
-                        await self.on_signal_result(signal, result)
+                        await self.db.mark_tp_hit(signal.id, hit_tp)
+                    except Exception:
+                        pass
+                
+                # Send channel notification
+                if self.on_channel_notification:
+                    try:
+                        await self.on_channel_notification(signal, hit_tp, False, current_price)
                     except Exception as e:
-                        logger.error(f"Signal result callback error: {e}")
+                        logger.error(f"Channel notification error: {e}")
+                
+                # Move SL to breakeven after TP1 (only once)
+                if hit_tp == 1 and not stop_moved_to_breakeven:
+                    signal_data['stop_moved_to_breakeven'] = True
+                    signal.stop_moved_to_breakeven = True
+                    if self.db:
+                        try:
+                            await self.db.update_stop_loss(signal.id, signal.entry_price)
+                        except Exception:
+                            pass
+                        try:
+                            await self.db.log_trade_event(
+                                signal_id=signal.id,
+                                event_type='breakeven',
+                                details={'symbol': signal.symbol, 'new_sl': signal.entry_price, 'reason': 'tp1_hit'},
+                                price=current_price
+                            )
+                        except Exception:
+                            pass
+                    logger.info(f"🛡️ SL moved to breakeven for {signal.symbol}")
+                
+                # Close signal only on TP3
+                if hit_tp == 3:
+                    await self._close_signal(signal_id, current_price, pnl, tp_level=3)
+                    return
                 
         except Exception as e:
             logger.error(f"Error checking signal {signal.symbol}: {e}")
@@ -326,6 +427,129 @@ class PerformanceTracker:
         )
         
         logger.info(f"Admin notification: {signal.symbol} {target} {result['pnl_percent']:+.2f}%")
+    
+    async def _close_signal(self, signal_id: str, exit_price: float, pnl_percent: float, tp_level: int = None, sl_hit: bool = False):
+        """Close a signal: update DB, send notifications, remove from tracking"""
+        signal_data = self.active_signals[signal_id]
+        signal = signal_data['signal']
+        
+        status = SignalStatus.CLOSED
+        target = f"TP{tp_level}" if tp_level else "SL"
+        is_win = not sl_hit
+        
+        result = {
+            'symbol': signal.symbol,
+            'direction': signal.direction.value,
+            'entry': signal_data['entry_price'],
+            'exit_price': exit_price,
+            'tp_hit': tp_level,
+            'sl_hit': sl_hit,
+            'pnl_percent': round(pnl_percent, 2),
+            'timeframe': signal.timeframe,
+            'confidence': signal.confidence,
+            'created_at': signal.created_at.isoformat() if signal.created_at else None,
+            'closed_at': datetime.utcnow().isoformat(),
+            'is_win': is_win
+        }
+        
+        self.performance_log.append(result)
+        del self.active_signals[signal_id]
+        
+        logger.info(
+            f"{'🏆' if is_win else '🛑'} {signal.symbol} hit {target}! "
+            f"P&L: {pnl_percent:+.2f}% | Confidence: {signal.confidence:.0f}%"
+        )
+        
+        # Update signal object for performance tracking
+        signal.status = status
+        signal.actual_exit = exit_price
+        signal.pnl_percent = pnl_percent
+        signal.closed_at = datetime.utcnow()
+        if tp_level == 1:
+            signal.tp1_hit = True
+        elif tp_level == 2:
+            signal.tp2_hit = True
+        elif tp_level == 3:
+            signal.tp3_hit = True
+        elif sl_hit:
+            signal.stop_hit = True
+        
+        # Calculate duration
+        entry_time = signal_data['entry_time']
+        signal.duration_minutes = (signal.closed_at - entry_time).total_seconds() / 60
+        
+        # Calculate slippage
+        if signal.actual_entry and signal.entry_price > 0:
+            signal.entry_slippage_percent = ((signal.actual_entry - signal.entry_price) / signal.entry_price) * 100
+        if signal.actual_exit and signal.entry_price > 0:
+            # For exit slippage: compare to nearest target or stop
+            if sl_hit:
+                expected_exit = signal.stop_loss
+            elif tp_level:
+                expected_exit = getattr(signal, f'take_profit_{tp_level}', signal.take_profit_1)
+            else:
+                expected_exit = signal.take_profit_1
+            signal.exit_slippage_percent = ((signal.actual_exit - expected_exit) / expected_exit) * 100 if expected_exit else None
+        
+        # Save to database
+        if self.db:
+            await self.db.update_signal_result(
+                signal_id=signal.id,
+                status=status,
+                actual_exit=exit_price,
+                pnl_percent=pnl_percent,
+                tp_level=tp_level,
+                max_drawdown=signal.max_drawdown_percent,
+                max_adverse=signal.max_adverse_excursion,
+                max_favorable=signal.max_favorable_excursion,
+                duration_minutes=signal.duration_minutes,
+                entry_slippage=signal.entry_slippage_percent,
+                exit_slippage=signal.exit_slippage_percent
+            )
+            # Record setup performance
+            try:
+                await self.db.record_setup_performance(signal)
+            except Exception as e:
+                logger.debug(f"Setup performance recording failed: {e}")
+            # Audit log: signal closed
+            try:
+                await self.db.log_trade_event(
+                    signal_id=signal.id,
+                    event_type='tp_hit' if tp_level else 'sl_hit',
+                    details={
+                        'symbol': signal.symbol,
+                        'target': target,
+                        'direction': signal.direction.value,
+                        'entry': signal_data['entry_price'],
+                        'exit': exit_price,
+                        'pnl_percent': round(pnl_percent, 2),
+                        'duration_minutes': signal.duration_minutes,
+                        'mdd': signal.max_drawdown_percent,
+                        'mfe': signal.max_favorable_excursion,
+                        'mae': signal.max_adverse_excursion
+                    },
+                    price=exit_price,
+                    pnl=pnl_percent
+                )
+            except Exception:
+                pass
+        
+        # Send channel notifications
+        if self.on_channel_notification:
+            try:
+                await self.on_channel_notification(signal, tp_level, sl_hit, exit_price)
+            except Exception as e:
+                logger.error(f"Channel notification error: {e}")
+        
+        # Auto-notify admin
+        await self._notify_admin(signal, result)
+        
+        # Trigger FOMO campaign
+        if self.on_signal_result:
+            try:
+                await self.on_signal_result(signal, result)
+            except Exception as e:
+                logger.error(f"Signal result callback error: {e}")
     
     def get_stats(self, days: int = 7) -> Dict:
         """Get performance statistics for reports"""
@@ -628,8 +852,9 @@ class AutoPilotSystem:
     Call this from main.py to run everything on autopilot.
     """
     
-    def __init__(self, scanner=None, db=None, social_media=None, discord=None, 
-                 channel_publisher=None, community_engagement=None):
+    def __init__(self, scanner=None, db=None, social_media=None, discord=None,
+                 channel_publisher=None, community_engagement=None,
+                 on_channel_notification=None):
         self.scanner = scanner
         self.db = db
         self.social_media = social_media
@@ -645,7 +870,10 @@ class AutoPilotSystem:
         )
         
         # Sub-systems
-        self.performance = PerformanceTracker(scanner, db, channel_publisher=channel_publisher)
+        self.performance = PerformanceTracker(
+            scanner, db,
+            on_channel_notification=on_channel_notification
+        )
         self.public_stats = PublicStatsPoster(social_media, discord, channel_publisher, self.performance, db)
         self.trial_manager = FreeTrialManager(db, channel_publisher, self.payment_orchestrator)
         

@@ -15,6 +15,14 @@ class SignalStatus(str, Enum):
     CLOSED = "closed"
 
 
+class SignalGrade(str, Enum):
+    A_PLUS = "A+"
+    A = "A"
+    B = "B"
+    C = "C"
+    REJECTED = "REJECTED"
+
+
 class SignalDirection(str, Enum):
     LONG = "LONG"
     SHORT = "SHORT"
@@ -126,6 +134,19 @@ class TradingSignal(BaseModel):
     # Delay tracking
     free_channel_delayed: bool = False
     free_channel_scheduled_at: Optional[datetime] = None
+    
+    # Validation pipeline
+    grade: SignalGrade = SignalGrade.REJECTED
+    validation_score: float = 0.0  # 0-100 composite score
+    validation_breakdown: Optional[dict] = None  # Per-stage scores
+    
+    # Trade analytics (filled during tracking)
+    max_drawdown_percent: Optional[float] = None  # Worst unrealized loss % during trade
+    max_adverse_excursion: Optional[float] = None  # Worst price against position
+    max_favorable_excursion: Optional[float] = None  # Best price in favor
+    duration_minutes: Optional[float] = None  # Time from entry to close
+    entry_slippage_percent: Optional[float] = None  # (actual - expected) / expected
+    exit_slippage_percent: Optional[float] = None
     
     model_config = {
         "populate_by_name": True,

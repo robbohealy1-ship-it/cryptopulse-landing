@@ -457,12 +457,18 @@ class InstitutionalAnalyzer:
         if len(df) == 0:
             return 50, {'reason': 'No data'}
         
-        last_ts = df.index[-1]
-        if not isinstance(last_ts, datetime):
-            try:
-                last_ts = pd.to_datetime(last_ts)
-            except:
-                return 50, {'reason': 'Invalid timestamp'}
+        # For daily/4h timeframes, use CURRENT time instead of candle timestamp
+        # (daily candles open at 00:00 UTC, which would always show "Asian" session)
+        if timeframe in ['1d', '4h']:
+            from datetime import datetime as dt
+            last_ts = dt.utcnow()
+        else:
+            last_ts = df.index[-1]
+            if not isinstance(last_ts, datetime):
+                try:
+                    last_ts = pd.to_datetime(last_ts)
+                except:
+                    return 50, {'reason': 'Invalid timestamp'}
         
         hour_utc = last_ts.hour
         weekday = last_ts.weekday()  # 0=Monday

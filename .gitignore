@@ -65,5 +65,16 @@ htmlcov/
 ssh-key-*
 deploy_oracle.sh
 
+
 # Generated content
 generated_content/
+
+# Security - never commit keys
+*.key
+*.pem
+
+# Large binaries
+*.exe
+
+# SSH key backups
+ssh-keys-backup/

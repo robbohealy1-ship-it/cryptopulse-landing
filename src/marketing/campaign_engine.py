@@ -352,9 +352,15 @@ class CampaignEngine:
             f"💰 Total P&L: <b>{total_pnl:+.1f}%</b>\n\n"
             f"Every signal: 85%+ confidence + strict risk management.\n"
             f"That's why professionals use systems, not guesswork.\n\n"
-            f"🔗 <a href='{self.landing_url}'>See Full Track Record</a>\n"
-            f"📩 @CryptoPulseVIPAccessBot"
+            f"� <a href='{self.landing_url}'>Join VIP</a> for full signals with entry, SL & 3 TPs\n"
         )
+        
+        # Add referral CTA if configured
+        custom_url = getattr(settings, 'AFFILIATE_CUSTOM_URL', None)
+        if custom_url:
+            text += f"🔷 <a href='{custom_url}'>Trade on MEXC</a> — low fees, deep liquidity\n"
+        
+        text += f"📩 @CryptoPulseVIPAccessBot"
 
         await self._broadcast(text, 'social_proof')
 

@@ -11,6 +11,7 @@ from newsapi import NewsApiClient
 from src.config import settings
 from src.models.signal import ContextScore
 from src.utils.logger import get_logger
+from src.analysis.whale_monitor import WhaleMonitor
 
 logger = get_logger(__name__)
 
@@ -29,6 +30,9 @@ class EnhancedContextEngine:
                 logger.warning(f"NewsAPI initialization failed: {e}. Using CryptoCompare only.")
         else:
             logger.info("NewsAPI key not provided. Using CryptoCompare news only.")
+        
+        # Whale monitor (free tier via Binance public API)
+        self.whale_monitor = WhaleMonitor()
         
         # Cache management
         self.cache_duration = timedelta(minutes=15)
@@ -569,6 +573,9 @@ class EnhancedContextEngine:
         liquidations = await self.fetch_liquidations(base_symbol)
         oi = await self.fetch_open_interest(base_symbol)
         
+        # Whale activity (free via Binance public trades)
+        whale = await self.whale_monitor.check_symbol(symbol)
+        
         # Analyze sentiment (direction-aware)
         sentiment = self.analyze_sentiment(all_articles, direction)
         macro = self.check_macro_conditions(fear_greed, market_data, btc_trend)
@@ -627,6 +634,23 @@ class EnhancedContextEngine:
             sentiment_score += 8  # Upper wick = down reversal = SHORT boost
         elif liq_bias == 'potential_reversal_up' and direction == 'LONG':
             sentiment_score += 8  # Lower wick = up reversal = LONG boost
+        
+        # Whale activity adjustments (free Binance trade data)
+        if whale:
+            if whale.is_accumulating:
+                if direction == 'LONG':
+                    sentiment_score += 10  # Whales buying = LONG boost
+                    logger.info(f"🐋 Whale accumulation detected for {symbol} — boosting LONG score")
+                elif direction == 'SHORT':
+                    sentiment_score -= 8   # Whales buying = SHORT risky
+                    logger.info(f"🐋 Whale accumulation detected for {symbol} — penalizing SHORT")
+            elif whale.is_distributing:
+                if direction == 'SHORT':
+                    sentiment_score += 10  # Whales selling = SHORT boost
+                    logger.info(f"🐋 Whale distribution detected for {symbol} — boosting SHORT score")
+                elif direction == 'LONG':
+                    sentiment_score -= 8   # Whales selling = LONG risky
+                    logger.info(f"🐋 Whale distribution detected for {symbol} — penalizing LONG")
         
         # Clamp sentiment score
         sentiment_score = max(0, min(100, sentiment_score))
@@ -707,6 +731,17 @@ class EnhancedContextEngine:
         
         # News sentiment
         summary.append(f"📰 News: {sentiment['sentiment'].title()} ({sentiment['positive_count']}+ / {sentiment['negative_count']}-)")
+        
+        # Whale activity (free via Binance public API)
+        whale = await self.whale_monitor.check_symbol(symbol)
+        if whale and whale.alerts:
+            net = whale.net_flow_usd
+            emoji = "🟢" if net > 0 else "🔴"
+            summary.append(
+                f"🐋 Whale Activity: {emoji} ${abs(net):,.0f} net "
+                f"({whale.buy_count} buy / {whale.sell_count} sell trades, "
+                f"largest ${whale.largest_single_trade_usd:,.0f})"
+            )
         
         # Warnings
         if macro['warnings']:

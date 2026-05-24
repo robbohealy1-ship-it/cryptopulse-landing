@@ -16,6 +16,7 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from src.utils.logger import get_logger
 from src.config import settings
+from src.alpha_plays.gem_hunter import GemHunter
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,18 @@ class AlphaPlayCandidate:
     dex_source: str = ""  # 'dexscreener', 'geckoterminal', 'birdeye'
     pair_created_at: Optional[datetime] = None  # When was the pair created?
 
+    # Gem Hunter fields (long-term gem detection)
+    gem_score: float = 0.0  # 0-100 composite gem score
+    gem_tier: str = "unrated"  # s_tier / a_tier / b_tier / c_tier / avoid
+    gem_report: str = ""
+    narrative_score: float = 0.0  # 0-100 narrative alignment
+    primary_narrative: str = ""
+    contract_safety_score: float = 0.0  # 0-100
+    is_honeypot: bool = False
+    top_holders_risk: str = "unknown"
+    accumulation_score: float = 0.0  # 0-100 stealth accumulation
+    fundamental_report: str = ""  # Long-form gem analysis
+
     def __post_init__(self):
         if self.red_flags is None:
             self.red_flags = []
@@ -97,6 +110,7 @@ class AlphaDiscovery:
         self.cache: Dict[str, Any] = {}
         self.cache_time: Dict[str, datetime] = {}
         self.cache_duration = timedelta(minutes=5)
+        self.gem_hunter = GemHunter()
         
         # Minimum thresholds for a play to be considered
         self.min_liquidity_usd = 20000  # $20k minimum liquidity
@@ -836,8 +850,14 @@ class AlphaDiscovery:
             candidate.risk_level = 'low'
         
         # Trade classification
+        # Portfolio hold: Strong fundamentals, established token, 1-4 week hold
+        # Lower momentum requirement but needs solid structure and liquidity
+        if mc > 10_000_000 and liq > 1_000_000 and vol > 500_000 and candidate.holders > 2000:
+            candidate.trade_type = 'portfolio'
+            candidate.time_frame = '1-4w'
+        
         # Day trade: High momentum, high volume, short timeframe
-        if (change_1h > 10 or change_24h > 30) and txns > 2000 and vol > 500_000:
+        elif (change_1h > 10 or change_24h > 30) and txns > 2000 and vol > 500_000:
             candidate.trade_type = 'day_trade'
             candidate.time_frame = '1-4h'
         

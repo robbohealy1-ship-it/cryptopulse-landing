@@ -8,16 +8,20 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, HTTPException, Query, Request, Body
+from fastapi import FastAPI, HTTPException, Query, Request, Body, Depends
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from src.config import settings
 from src.utils.logger import get_logger
+import secrets
 from src.admin.analytics_engine import AnalyticsEngine
 from src.admin.content_generator import ContentGenerator
 from src.exchange.ctrader_client import CTraderClient
 from src.exchange.mexc_client import MEXCClient
+from src.utils.portfolio_analytics import PortfolioAnalytics
+from src.models.signal import SignalStatus
 
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -27,26 +31,102 @@ app = FastAPI(title="CryptoPulse Admin", version="2.0")
 
 # ==================== Rate Limiting ====================
 _request_log: Dict[str, List[datetime]] = {}
-RATE_LIMIT_WINDOW_SECONDS = 60
-RATE_LIMIT_MAX_REQUESTS = 5  # Max 5 signal creations per minute per IP
 
-def _check_rate_limit(client_ip: str) -> bool:
-    """Simple in-memory rate limiter. Returns True if allowed."""
+# Tiered limits: (window_seconds, max_requests)
+TIER_STRICT = (60, 5)    # Signal creation, admin actions
+TIER_MODERATE = (60, 30)  # Writes, approvals
+TIER_LENIENT = (60, 120)  # Reads, analytics
+
+def _check_rate_limit(client_ip: str, tier: tuple = TIER_MODERATE) -> bool:
+    """Multi-tier in-memory rate limiter. Returns True if allowed."""
+    window_seconds, max_requests = tier
     now = datetime.utcnow()
-    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
+    window_start = now - timedelta(seconds=window_seconds)
     
-    # Get or init request history for this IP
-    history = _request_log.get(client_ip, [])
-    # Filter to only requests in the current window
+    key = f"{client_ip}:{tier}"
+    history = _request_log.get(key, [])
     history = [t for t in history if t > window_start]
     
-    if len(history) >= RATE_LIMIT_MAX_REQUESTS:
-        _request_log[client_ip] = history
+    if len(history) >= max_requests:
+        _request_log[key] = history
         return False
     
     history.append(now)
-    _request_log[client_ip] = history
+    _request_log[key] = history
     return True
+
+async def require_rate_limit(request: Request, tier: tuple = TIER_MODERATE):
+    """FastAPI dependency for rate limiting."""
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip, tier):
+        window, limit = tier
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: {limit} requests per {window}s. Please slow down."
+        )
+
+async def rate_limit_strict(request: Request):
+    await require_rate_limit(request, TIER_STRICT)
+
+async def rate_limit_moderate(request: Request):
+    await require_rate_limit(request, TIER_MODERATE)
+
+async def rate_limit_lenient(request: Request):
+    await require_rate_limit(request, TIER_LENIENT)
+
+# ==================== Authentication ====================
+security = HTTPBasic(auto_error=False)
+
+async def verify_admin_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify dashboard admin credentials. If no password configured, allow all."""
+    if not settings.ADMIN_DASHBOARD_PASSWORD:
+        return True  # Auth disabled
+    
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required", headers={"WWW-Authenticate": "Basic"})
+    
+    # Use secrets.compare_digest for timing attack resistance
+    username_ok = secrets.compare_digest(credentials.username, "admin")
+    password_ok = secrets.compare_digest(credentials.password, settings.ADMIN_DASHBOARD_PASSWORD)
+    
+    if not (username_ok and password_ok):
+        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
+    
+    return True
+
+@app.middleware("http")
+async def dashboard_auth_middleware(request: Request, call_next):
+    """Protect API routes with Basic auth when ADMIN_DASHBOARD_PASSWORD is configured."""
+    # Skip auth for static files and HTML pages
+    skip_paths = {"/", "/login", "/marketing", "/portfolio"}
+    if request.url.path in skip_paths or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    
+    # Skip auth if not configured (backwards compatible)
+    if not settings.ADMIN_DASHBOARD_PASSWORD:
+        return await call_next(request)
+    
+    # Check Basic auth header
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Basic "):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+            headers={"WWW-Authenticate": "Basic"}
+        )
+    
+    import base64
+    try:
+        creds = base64.b64decode(auth[6:]).decode("utf-8")
+        username, password = creds.split(":", 1)
+    except Exception:
+        return JSONResponse(status_code=401, content={"detail": "Invalid auth format"})
+    
+    if not secrets.compare_digest(username, "admin") or not secrets.compare_digest(password, settings.ADMIN_DASHBOARD_PASSWORD):
+        return JSONResponse(status_code=401, content={"detail": "Invalid credentials"})
+    
+    return await call_next(request)
+
 
 # Global reference to the orchestrator (set at startup)
 orchestrator = None
@@ -105,6 +185,11 @@ class MarkTPHit(BaseModel):
     tp_level: int  # 1, 2, or 3
 
 
+class FillLimitOrder(BaseModel):
+    """Model for manually filling an approved limit order"""
+    fill_price: float
+
+
 # ==================== Helper ====================
 
 def require_orch():
@@ -128,21 +213,83 @@ async def portfolio_page():
 
 
 @app.get("/api/status")
-async def system_status():
-    """Overall system health and status."""
+async def system_status(request: Request, _=Depends(rate_limit_lenient)):
+    """Overall system health and status with comprehensive component checks."""
     orch = require_orch()
     scheduler_running = orch.scheduler.running if orch.scheduler else False
-    
+
+    # DB connectivity test
+    db_healthy = False
+    try:
+        if orch.db and orch.db.client:
+            orch.db.client.table('signals').select('id', count='exact').limit(1).execute()
+            db_healthy = True
+    except Exception:
+        pass
+
+    # Scanner health
+    scanner_healthy = False
+    try:
+        if orch.signal_engine and orch.signal_engine.scanner:
+            scanner_healthy = True
+    except Exception:
+        pass
+
+    # Autopilot stats
+    autopilot_stats = {}
+    try:
+        if orch.autopilot:
+            p = orch.autopilot.performance
+            autopilot_stats = {
+                'active_signals': len(p.active_signals) if p else 0,
+                'pending_limits': len(p.pending_limit_orders) if p else 0,
+                'tracking_enabled': True
+            }
+    except Exception:
+        pass
+
+    # Signal queue depth
+    queue_depth = {'pending': 0, 'active': 0, 'approved': 0}
+    try:
+        if orch.db:
+            pending = orch.db.client.table('signals').select('id', count='exact').eq('status', 'pending').execute()
+            active = orch.db.client.table('signals').select('id', count='exact').eq('status', 'active').execute()
+            approved = orch.db.client.table('signals').select('id', count='exact').eq('status', 'approved').execute()
+            queue_depth = {
+                'pending': getattr(pending, 'count', 0) or len(pending.data or []),
+                'active': getattr(active, 'count', 0) or len(active.data or []),
+                'approved': getattr(approved, 'count', 0) or len(approved.data or [])
+            }
+    except Exception:
+        pass
+
+    # Alpha plays stats
+    alpha_stats = {}
+    try:
+        if orch.alpha_engine:
+            alpha_stats = {
+                'active': len(orch.alpha_engine.active_plays),
+                'pending': len(orch.alpha_engine.pending_alpha_limits) if hasattr(orch.alpha_engine, 'pending_alpha_limits') else 0
+            }
+    except Exception:
+        pass
+
     return {
-        "status": "running",
+        "status": "running" if db_healthy else "degraded",
         "timestamp": datetime.utcnow().isoformat(),
         "scheduler": scheduler_running,
+        "db_healthy": db_healthy,
+        "scanner_healthy": scanner_healthy,
         "admin_bot": (orch.admin_bot.app is not None or orch.admin_bot.bot is not None) if orch.admin_bot else False,
         "vip_bot": orch.vip_bot.app is not None if orch.vip_bot else False,
+        "autopilot": autopilot_stats,
+        "alpha_plays": alpha_stats,
+        "queue_depth": queue_depth,
         "components": {
             "signal_engine": True,
             "channel_publisher": True,
-            "database": True,
+            "database": db_healthy,
+            "scanner": scanner_healthy,
             "social_media": orch.social_media.twitter_enabled if orch.social_media else False,
             "discord": orch.discord_publisher.enabled if orch.discord_publisher else False,
             "viral_growth": orch.viral_growth is not None if hasattr(orch, 'viral_growth') else False,
@@ -175,7 +322,7 @@ async def weekly_stats():
 
 
 @app.get("/api/signals/pending")
-async def pending_signals():
+async def pending_signals(request: Request, _=Depends(rate_limit_lenient)):
     """Signals waiting for admin approval."""
     orch = require_orch()
     try:
@@ -207,7 +354,7 @@ async def pending_signals():
 
 
 @app.get("/api/signals/active")
-async def active_signals():
+async def active_signals(request: Request, _=Depends(rate_limit_lenient)):
     """Active/running signals being tracked (persists across restarts)."""
     orch = require_orch()
     try:
@@ -260,7 +407,7 @@ async def active_signals():
 
 
 @app.get("/api/portfolio")
-async def portfolio_data():
+async def portfolio_data(request: Request, _=Depends(rate_limit_lenient)):
     """Full portfolio: all signals (active + closed + pending) with live P&L and aggregate stats."""
     orch = require_orch()
     try:
@@ -411,7 +558,7 @@ async def alpha_plays():
         if orch.alpha_engine:
             for play_id, play in list(orch.alpha_engine.active_plays.items()):
                 # Skip corrupted legacy plays with no real data
-                if play.entry_price == 0 and play.stop_loss == 0 and play.take_profit_1 == 0:
+                if (not play.entry_price or play.entry_price <= 0) and (not play.stop_loss or play.stop_loss <= 0) and (not play.take_profit_1 or play.take_profit_1 <= 0):
                     continue
                 if orch.alpha_engine._looks_like_address_fragment(play.candidate.symbol) and not play.candidate.token_address:
                     continue
@@ -591,8 +738,105 @@ async def alpha_plays():
         return {"active_count": 0, "pending_count": 0, "active": [], "pending": [], "error": str(e)}
 
 
+@app.get("/api/alpha/portfolio")
+async def alpha_portfolio_holds():
+    """Get long-term portfolio holds (1-4 week positions)."""
+    orch = require_orch()
+    try:
+        holds = []
+        
+        if orch.alpha_engine:
+            for play_id, play in list(orch.alpha_engine.portfolio_holds.items()):
+                current_price = play.current_price if play.current_price > 0 else play.candidate.price_usd
+                entry = play.actual_entry or play.entry_price
+                current_pnl = play.current_pnl
+                if current_pnl == 0 and entry > 0 and current_price > 0:
+                    current_pnl = ((current_price - entry) / entry) * 100
+                
+                holds.append({
+                    "id": play_id,
+                    "symbol": play.candidate.symbol,
+                    "name": play.candidate.name,
+                    "chain": play.candidate.chain,
+                    "status": play.status,
+                    "trade_type": play.candidate.trade_type,
+                    "risk_level": play.candidate.risk_level,
+                    "entry_price": entry,
+                    "current_price": current_price,
+                    "current_pnl": round(current_pnl, 2),
+                    "highest_price": play.highest_price or entry,
+                    "stop_loss": play.stop_loss,
+                    "take_profit_1": play.take_profit_1,
+                    "take_profit_2": play.take_profit_2,
+                    "market_cap": play.candidate.market_cap_usd,
+                    "liquidity": play.candidate.liquidity_usd,
+                    "volume_24h": play.candidate.volume_24h,
+                    "price_change_24h": round(play.candidate.price_change_24h, 1),
+                    "buy_sell_ratio": round(play.candidate.buy_sell_ratio, 2),
+                    "overall_score": round(play.candidate.overall_score, 1),
+                    "catalyst": play.candidate.catalyst,
+                    "narrative": play.candidate.narrative,
+                    "dex_url": play.candidate.dex_url,
+                    "chart_url": play.candidate.chart_url,
+                    "approved_at": play.approved_at.isoformat() if play.approved_at else None,
+                    "position_size": play.position_size,
+                })
+        else:
+            # Fallback from DB
+            try:
+                db_holds = await orch.db.get_alpha_plays(status='portfolio_hold', limit=50)
+                for p in db_holds:
+                    cd = p.get('candidate_data', {}) or {}
+                    if isinstance(cd, str):
+                        import json
+                        try:
+                            cd = json.loads(cd)
+                        except Exception:
+                            cd = {}
+                    entry = float(p.get('actual_entry', p.get('entry_price', 0)) or 0)
+                    current = float(p.get('current_price', 0) or 0)
+                    pnl = float(p.get('current_pnl', 0) or 0)
+                    if pnl == 0 and entry > 0 and current > 0:
+                        pnl = ((current - entry) / entry) * 100
+                    holds.append({
+                        "id": p.get('id'),
+                        "symbol": p.get('symbol') or cd.get('symbol', 'UNKNOWN'),
+                        "name": cd.get('name', ''),
+                        "chain": cd.get('chain', 'unknown'),
+                        "status": p.get('status', 'portfolio_hold'),
+                        "trade_type": cd.get('trade_type', 'portfolio'),
+                        "entry_price": entry,
+                        "current_price": current,
+                        "current_pnl": round(pnl, 2),
+                        "stop_loss": float(p.get('stop_loss', 0) or 0),
+                        "take_profit_1": float(p.get('take_profit_1', 0) or 0),
+                        "take_profit_2": float(p.get('take_profit_2', 0) or 0),
+                        "market_cap": float(cd.get('market_cap', 0) or 0),
+                        "approved_at": p.get('approved_at'),
+                    })
+            except Exception as e:
+                logger.warning(f"Could not load portfolio holds from DB: {e}")
+        
+        # Compute aggregate stats
+        total_pnl = sum(h['current_pnl'] for h in holds)
+        best = max(holds, key=lambda x: x['current_pnl']) if holds else None
+        worst = min(holds, key=lambda x: x['current_pnl']) if holds else None
+        
+        return {
+            "count": len(holds),
+            "total_pnl": round(total_pnl, 2),
+            "best_performer": best,
+            "worst_performer": worst,
+            "holds": holds
+        }
+    except Exception as e:
+        logger.error(f"Error getting portfolio holds: {e}")
+        return {"count": 0, "total_pnl": 0, "holds": [], "error": str(e)}
+
+
 @app.post("/api/alpha/approve")
-async def approve_alpha(symbol: str, is_limit_order: bool = False):
+async def approve_alpha(request: Request, symbol: str, is_limit_order: bool = False,
+                        _=Depends(rate_limit_strict)):
     """Approve a pending alpha/DEX play from dashboard."""
     orch = require_orch()
     try:
@@ -626,7 +870,8 @@ async def approve_alpha(symbol: str, is_limit_order: bool = False):
 
 
 @app.post("/api/alpha/reject")
-async def reject_alpha(symbol: str):
+async def reject_alpha(request: Request, symbol: str,
+                       _=Depends(rate_limit_strict)):
     """Reject (discard) a pending alpha/DEX play from dashboard."""
     orch = require_orch()
     try:
@@ -660,7 +905,8 @@ async def reject_alpha(symbol: str):
 
 
 @app.post("/api/alpha/close")
-async def close_alpha(play_id: str, reason: str = "manual"):
+async def close_alpha(request: Request, play_id: str, reason: str = "manual",
+                      _=Depends(rate_limit_strict)):
     """Manually close an active alpha play from dashboard."""
     orch = require_orch()
     try:
@@ -704,7 +950,8 @@ async def update_alpha(play_id: str, updates: dict = Body(...)):
 
 
 @app.post("/api/alpha/trigger")
-async def trigger_alpha_scan(chain: str = None):
+async def trigger_alpha_scan(request: Request, chain: str = None,
+                             _=Depends(rate_limit_strict)):
     """Manually trigger an alpha/DEX play discovery scan."""
     orch = require_orch()
     try:
@@ -753,6 +1000,42 @@ async def alpha_stats():
     except Exception as e:
         logger.error(f"Error getting alpha stats: {e}")
         return {"error": str(e)}
+
+
+@app.get("/api/whales/{symbol}")
+async def get_whale_activity(symbol: str):
+    """Get whale activity for a symbol (free via Binance public API)."""
+    orch = require_orch()
+    try:
+        if orch.signal_engine and orch.signal_engine.context_engine:
+            whale = await orch.signal_engine.context_engine.whale_monitor.check_symbol(symbol)
+            if whale and whale.alerts:
+                return {
+                    "symbol": symbol,
+                    "active": True,
+                    "total_buys_usd": round(whale.total_buys_usd, 2),
+                    "total_sells_usd": round(whale.total_sells_usd, 2),
+                    "net_flow_usd": round(whale.net_flow_usd, 2),
+                    "buy_count": whale.buy_count,
+                    "sell_count": whale.sell_count,
+                    "largest_trade_usd": round(whale.largest_single_trade_usd, 2),
+                    "is_accumulating": whale.is_accumulating,
+                    "is_distributing": whale.is_distributing,
+                    "alerts": [
+                        {
+                            "side": a.side,
+                            "usd_value": round(a.usd_value, 2),
+                            "quantity": a.quantity,
+                            "price": a.price,
+                            "time": a.timestamp.isoformat() if a.timestamp else None
+                        }
+                        for a in whale.alerts[:10]
+                    ]
+                }
+        return {"symbol": symbol, "active": False, "message": "No whale activity detected"}
+    except Exception as e:
+        logger.error(f"Error fetching whale data for {symbol}: {e}")
+        return {"symbol": symbol, "active": False, "error": str(e)}
 
 
 @app.get("/api/alpha/performance")
@@ -1003,7 +1286,8 @@ async def dex_opportunities(chain: str = None, trade_type: str = None):
 # ==================== SIGNALS ====================
 
 @app.post("/api/signals/action")
-async def signal_action(action: SignalAction):
+async def signal_action(action: SignalAction, request: Request,
+                        _=Depends(rate_limit_strict)):
     """Approve or reject a pending signal from the dashboard."""
     orch = require_orch()
     signal = orch.admin_bot.pending_signals.get(action.signal_id)
@@ -1038,7 +1322,8 @@ async def signal_action(action: SignalAction):
 
 
 @app.put("/api/signals/{signal_id}/update")
-async def update_signal_prices(signal_id: str, update: SignalUpdate):
+async def update_signal_prices(signal_id: str, update: SignalUpdate,
+                               request: Request, _=Depends(rate_limit_moderate)):
     """Update signal entry, SL, or TP prices manually"""
     orch = require_orch()
     try:
@@ -1084,7 +1369,8 @@ async def update_signal_prices(signal_id: str, update: SignalUpdate):
 
 
 @app.post("/api/signals/{signal_id}/close")
-async def close_signal_manually(signal_id: str, close_data: CloseSignal):
+async def close_signal_manually(signal_id: str, close_data: CloseSignal,
+                                request: Request, _=Depends(rate_limit_strict)):
     """Manually close an active signal"""
     orch = require_orch()
     try:
@@ -1100,6 +1386,15 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal):
             pnl = ((close_data.close_price - entry) / entry) * 100
             if signal.direction.value == "SHORT":
                 pnl = -pnl
+        
+        # Check if already closed to prevent duplicate messages
+        if signal.status.value == 'closed':
+            logger.warning(f"Signal {signal_id} already closed, ignoring duplicate close request")
+            return {
+                "success": False,
+                "message": "Signal already closed",
+                "pnl_percent": signal.pnl_percent or 0
+            }
         
         # Update signal status
         updates = {
@@ -1136,8 +1431,56 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/signals/{signal_id}/fill")
+async def fill_limit_order_manually(signal_id: str, fill_data: FillLimitOrder,
+                                    request: Request, _=Depends(rate_limit_strict)):
+    """Manually fill an approved limit order and start tracking"""
+    orch = require_orch()
+    try:
+        signal = await orch.db.get_signal_by_id(signal_id)
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal not found")
+
+        if signal.status.value != 'approved':
+            raise HTTPException(status_code=400, detail="Signal must be in APPROVED status to fill")
+
+        # Update signal to active
+        signal.status = SignalStatus.ACTIVE
+        signal.actual_entry = fill_data.fill_price
+
+        updates = {
+            'status': 'active',
+            'actual_entry': fill_data.fill_price,
+        }
+        success = await orch.db.update_signal(signal_id, updates)
+
+        if success:
+            # Start autopilot tracking
+            if orch.autopilot:
+                await orch.autopilot.track_signal(signal)
+
+            # Send VIP fill notification
+            await orch.channel_publisher.send_limit_fill_notification(signal)
+
+            logger.info(f"Signal {signal_id} manually filled at {fill_data.fill_price}")
+            return {
+                "success": True,
+                "message": "Limit order filled and tracking started",
+                "fill_price": fill_data.fill_price,
+                "signal_id": signal_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to fill signal")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error filling signal: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/signals/{signal_id}/mark-tp")
-async def mark_tp_hit_manually(signal_id: str, tp_data: MarkTPHit):
+async def mark_tp_hit_manually(signal_id: str, tp_data: MarkTPHit,
+                               request: Request, _=Depends(rate_limit_strict)):
     """Manually mark a TP level as hit"""
     orch = require_orch()
     try:
@@ -1173,8 +1516,10 @@ async def mark_tp_hit_manually(signal_id: str, tp_data: MarkTPHit):
 
 @app.get("/api/signals/history")
 async def signal_history(
+    request: Request,
     limit: int = Query(50, ge=1, le=200),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    _=Depends(rate_limit_lenient)
 ):
     """Recent signal history."""
     orch = require_orch()
@@ -1191,7 +1536,8 @@ async def signal_history(
 
 
 @app.post("/api/marketing/post")
-async def send_marketing_post(post: MarketingPost):
+async def send_marketing_post(post: MarketingPost,
+                              request: Request, _=Depends(rate_limit_strict)):
     """Send a custom message to free, vip, or both channels."""
     orch = require_orch()
     try:
@@ -1218,7 +1564,8 @@ async def send_marketing_post(post: MarketingPost):
 
 
 @app.post("/api/marketing/campaign")
-async def trigger_campaign(campaign: CampaignTrigger):
+async def trigger_campaign(campaign: CampaignTrigger,
+                           request: Request, _=Depends(rate_limit_strict)):
     """Trigger a marketing campaign manually."""
     orch = require_orch()
     try:
@@ -1338,7 +1685,8 @@ async def trigger_campaign(campaign: CampaignTrigger):
 
 
 @app.post("/api/schedule/trigger")
-async def trigger_scheduled_job(job: ScheduleJob):
+async def trigger_scheduled_job(job: ScheduleJob,
+                                request: Request, _=Depends(rate_limit_strict)):
     """Manually trigger a scheduled job."""
     orch = require_orch()
     try:
@@ -1471,8 +1819,54 @@ async def signal_performance(days: int = Query(30, ge=1, le=365)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/portfolio/analytics")
+async def portfolio_analytics(request: Request, days: int = Query(30, ge=1, le=365),
+                              _=Depends(rate_limit_moderate)):
+    """Get advanced portfolio analytics (Sharpe, Sortino, Profit Factor, etc.)"""
+    orch = require_orch()
+    try:
+        trades = await orch.db.get_closed_signals_for_analytics(days=days)
+        if not trades:
+            return {"period_days": days, "metrics": {}, "message": "No closed trades in period"}
+
+        analytics = PortfolioAnalytics()
+        metrics = analytics.calculate(trades, days=days)
+        return {
+            "period_days": days,
+            "metrics": analytics.to_dict(metrics)
+        }
+    except Exception as e:
+        logger.error(f"Portfolio analytics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/audit/signal/{signal_id}")
+async def get_signal_audit(signal_id: str):
+    """Get full audit trail for a specific signal."""
+    orch = require_orch()
+    try:
+        entries = await orch.db.get_signal_audit(signal_id)
+        return {"signal_id": signal_id, "entries": entries, "count": len(entries)}
+    except Exception as e:
+        logger.error(f"Audit trail error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/audit/recent")
+async def get_recent_audit(event_type: str = Query(None), limit: int = Query(100, ge=1, le=500)):
+    """Get recent audit entries, optionally filtered by event type."""
+    orch = require_orch()
+    try:
+        entries = await orch.db.get_recent_audit(event_type=event_type, limit=limit)
+        return {"entries": entries, "count": len(entries), "filter": event_type}
+    except Exception as e:
+        logger.error(f"Recent audit error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/marketing/send-performance")
-async def send_performance_to_channel(days: int = Query(7, ge=1, le=365), channel: str = Query("free")):
+async def send_performance_to_channel(request: Request, days: int = Query(7, ge=1, le=365), channel: str = Query("free"),
+                                      _=Depends(rate_limit_strict)):
     """Send current performance stats to a Telegram channel (free or vip)."""
     orch = require_orch()
     try:
@@ -1583,13 +1977,9 @@ class ManualSignal(BaseModel):
 
 
 @app.post("/api/signals/create")
-async def create_manual_signal(request: Request, sig: ManualSignal):
+async def create_manual_signal(request: Request, sig: ManualSignal,
+                                _=Depends(rate_limit_strict)):
     """Manually create a signal and optionally publish immediately."""
-    # Rate limit: max 5 creations per minute per IP
-    client_ip = request.client.host if request.client else "unknown"
-    if not _check_rate_limit(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Max 5 signal creations per minute.")
-    
     orch = require_orch()
     try:
         from src.models.signal import (

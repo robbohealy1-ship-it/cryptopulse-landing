@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import asyncio
+import math
 from src.models.signal import TradingSignal, SignalDirection
 from src.scanner.market_scanner import MarketScanner
 from src.utils.logger import get_logger
@@ -40,7 +41,7 @@ class ChartGenerator:
                 return None
             
             # Use last 50 candles for clarity
-            df_plot = df.tail(50).reset_index(drop=True)
+            df_plot = df.tail(50)
             n = len(df_plot)
             
             # Numeric x positions (0, 1, 2... not datetimes)
@@ -51,24 +52,36 @@ class ChartGenerator:
             fig.patch.set_facecolor('#0d1117')
             ax.set_facecolor('#0d1117')
             
+            # Determine smart decimal places for y-axis based on price magnitude
+            avg_price = df_plot['close'].mean()
+            if avg_price > 0:
+                # Need enough decimals to show ~0.1% moves clearly
+                # e.g., PEPE at 3.8e-6 -> need ~10 decimals to show 0.0000000038
+                decimals = max(6, int(abs(math.log10(avg_price))) + 3)
+            else:
+                decimals = 6
+            
             # --- Plot proper candlesticks ---
             for i in range(n):
-                o = df_plot['open'].iloc[i]
-                c = df_plot['close'].iloc[i]
-                h = df_plot['high'].iloc[i]
-                l = df_plot['low'].iloc[i]
+                o = float(df_plot['open'].iloc[i])
+                c = float(df_plot['close'].iloc[i])
+                h = float(df_plot['high'].iloc[i])
+                l = float(df_plot['low'].iloc[i])
                 
                 is_green = c >= o
                 color = '#26a69a' if is_green else '#ef5350'
                 
                 # Wick (thin vertical line)
-                ax.plot([i, i], [l, h], color=color, linewidth=0.7, alpha=0.9, solid_capstyle='round')
+                ax.plot([i, i], [l, h], color=color, linewidth=0.8, alpha=0.9, solid_capstyle='round')
                 
-                # Body (filled rectangle)
+                # Body (filled rectangle) — ensure min height so dojis are visible
                 body_bottom = min(o, c)
                 body_height = abs(c - o)
-                if body_height == 0:
-                    body_height = 0.000001  # Avoid zero-height bars
+                # For very low-priced tokens, enforce a minimum pixel-height body
+                # by adding a tiny fraction relative to the avg price
+                min_body = avg_price * 0.0005 if avg_price > 0 else 0.000001
+                if body_height < min_body:
+                    body_height = min_body
                 ax.bar(i, body_height, bottom=body_bottom, width=candle_width,
                        color=color, edgecolor=color, linewidth=0.3, alpha=0.95)
             
@@ -176,8 +189,28 @@ class ChartGenerator:
             ax.set_xticks(tick_positions)
             ax.set_xticklabels(tick_labels, rotation=0, ha='center')
             
-            # --- Y-axis formatting ---
-            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:.6f}'))
+            # --- Y-axis formatting with dynamic decimal places ---
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:.{decimals}f}'))
+            
+            # --- Explicit y-limits with padding for proper candle proportions ---
+            # Calculate limits based on visible candles + trade levels
+            candle_low = df_plot['low'].min()
+            candle_high = df_plot['high'].max()
+            trade_levels = [signal.entry_price, signal.stop_loss]
+            if signal.take_profit_1:
+                trade_levels.append(signal.take_profit_1)
+            if signal.take_profit_2:
+                trade_levels.append(signal.take_profit_2)
+            if signal.take_profit_3:
+                trade_levels.append(signal.take_profit_3)
+            
+            y_min = min(candle_low, min(trade_levels)) if trade_levels else candle_low
+            y_max = max(candle_high, max(trade_levels)) if trade_levels else candle_high
+            y_range = y_max - y_min
+            if y_range <= 0:
+                y_range = y_min * 0.02 if y_min > 0 else 0.000001
+            # Add 5% padding top and bottom so candles don't touch edges
+            ax.set_ylim(y_min - y_range * 0.05, y_max + y_range * 0.05)
             
             # --- Styling ---
             ax.tick_params(colors='#94a3b8', labelsize=8, length=3)

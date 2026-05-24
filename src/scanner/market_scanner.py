@@ -10,6 +10,8 @@ logger = get_logger(__name__)
 
 
 class MarketScanner:
+    PRICE_CACHE_TTL_SECONDS = 30
+
     def __init__(self):
         # Initialize Binance exchange without API keys (public data only)
         self.exchange = ccxt.binance({
@@ -28,6 +30,9 @@ class MarketScanner:
         self.liquid_pairs: List[str] = []
         self.last_refresh: Optional[datetime] = None
         self.min_volume_usd = settings.MIN_DAILY_VOLUME_USD
+        
+        # Price cache: symbol -> (ticker_dict, cached_at)
+        self._price_cache: Dict[str, tuple] = {}
         
     async def initialize(self):
         logger.info("Initializing market scanner...")
@@ -109,11 +114,29 @@ class MarketScanner:
     
     async def fetch_ticker(self, symbol: str) -> Dict:
         try:
+            # Check cache first
+            cached = self._price_cache.get(symbol)
+            if cached:
+                ticker_data, cached_at = cached
+                age = (datetime.utcnow() - cached_at).total_seconds()
+                if age < self.PRICE_CACHE_TTL_SECONDS:
+                    logger.debug(f"Cache hit for {symbol} (age={age:.1f}s)")
+                    return ticker_data
+            
+            # Fetch from exchange
             ticker = await asyncio.to_thread(self.exchange.fetch_ticker, symbol)
+            
+            # Store in cache
+            self._price_cache[symbol] = (ticker, datetime.utcnow())
             return ticker
         except Exception as e:
             logger.error(f"Error fetching ticker for {symbol}: {e}")
             raise
+    
+    def clear_price_cache(self):
+        """Clear the price cache (useful after limit order fills)."""
+        self._price_cache.clear()
+        logger.info("Price cache cleared")
     
     async def get_market_info(self, symbol: str) -> Dict:
         try:

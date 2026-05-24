@@ -28,6 +28,7 @@ class MEXCClient:
         self.api_key = api_key
         self.api_secret = api_secret.encode("utf-8")
         self._session: Optional[aiohttp.ClientSession] = None
+        self._server_time_offset = 0  # Offset between local and server time
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -44,6 +45,20 @@ class MEXCClient:
             hashlib.sha256,
         ).hexdigest()
 
+    async def _sync_time(self):
+        """Sync local time with MEXC server time to avoid timestamp errors."""
+        try:
+            session = await self._get_session()
+            async with session.get(f"{self.BASE_URL}/api/v3/time") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    server_time = data.get('serverTime', 0)
+                    local_time = int(datetime.utcnow().timestamp() * 1000)
+                    self._server_time_offset = server_time - local_time
+                    logger.debug(f"MEXC time synced: offset={self._server_time_offset}ms")
+        except Exception as e:
+            logger.warning(f"MEXC time sync failed: {e}")
+    
     async def _request(self, method: str, path: str, params: Optional[Dict] = None, signed: bool = False) -> Any:
         """Make an authenticated request to MEXC API."""
         session = await self._get_session()
@@ -51,7 +66,13 @@ class MEXCClient:
         
         query = urllib.parse.urlencode(params or {})
         if signed:
-            query += f"&timestamp={int(datetime.utcnow().timestamp() * 1000)}"
+            # Sync time on first signed request if not done yet
+            if self._server_time_offset == 0:
+                await self._sync_time()
+            
+            # Use server-adjusted timestamp and add recvWindow for tolerance
+            timestamp = int(datetime.utcnow().timestamp() * 1000) + self._server_time_offset
+            query += f"&timestamp={timestamp}&recvWindow=10000"
             signature = self._sign(query)
             query += f"&signature={signature}"
         

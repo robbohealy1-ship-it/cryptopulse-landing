@@ -356,9 +356,25 @@ function updateSummary(data) {
   setVal('closedCount', data.closed_count);
 }
 
+function getAuthHeader() {
+  const pwd = localStorage.getItem('admin_password');
+  if (!pwd) return {};
+  return { 'Authorization': 'Basic ' + btoa('admin:' + pwd) };
+}
+
+async function authFetch(url) {
+  const res = await fetch(url, { headers: getAuthHeader() });
+  if (res.status === 401) {
+    alert('Authentication required. Please login from the main dashboard first.');
+    window.location.href = '/';
+    throw new Error('Authentication required');
+  }
+  return res;
+}
+
 async function loadPortfolio() {
   try {
-    const res = await fetch('/api/portfolio');
+    const res = await authFetch('/api/portfolio');
     const data = await res.json();
     
     if (data.error) {
@@ -434,7 +450,7 @@ function renderAlphaPlays(plays) {
 
 async function loadAlphaPortfolio() {
   try {
-    const res = await fetch('/api/alpha/plays');
+    const res = await authFetch('/api/alpha/plays');
     const data = await res.json();
     
     const allAlpha = [];
@@ -467,7 +483,7 @@ async function loadAlphaPortfolio() {
 
 async function loadAccountData() {
   try {
-    const res = await fetch('/api/account');
+    const res = await authFetch('/api/account');
     const data = await res.json();
     renderAccounts(data.accounts || []);
     document.getElementById('accountLastUpdated').textContent = new Date().toLocaleTimeString();

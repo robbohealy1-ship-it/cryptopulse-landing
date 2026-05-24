@@ -177,8 +177,50 @@ class AlphaPublisher:
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-            
-            logger.info(f"Alpha result teaser sent to FREE for {play.candidate.symbol}")
+            logger.info("Alpha result sent to FREE")
             
         except Exception as e:
-            logger.error(f"Error sending alpha result to FREE: {e}")
+            logger.error(f"Error publishing alpha result to FREE: {e}")
+    
+    async def send_portfolio_summary(self, holds: list, total_pnl: float):
+        """
+        Send weekly portfolio holds summary to VIP channel.
+        """
+        if not self.bot or not self.vip_channel_id:
+            return
+        
+        if not holds:
+            return
+        
+        try:
+            best = max(holds, key=lambda h: h.current_pnl)
+            worst = min(holds, key=lambda h: h.current_pnl)
+            avg_pnl = sum(h.current_pnl for h in holds) / len(holds)
+            
+            lines = []
+            for h in sorted(holds, key=lambda x: x.current_pnl, reverse=True)[:5]:
+                emoji = "🟢" if h.current_pnl >= 0 else "🔴"
+                lines.append(f"{emoji} <b>{h.candidate.symbol}</b> | {h.current_pnl:+.1f}%")
+            
+            message = (
+                f"📊 <b>PORTFOLIO HOLD SUMMARY</b>\n\n"
+                f"Positions: {len(holds)}\n"
+                f"Total P&L: {total_pnl:+.1f}%\n"
+                f"Avg P&L: {avg_pnl:+.1f}%\n\n"
+                f"🏆 Best: <b>{best.candidate.symbol}</b> | {best.current_pnl:+.1f}%\n"
+                f"📉 Worst: <b>{worst.candidate.symbol}</b> | {worst.current_pnl:+.1f}%\n\n"
+                f"<b>Top Holdings:</b>\n"
+                + "\n".join(lines) +
+                f"\n\n<i>Long-term 1-4 week holds. Not financial advice.</i>"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.vip_channel_id,
+                text=message,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            logger.info("Portfolio summary sent to VIP")
+            
+        except Exception as e:
+            logger.error(f"Error sending portfolio summary: {e}")

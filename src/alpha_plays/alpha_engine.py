@@ -93,6 +93,9 @@ class AlphaPlaysEngine:
         # Track price extremes for pending alpha limits so brief touches aren't missed
         self.pending_alpha_extremes: Dict[str, dict] = {}  # play_id -> {'lowest': float, 'highest': float}
         
+        # Portfolio holds (long-term 1-4 week alpha positions, no auto-close on TP/SL)
+        self.portfolio_holds: Dict[str, ActiveAlphaPlay] = {}
+        
         # Settings
         self.min_alpha_score = getattr(settings, 'ALPHA_MIN_SCORE', 70.0)
         self.auto_approve = getattr(settings, 'ALPHA_AUTO_APPROVE', False)
@@ -168,14 +171,24 @@ class AlphaPlaysEngine:
                 plays = await self.db.get_alpha_plays(status='active')
                 logger.info(f"🎰 DB returned {len(plays)} active alpha play rows")
                 restored = 0
+                seen_symbols = set()
                 for play_data in plays:
                     play = self._reconstruct_active_play(play_data)
-                    if play:
-                        self.active_plays[play.id] = play
-                        restored += 1
-                        logger.info(f"🔁 Restored active alpha play from DB: {play.candidate.symbol} (id={play.id[:8]}...)")
-                    else:
-                        logger.warning(f"⚠️ Failed to reconstruct active play from DB row: {play_data.get('symbol', 'unknown')} (id={play_data.get('id', 'no-id')[:8] if play_data.get('id') else 'no-id'})")
+                    if not play:
+                        logger.warning(f"⚠️ Failed to reconstruct active play from DB row: {play_data.get('symbol', 'unknown')}")
+                        continue
+                    # Skip corrupted plays with no valid entry/SL
+                    if play.entry_price <= 0 and play.stop_loss <= 0 and play.take_profit_1 <= 0:
+                        logger.warning(f"⚠️ Skipping corrupted alpha play from DB: {play.candidate.symbol} (entry={play.entry_price}, sl={play.stop_loss}) — missing trade parameters")
+                        continue
+                    # Deduplicate by symbol
+                    if play.candidate.symbol in seen_symbols:
+                        logger.warning(f"⚠️ Skipping duplicate alpha play from DB: {play.candidate.symbol} (id={play.id[:8]}...)")
+                        continue
+                    seen_symbols.add(play.candidate.symbol)
+                    self.active_plays[play.id] = play
+                    restored += 1
+                    logger.info(f"🔁 Restored active alpha play from DB: {play.candidate.symbol} (id={play.id[:8]}...)")
                 logger.info(f"🔁 Restored {restored}/{len(plays)} active alpha plays from DB")
                 
                 # Re-enrich token info for plays with address-fragment symbols
@@ -237,10 +250,23 @@ class AlphaPlaysEngine:
                 logger.info(f"🔁 Restored {restored_pending}/{len(pending)} pending alpha plays from DB")
             except Exception as e:
                 logger.warning(f"Could not load pending alpha plays from DB: {e}")
+            
+            # Load portfolio holds
+            try:
+                portfolio = await self.db.get_alpha_plays(status='portfolio_hold', limit=50)
+                restored_portfolio = 0
+                for p in portfolio:
+                    play = self._reconstruct_active_play(p)
+                    if play:
+                        self.portfolio_holds[play.id] = play
+                        restored_portfolio += 1
+                logger.info(f"🔁 Restored {restored_portfolio} portfolio holds from DB")
+            except Exception as e:
+                logger.warning(f"Could not load portfolio holds from DB: {e}")
         else:
             logger.warning("🎰 No DB configured — alpha plays will NOT persist across restarts")
         
-        logger.info(f"✅ Alpha Plays Engine ready — {len(self.active_plays)} active, {len(self.pending_plays)} pending")
+        logger.info(f"✅ Alpha Plays Engine ready — {len(self.active_plays)} active, {len(self.pending_plays)} pending, {len(self.portfolio_holds)} portfolio")
     
     def _reconstruct_active_play(self, data: dict) -> Optional[ActiveAlphaPlay]:
         """Reconstruct an ActiveAlphaPlay from a DB dict row."""
@@ -310,7 +336,9 @@ class AlphaPlaysEngine:
                 """Get value from __play_meta__ first, then top-level DB row, then default."""
                 v = play_meta.get(field)
                 if v is None:
-                    v = data.get(field, default)
+                    v = data.get(field)
+                if v is None:
+                    v = default
                 if v is not None and cast:
                     try:
                         v = cast(v)
@@ -560,8 +588,13 @@ class AlphaPlaysEngine:
             
             return active_play
         
-        # Add to active tracking
-        self.active_plays[active_play.id] = active_play
+        # Route to appropriate tracking bucket
+        if candidate.trade_type == 'portfolio':
+            self.portfolio_holds[active_play.id] = active_play
+            active_play.status = 'portfolio_hold'
+            logger.info(f"💼 Portfolio hold approved: {symbol} | Entry: ${entry:.6f} | 1-4 week hold")
+        else:
+            self.active_plays[active_play.id] = active_play
         
         # Save to database and clean up old pending rows for this symbol
         if self.db:
@@ -695,11 +728,17 @@ class AlphaPlaysEngine:
         hit = (current_price <= entry) or (extremes['lowest'] <= entry)
         
         if hit:
-            play.status = 'active'
-            play.actual_entry = current_price
             del self.pending_alpha_limits[play_id]
             self.pending_alpha_extremes.pop(play_id, None)
-            self.active_plays[play_id] = play
+            play.actual_entry = current_price
+            
+            if play.candidate.trade_type == 'portfolio':
+                play.status = 'portfolio_hold'
+                self.portfolio_holds[play_id] = play
+                logger.info(f"💼 Portfolio limit filled for {play.candidate.symbol} at ${current_price:.6f}")
+            else:
+                play.status = 'active'
+                self.active_plays[play_id] = play
             
             if current_price > entry:
                 logger.info(f"🎯 Alpha limit hit for {play.candidate.symbol} at ${current_price:.6f} (was briefly at ${extremes['lowest']:.6f} ≤ entry ${entry:.6f}) — tracking started")
@@ -756,38 +795,45 @@ class AlphaPlaysEngine:
                 if not data:
                     continue
                 
-                current_price = data['price']
-                current_liquidity = data['liquidity']
+                current_price = data.get('price')
+                current_liquidity = data.get('liquidity')
+                
+                if current_price is None or current_price <= 0:
+                    logger.warning(f"Skipping {play.candidate.symbol}: invalid price {current_price}")
+                    continue
                 
                 play.current_price = current_price
                 
                 # Calculate P&L
-                if play.entry_price > 0:
+                if play.entry_price and play.entry_price > 0:
                     play.current_pnl = ((current_price - play.entry_price) / play.entry_price) * 100
                 
                 # Track highest price for trailing stop
-                if current_price > play.highest_price:
+                if play.highest_price is None or current_price > play.highest_price:
                     play.highest_price = current_price
                 
                 # Persist every cycle
                 await self._persist_play(play)
                 
                 # ─── RUG PROTECTION (all plays) ───
-                if play.entry_liquidity > 0 and current_liquidity > 0:
-                    liquidity_ratio = current_liquidity / play.entry_liquidity
+                entry_liq = play.entry_liquidity or 0
+                curr_liq = current_liquidity or 0
+                if entry_liq > 0 and curr_liq > 0:
+                    liquidity_ratio = curr_liq / entry_liq
                     if liquidity_ratio < 0.5:
                         await self._close_play(play, 'RUG_PULL',
                             f"🚨 <b>RUG PROTECTION TRIGGERED</b>\n\n"
                             f"<b>{play.candidate.symbol}</b> liquidity dropped {((1-liquidity_ratio)*100):.0f}%\n"
-                            f"Entry liq: ${play.entry_liquidity:,.0f}\n"
-                            f"Current liq: ${current_liquidity:,.0f}\n"
+                            f"Entry liq: ${entry_liq:,.0f}\n"
+                            f"Current liq: ${curr_liq:,.0f}\n"
                             f"Position closed to protect capital.")
                         continue
                 
                 # ─── TIME STOP (degen only) ───
-                if play.is_degen and play.time_stop_hours > 0 and play.approved_at:
+                time_stop = play.time_stop_hours or 0
+                if play.is_degen and time_stop > 0 and play.approved_at:
                     hours_elapsed = (datetime.utcnow() - play.approved_at).total_seconds() / 3600
-                    if hours_elapsed >= play.time_stop_hours:
+                    if hours_elapsed >= time_stop:
                         await self._close_play(play, 'TIME_STOP',
                             f"⏰ <b>TIME STOP</b>\n\n"
                             f"<b>{play.candidate.symbol}</b> held for {hours_elapsed:.0f}h with no breakout.\n"
@@ -798,22 +844,26 @@ class AlphaPlaysEngine:
                 if play.is_degen:
                     # ─── DEGEN STRATEGY ───
                     # TP1: +100% (2x) → sell 50%
-                    if not play.partial_sell_1_done and play.take_profit_1 > 0:
-                        if current_price >= play.take_profit_1:
+                    tp1 = play.take_profit_1 or 0
+                    if not play.partial_sell_1_done and tp1 > 0:
+                        if current_price >= tp1:
                             play.partial_sell_1_done = True
                             await self._persist_play(play)
                             await self._notify_partial_sell(play, 1, 50, "2x")
                     
                     # TP2: +400% (5x) → sell 25%
-                    if not play.partial_sell_2_done and play.partial_sell_1_done and play.take_profit_2 > 0:
-                        if current_price >= play.take_profit_2:
+                    tp2 = play.take_profit_2 or 0
+                    if not play.partial_sell_2_done and play.partial_sell_1_done and tp2 > 0:
+                        if current_price >= tp2:
                             play.partial_sell_2_done = True
                             await self._persist_play(play)
                             await self._notify_partial_sell(play, 2, 25, "5x")
                     
                     # Trailing stop: after TP2, if price drops trailing_stop_pct% from peak
-                    if play.partial_sell_2_done and play.highest_price > 0 and play.trailing_stop_pct > 0:
-                        trailing_level = play.highest_price * (1 - play.trailing_stop_pct / 100)
+                    trailing_pct = play.trailing_stop_pct or 0
+                    hp = play.highest_price or 0
+                    if play.partial_sell_2_done and hp > 0 and trailing_pct > 0:
+                        trailing_level = hp * (1 - trailing_pct / 100)
                         if current_price <= trailing_level:
                             await self._close_play(play, 'TRAILING_STOP',
                                 f"🎯 <b>TRAILING STOP HIT</b>\n\n"
@@ -825,20 +875,61 @@ class AlphaPlaysEngine:
                             continue
                 else:
                     # ─── STANDARD STRATEGY (non-degen) ───
-                    if play.status == 'active' and play.take_profit_1 > 0:
-                        if current_price >= play.take_profit_1:
+                    tp1_std = play.take_profit_1 or 0
+                    if play.status == 'active' and tp1_std > 0:
+                        if current_price >= tp1_std:
                             await self._handle_tp1_hit(play)
                     
-                    if play.status == 'tp1_hit' and play.take_profit_2 > 0:
-                        if current_price >= play.take_profit_2:
+                    tp2_std = play.take_profit_2 or 0
+                    if play.status == 'tp1_hit' and tp2_std > 0:
+                        if current_price >= tp2_std:
                             await self._handle_tp2_hit(play)
                     
-                    if play.status in ['active', 'tp1_hit'] and play.stop_loss > 0:
-                        if current_price <= play.stop_loss:
+                    sl = play.stop_loss or 0
+                    if play.status in ['active', 'tp1_hit'] and sl > 0:
+                        if current_price <= sl:
                             await self._handle_sl_hit(play)
                 
             except Exception as e:
                 logger.error(f"Error tracking alpha play {play_id}: {e}")
+    
+    async def track_portfolio_holds(self):
+        """
+        Track portfolio holds (long-term 1-4 week positions).
+        Updates price and P&L but does NOT auto-close on TP/SL.
+        Called periodically (every 5 minutes alongside track_active_plays).
+        """
+        if not self.portfolio_holds:
+            return
+        
+        logger.info(f"💼 Tracking {len(self.portfolio_holds)} portfolio holds...")
+        
+        for play_id, play in list(self.portfolio_holds.items()):
+            try:
+                data = await self._get_price_and_liquidity(play.candidate)
+                if not data:
+                    continue
+                
+                current_price = data.get('price')
+                if current_price is None or current_price <= 0:
+                    continue
+                
+                play.current_price = current_price
+                
+                # Calculate P&L
+                entry = play.actual_entry or play.entry_price
+                if entry and entry > 0:
+                    play.current_pnl = ((current_price - entry) / entry) * 100
+                
+                # Track highest price for peak reference
+                if play.highest_price is None or current_price > play.highest_price:
+                    play.highest_price = current_price
+                
+                # Persist every cycle
+                await self._persist_play(play)
+                
+            except Exception as e:
+                logger.error(f"Error tracking portfolio hold {play_id}: {e}")
     
     async def _notify_partial_sell(self, play: ActiveAlphaPlay, tp_num: int, pct_sold: int, multiplier: str):
         """Notify VIP about a partial sell on a degen play."""
@@ -946,12 +1037,22 @@ class AlphaPlaysEngine:
     
     async def _get_price_and_liquidity(self, candidate: AlphaPlayCandidate) -> Optional[dict]:
         """Fetch current price AND liquidity from DEXScreener API."""
+        # Recreate session if closed/missing
         if not self.session or self.session.closed:
-            return None
+            try:
+                self.session = aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(limit=5, limit_per_host=3),
+                    timeout=aiohttp.ClientTimeout(total=15)
+                )
+                logger.info("🔄 AlphaPlays: recreated aiohttp session")
+            except Exception as e:
+                logger.error(f"Failed to recreate alpha session: {e}")
+                return None
         
         token_addr = candidate.token_address
         pair_addr = candidate.pair_address
         chain = candidate.chain
+        symbol = candidate.symbol
         
         urls = []
         if token_addr:
@@ -959,8 +1060,12 @@ class AlphaPlaysEngine:
         if pair_addr and chain:
             urls.append(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair_addr}")
         
+        # Fallback: search by symbol if no addresses available
+        if not urls and symbol and symbol != 'UNKNOWN':
+            urls.append(f"https://api.dexscreener.com/latest/dex/search?q={symbol}")
+        
         if not urls:
-            logger.warning(f"No token/pair address for {candidate.symbol}, cannot fetch price")
+            logger.warning(f"No token/pair address or symbol for candidate, cannot fetch price")
             return None
         
         for url in urls:
@@ -975,6 +1080,13 @@ class AlphaPlaysEngine:
                             liquidity = float(best.get('liquidity', {}).get('usd', 0) or 0)
                             volume_24h = float(best.get('volume', {}).get('h24', 0) or 0)
                             if price > 0:
+                                # If we searched by symbol, verify the symbol matches
+                                if 'search?q=' in url:
+                                    base_sym = (best.get('baseToken', {}).get('symbol', '') or '').upper()
+                                    quote_sym = (best.get('quoteToken', {}).get('symbol', '') or '').upper()
+                                    if symbol.upper() not in [base_sym, quote_sym]:
+                                        logger.debug(f"Symbol mismatch: searched {symbol}, got {base_sym}/{quote_sym}")
+                                        continue
                                 return {
                                     'price': price,
                                     'liquidity': liquidity,
@@ -982,6 +1094,8 @@ class AlphaPlaysEngine:
                                     'dex_id': best.get('dexId', ''),
                                     'pair_address': best.get('pairAddress', '')
                                 }
+                    else:
+                        logger.debug(f"DEXScreener returned {resp.status} for {candidate.symbol}")
             except Exception as e:
                 logger.debug(f"Price fetch failed for {candidate.symbol} via {url}: {e}")
                 continue

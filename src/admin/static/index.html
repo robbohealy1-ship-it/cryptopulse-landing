@@ -159,9 +159,40 @@ tr:hover { background: #0f172a; }
 .sub-nav button.active { border-color: #38bdf8; color: #38bdf8; }
 .sub-panel { display: none; }
 .sub-panel.active { display: block; }
+
+/* Login Modal */
+.login-modal {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(15,23,42,0.95); display: none; align-items: center; justify-content: center;
+  z-index: 3000;
+}
+.login-modal.show { display: flex; }
+.login-box {
+  background: #1e293b; border: 1px solid #334155; border-radius: 16px;
+  width: 90%; max-width: 400px; padding: 32px; text-align: center;
+}
+.login-box h2 { color: #38bdf8; margin-bottom: 8px; }
+.login-box p { color: #94a3b8; font-size: 14px; margin-bottom: 24px; }
+.login-box input {
+  background: #0f172a; border: 1px solid #334155; color: #e2e8f0;
+  padding: 12px 16px; border-radius: 10px; font-size: 15px; width: 100%; margin-bottom: 16px;
+}
+.login-box input:focus { outline: none; border-color: #38bdf8; }
+.login-box .btn { width: 100%; justify-content: center; padding: 12px; font-size: 15px; }
+.login-error { color: #ef4444; font-size: 13px; margin-top: 12px; display: none; }
 </style>
 </head>
 <body>
+<!-- Login Modal -->
+<div id="loginModal" class="login-modal">
+  <div class="login-box">
+    <h2>CryptoPulse Admin</h2>
+    <p>Dashboard is password protected</p>
+    <input type="password" id="loginPassword" placeholder="Enter password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn" onclick="doLogin()">Sign In</button>
+    <div id="loginError" class="login-error">Invalid password</div>
+  </div>
+</div>
 <div class="container">
 
 <header>
@@ -271,6 +302,22 @@ tr:hover { background: #0f172a; }
         <div class="card"><h3>Total P&L</h3><div class="value" id="perfTotalPnl">--%</div></div>
         <div class="card"><h3>Avg per Trade</h3><div class="value" id="perfAvg">--%</div></div>
       </div>
+
+      <!-- Advanced Portfolio Metrics -->
+      <div class="section" style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:16px;margin-bottom:16px;">
+        <h3 style="color:#94a3b8;font-size:14px;margin-bottom:12px;">📊 Portfolio Metrics</h3>
+        <div class="grid" id="portfolioMetrics" style="margin-bottom:0;">
+          <div class="card"><h3>Sharpe</h3><div class="value" id="pmSharpe">--</div></div>
+          <div class="card"><h3>Sortino</h3><div class="value" id="pmSortino">--</div></div>
+          <div class="card"><h3>Profit Factor</h3><div class="value" id="pmPF">--</div></div>
+          <div class="card"><h3>Expectancy</h3><div class="value" id="pmExpectancy">--%</div></div>
+          <div class="card"><h3>Payoff Ratio</h3><div class="value" id="pmPayoff">--</div></div>
+          <div class="card"><h3>Max DD</h3><div class="value" id="pmMaxDD">--%</div></div>
+          <div class="card"><h3>Max Consec Loss</h3><div class="value" id="pmMaxLossStreak">--</div></div>
+          <div class="card"><h3>Avg Duration</h3><div class="value" id="pmAvgDuration">--</div></div>
+        </div>
+      </div>
+
       <div class="table-wrap">
         <h3 style="color:#94a3b8;font-size:13px;margin-bottom:8px;">By Symbol</h3>
         <table><thead><tr><th>Symbol</th><th>Count</th><th>Wins</th><th>Total P&L</th></tr></thead><tbody id="perfBySymbol"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody></table>
@@ -683,9 +730,47 @@ function switchTab(name) {
   if (name === 'alpha') { loadDexOpportunities(); loadAlphaPlays(); loadAlphaStats(); }
 }
 
+/* ---------- AUTH ---------- */
+function getAuthHeader() {
+  const pwd = localStorage.getItem('admin_password');
+  if (!pwd) return {};
+  return { 'Authorization': 'Basic ' + btoa('admin:' + pwd) };
+}
+
+function showLogin() {
+  document.getElementById('loginModal').classList.add('show');
+}
+
+function hideLogin() {
+  document.getElementById('loginModal').classList.remove('show');
+}
+
+async function doLogin() {
+  const pwd = document.getElementById('loginPassword').value.trim();
+  if (!pwd) return;
+  // Test the password against a simple endpoint
+  try {
+    const r = await fetch(API + '/api/status', { headers: { 'Authorization': 'Basic ' + btoa('admin:' + pwd) } });
+    if (r.status === 401) {
+      document.getElementById('loginError').style.display = 'block';
+      return;
+    }
+    if (!r.ok) throw new Error('Server error');
+    localStorage.setItem('admin_password', pwd);
+    hideLogin();
+    initDashboard();
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'Server error: ' + e.message;
+    document.getElementById('loginError').style.display = 'block';
+  }
+}
+
 async function fetchJSON(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers, getAuthHeader());
   try {
     const r = await fetch(API + url, opts);
+    if (r.status === 401) { showLogin(); throw new Error('Authentication required'); }
     if (!r.ok) throw new Error(await r.text());
     return await r.json();
   } catch (e) {
@@ -852,8 +937,10 @@ function renderActiveSignals(signals) {
       
       <!-- Actions -->
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${(s.is_limit_order && s.status === 'approved') ? `<button class="btn" style="flex:1;font-size:12px;padding:8px;background:#22c55e;" onclick="fillSignalModal('${s.id}', '${s.symbol}', ${s.entry_price || 0})">✅ Fill</button>` : ''}
         <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="editSignal('${s.id}')">✏️ Edit</button>
         <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="markTPModal('${s.id}', '${s.symbol}')">✅ Mark TP</button>
+        <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="viewSignalAudit('${s.id}', '${s.symbol}')">📋 Audit</button>
         <button class="btn danger" style="flex:1;font-size:12px;padding:8px;" onclick="closeSignalModal('${s.id}', '${s.symbol}', ${s.current_price || 0})">🔴 Close</button>
       </div>
     </div>`;
@@ -1029,6 +1116,22 @@ async function loadPerformance() {
     ).join('');
     tbody.innerHTML = rows || '<tr><td colspan="4" class="empty-state">No data</td></tr>';
   } catch (e) {}
+
+  // Load advanced portfolio metrics
+  try {
+    const pa = await fetchJSON('/api/portfolio/analytics?days=' + days);
+    const m = pa.metrics || {};
+    document.getElementById('pmSharpe').textContent = m.sharpe_ratio != null ? m.sharpe_ratio.toFixed(2) : '--';
+    document.getElementById('pmSortino').textContent = m.sortino_ratio != null ? m.sortino_ratio.toFixed(2) : '--';
+    document.getElementById('pmPF').textContent = m.profit_factor != null ? m.profit_factor.toFixed(2) : '--';
+    document.getElementById('pmExpectancy').textContent = (m.expectancy > 0 ? '+' : '') + (m.expectancy != null ? m.expectancy.toFixed(2) : '--') + '%';
+    document.getElementById('pmPayoff').textContent = m.payoff_ratio != null ? m.payoff_ratio.toFixed(2) : '--';
+    document.getElementById('pmMaxDD').textContent = (m.max_drawdown != null ? m.max_drawdown.toFixed(1) : '--') + '%';
+    document.getElementById('pmMaxLossStreak').textContent = m.max_consecutive_losses != null ? m.max_consecutive_losses : '--';
+    document.getElementById('pmAvgDuration').textContent = m.avg_duration_minutes != null ? Math.round(m.avg_duration_minutes) + 'm' : '--';
+  } catch (e) {
+    // Portfolio analytics may not have data yet
+  }
 }
 
 async function sendPerformance(channel) {
@@ -1413,17 +1516,23 @@ function renderAlphaActive(plays) {
     const pnlEmoji = p.current_pnl >= 0 ? '🟢' : '🔴';
     const chainEmoji = getChainEmoji(p.chain);
     
+    const entryVal = p.entry_price != null ? p.entry_price.toFixed(6) : 'N/A';
+    const currentVal = p.current_price != null ? p.current_price.toFixed(6) : 'N/A';
+    const slVal = p.stop_loss != null ? p.stop_loss.toFixed(6) : 'N/A';
+    const tp1Val = p.take_profit_1 != null ? p.take_profit_1.toFixed(6) : 'N/A';
+    const tp2Val = p.take_profit_2 != null ? p.take_profit_2.toFixed(6) : 'N/A';
+    const mcVal = p.market_cap != null ? (p.market_cap / 1e6).toFixed(2) + 'M' : 'N/A';
     html += `<tr>
-      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${chainEmoji} ${p.chain.toUpperCase()}</small></td>
-      <td>${getTradeTypeBadge(p.trade_type)}<br><small style="color:#64748b;">${p.time_frame}</small></td>
-      <td>$${p.entry_price ? p.entry_price.toFixed(6) : 'N/A'}</td>
-      <td>$${p.current_price ? p.current_price.toFixed(6) : 'N/A'}</td>
-      <td><span class="change ${pnlClass}">${pnlEmoji} ${p.current_pnl >= 0 ? '+' : ''}${p.current_pnl}%</span></td>
-      <td style="color:#ef4444;">$${p.stop_loss ? p.stop_loss.toFixed(6) : 'N/A'}</td>
-      <td style="color:#22c55e;">$${p.take_profit_1 ? p.take_profit_1.toFixed(6) : 'N/A'}</td>
-      <td style="color:#22c55e;">$${p.take_profit_2 ? p.take_profit_2.toFixed(6) : 'N/A'}</td>
-      <td><span class="badge ${p.status}">${p.status.toUpperCase()}</span></td>
-      <td>$${(p.market_cap / 1e6).toFixed(2)}M</td>
+      <td><b>${p.symbol}</b><br><small style="color:#64748b;">${chainEmoji} ${(p.chain || '').toUpperCase()}</small></td>
+      <td>${getTradeTypeBadge(p.trade_type)}<br><small style="color:#64748b;">${p.time_frame || ''}</small></td>
+      <td>$${entryVal}</td>
+      <td>$${currentVal}</td>
+      <td><span class="change ${pnlClass}">${pnlEmoji} ${p.current_pnl >= 0 ? '+' : ''}${p.current_pnl != null ? p.current_pnl.toFixed(2) : '0.00'}%</span></td>
+      <td style="color:#ef4444;">$${slVal}</td>
+      <td style="color:#22c55e;">$${tp1Val}</td>
+      <td style="color:#22c55e;">$${tp2Val}</td>
+      <td><span class="badge ${p.status || 'active'}">${(p.status || 'active').toUpperCase()}</span></td>
+      <td>$${mcVal}</td>
       <td>
         <div style="display:flex;gap:4px;flex-wrap:wrap;">
           <button class="btn" style="font-size:11px;padding:3px 8px;background:#3b82f6;color:#fff;" onclick="editAlpha('${p.id}', '${p.symbol}', ${p.entry_price || 0}, ${p.stop_loss || 0}, ${p.take_profit_1 || 0}, ${p.take_profit_2 || 0}, '${p.position_size || ''}')">✏️ Edit</button>
@@ -1809,6 +1918,40 @@ async function confirmMarkTP() {
   }
 }
 
+function fillSignalModal(signalId, symbol, entryPrice) {
+  document.getElementById('fillSignalId').value = signalId;
+  document.getElementById('fillPrice').value = entryPrice.toFixed(6);
+  document.getElementById('fillModalTitle').textContent = `Fill Limit Order - ${symbol}`;
+  document.getElementById('fillModal').classList.add('show');
+}
+
+async function confirmFillSignal() {
+  const signalId = document.getElementById('fillSignalId').value;
+  const fillPrice = parseFloat(document.getElementById('fillPrice').value);
+
+  if (!signalId || !fillPrice || fillPrice <= 0) {
+    return showToast('Please enter a valid fill price', 'error');
+  }
+
+  try {
+    const result = await fetchJSON(`/api/signals/${signalId}/fill`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ fill_price: fillPrice })
+    });
+
+    if (result.success) {
+      showToast(`Limit order filled at $${fillPrice}! Tracking started.`);
+      closeModal('fillModal');
+      loadActiveSignals();
+    } else {
+      showToast('Error: ' + result.message, 'error');
+    }
+  } catch (e) {
+    showToast('Error filling signal: ' + e.message, 'error');
+  }
+}
+
 function closeSignalModal(signalId, symbol, currentPrice) {
   document.getElementById('closeSignalId').value = signalId;
   document.getElementById('closePrice').value = currentPrice.toFixed(6);
@@ -1846,17 +1989,63 @@ async function confirmCloseSignal() {
   }
 }
 
+async function viewSignalAudit(signalId, symbol) {
+  document.getElementById('auditModalTitle').textContent = 'Audit Trail — ' + symbol;
+  document.getElementById('auditModal').classList.add('show');
+  document.getElementById('auditContent').innerHTML = '<div class="empty-state">Loading audit trail...</div>';
+  
+  try {
+    const data = await fetchJSON('/api/audit/signal/' + signalId);
+    const entries = data.entries || [];
+    if (entries.length === 0) {
+      document.getElementById('auditContent').innerHTML = '<div class="empty-state">No audit entries found for this signal.</div>';
+      return;
+    }
+    
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="border-bottom:1px solid #334155;"><th style="text-align:left;padding:8px;color:#94a3b8;">Time</th><th style="text-align:left;padding:8px;color:#94a3b8;">Event</th><th style="text-align:left;padding:8px;color:#94a3b8;">Price</th><th style="text-align:left;padding:8px;color:#94a3b8;">Details</th></tr></thead><tbody>';
+    for (const entry of entries) {
+      const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'N/A';
+      const eventType = entry.event_type || 'unknown';
+      const price = entry.price != null ? '$' + Number(entry.price).toFixed(6) : '-';
+      const pnl = entry.pnl != null ? (entry.pnl > 0 ? '+' : '') + entry.pnl.toFixed(2) + '%' : '';
+      const details = entry.details ? JSON.stringify(entry.details).replace(/[{}"]/g, '').replace(/,/g, ', ').substring(0, 120) : '';
+      const eventColor = eventType.includes('hit') ? '#22c55e' : eventType.includes('rejected') || eventType.includes('expired') ? '#ef4444' : eventType.includes('breakeven') ? '#f59e0b' : '#94a3b8';
+      html += `<tr style="border-bottom:1px solid #1e293b;"><td style="padding:8px;color:#64748b;white-space:nowrap;">${ts}</td><td style="padding:8px;color:${eventColor};font-weight:600;">${eventType}</td><td style="padding:8px;color:#e2e8f0;">${price} <span style="color:#64748b;font-size:10px;">${pnl}</span></td><td style="padding:8px;color:#94a3b8;word-break:break-all;">${details}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    document.getElementById('auditContent').innerHTML = html;
+  } catch (e) {
+    document.getElementById('auditContent').innerHTML = '<div class="empty-state">Error loading audit trail: ' + e.message + '</div>';
+  }
+}
+
 function closeModal(modalId) {
   document.getElementById(modalId).classList.remove('show');
 }
 
-// Init
-updateClock();
-setInterval(updateClock, 30000);
-loadStatus();
-loadStats();
-setInterval(loadStats, 30000); // Stats every 30s
-setInterval(loadStatus, 10000); // Status every 10s for faster updates
+function initDashboard() {
+  updateClock();
+  setInterval(updateClock, 30000);
+  loadStatus();
+  loadStats();
+  setInterval(loadStats, 30000);
+  setInterval(loadStatus, 10000);
+}
+
+// Check if auth is required on startup
+(async function checkAuthOnLoad() {
+  try {
+    const r = await fetch(API + '/api/status', { headers: getAuthHeader() });
+    if (r.status === 401) {
+      showLogin();
+      return;
+    }
+    initDashboard();
+  } catch (e) {
+    // Server might be down — still init to show offline status
+    initDashboard();
+  }
+})();
 </script>
 
 <!-- Edit Signal Modal -->
@@ -1920,6 +2109,28 @@ setInterval(loadStatus, 10000); // Status every 10s for faster updates
   </div>
 </div>
 
+<!-- Fill Limit Order Modal -->
+<div id="fillModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 id="fillModalTitle">Fill Limit Order</h3>
+      <button class="close-btn" onclick="closeModal('fillModal')">×</button>
+    </div>
+    <input type="hidden" id="fillSignalId">
+    <div class="form-group">
+      <label>Fill Price</label>
+      <input type="number" id="fillPrice" step="0.000001" placeholder="0.000000">
+    </div>
+    <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">
+      This will mark the limit order as filled, set the actual entry price, start TP/SL tracking, and send a fill notification to the VIP channel.
+    </p>
+    <div style="display:flex;gap:8px;">
+      <button class="btn ghost" onclick="closeModal('fillModal')" style="flex:1;">Cancel</button>
+      <button class="btn success" onclick="confirmFillSignal()">✅ Fill & Track</button>
+    </div>
+  </div>
+</div>
+
 <!-- Close Signal Modal -->
 <div id="closeModal" class="modal">
   <div class="modal-content">
@@ -1947,6 +2158,19 @@ setInterval(loadStatus, 10000); // Status every 10s for faster updates
     <div style="display:flex;gap:8px;">
       <button class="btn ghost" onclick="closeModal('closeModal')">Cancel</button>
       <button class="btn danger" onclick="confirmCloseSignal()">🔴 Close Trade</button>
+    </div>
+  </div>
+</div>
+
+<!-- Signal Audit Modal -->
+<div id="auditModal" class="modal">
+  <div class="modal-content" style="max-width:600px;max-height:80vh;overflow-y:auto;">
+    <div class="modal-header">
+      <h3 id="auditModalTitle">Signal Audit Trail</h3>
+      <button class="close-btn" onclick="closeModal('auditModal')">×</button>
+    </div>
+    <div id="auditContent" style="font-size:13px;">
+      <div class="empty-state">Loading audit trail...</div>
     </div>
   </div>
 </div>

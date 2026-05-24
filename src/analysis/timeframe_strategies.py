@@ -10,6 +10,7 @@ from datetime import datetime
 
 from src.models.signal import SignalDirection, SetupType
 from src.analysis.institutional_analyzer import InstitutionalAnalyzer
+from src.analysis.stop_validator import StopValidator
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,6 +22,7 @@ class BaseTimeframeStrategy:
     def __init__(self, timeframe: str):
         self.timeframe = timeframe
         self.analyzer = InstitutionalAnalyzer()
+        self.stop_validator = StopValidator()
         self.min_confidence = 85
         self.min_risk_reward = 2.0
         self.session_required = True
@@ -248,6 +250,42 @@ class M15Strategy(BaseTimeframeStrategy):
             tp2 = entry - risk * 3.0
             tp3 = entry - risk * 4.0
         
+        # GUARD: prevent inverted SL and negative TPs
+        if direction == SignalDirection.LONG and sl >= entry:
+            sl = entry * 0.95
+            risk = entry - sl
+            tp1 = entry + risk * 2.0
+            tp2 = entry + risk * 3.0
+            tp3 = entry + risk * 4.0
+        elif direction == SignalDirection.SHORT and sl <= entry:
+            sl = entry * 1.05
+            risk = sl - entry
+            tp1 = entry - risk * 2.0
+            tp2 = entry - risk * 3.0
+            tp3 = entry - risk * 4.0
+        min_tp = entry * 0.1 if entry > 0 else 0.0001
+        if tp3 <= 0:
+            tp3 = min_tp
+        if tp2 <= 0:
+            tp2 = min_tp * 2
+        if tp1 <= 0:
+            tp1 = min_tp * 3
+        
+        # SMART STOP VALIDATION FOR 15M
+        is_valid, adjusted_stop, warning = self.stop_validator.validate_stop(
+            entry=entry, stop=sl, timeframe='15m', df=df, direction=direction.value
+        )
+        if not is_valid and adjusted_stop:
+            logger.warning(f"15m stop adjusted: ${sl:.8f} -> ${adjusted_stop:.8f}. {warning}")
+            sl = adjusted_stop
+            risk = abs(entry - sl)
+            if direction == SignalDirection.LONG:
+                tp1, tp2, tp3 = entry + risk * 2.0, entry + risk * 3.0, entry + risk * 4.0
+            else:
+                tp1, tp2, tp3 = entry - risk * 2.0, entry - risk * 3.0, entry - risk * 4.0
+        elif warning:
+            setup['stop_warning'] = warning
+        
         return entry, sl, tp1, tp2, tp3
 
 
@@ -361,6 +399,42 @@ class H1Strategy(BaseTimeframeStrategy):
             tp2 = entry - risk * 3.5
             tp3 = entry - risk * 5.0
         
+        # GUARD: prevent inverted SL and negative TPs
+        if direction == SignalDirection.LONG and sl >= entry:
+            sl = entry * 0.95
+            risk = entry - sl
+            tp1 = entry + risk * 2.5
+            tp2 = entry + risk * 3.5
+            tp3 = entry + risk * 5.0
+        elif direction == SignalDirection.SHORT and sl <= entry:
+            sl = entry * 1.05
+            risk = sl - entry
+            tp1 = entry - risk * 2.5
+            tp2 = entry - risk * 3.5
+            tp3 = entry - risk * 5.0
+        min_tp = entry * 0.1 if entry > 0 else 0.0001
+        if tp3 <= 0:
+            tp3 = min_tp
+        if tp2 <= 0:
+            tp2 = min_tp * 2
+        if tp1 <= 0:
+            tp1 = min_tp * 3
+        
+        # SMART STOP VALIDATION FOR 1H
+        is_valid, adjusted_stop, warning = self.stop_validator.validate_stop(
+            entry=entry, stop=sl, timeframe='1h', df=df, direction=direction.value
+        )
+        if not is_valid and adjusted_stop:
+            logger.warning(f"1h stop adjusted: ${sl:.8f} -> ${adjusted_stop:.8f}. {warning}")
+            sl = adjusted_stop
+            risk = abs(entry - sl)
+            if direction == SignalDirection.LONG:
+                tp1, tp2, tp3 = entry + risk * 2.5, entry + risk * 3.5, entry + risk * 5.0
+            else:
+                tp1, tp2, tp3 = entry - risk * 2.5, entry - risk * 3.5, entry - risk * 5.0
+        elif warning:
+            setup['stop_warning'] = warning
+        
         return entry, sl, tp1, tp2, tp3
 
 
@@ -430,7 +504,7 @@ class H4Strategy(BaseTimeframeStrategy):
     
     def calculate_entry_sl_tp(self, df: pd.DataFrame, setup: Dict,
                                direction: SignalDirection) -> Tuple[float, float, float, float, float]:
-        """4h: Wide entries, 3R minimum, large targets"""
+        """4h: Wide entries, 3R minimum, large targets with smart stop validation"""
         current = df['close'].iloc[-1]
         
         # Use recent swing for SL reference
@@ -450,6 +524,57 @@ class H4Strategy(BaseTimeframeStrategy):
             tp1 = entry - risk * 3.0
             tp2 = entry - risk * 4.5
             tp3 = entry - risk * 6.0
+        
+        # GUARD: prevent inverted SL and negative TPs
+        if direction == SignalDirection.LONG and sl >= entry:
+            sl = entry * 0.95
+            risk = entry - sl
+            tp1 = entry + risk * 3.0
+            tp2 = entry + risk * 4.5
+            tp3 = entry + risk * 6.0
+        elif direction == SignalDirection.SHORT and sl <= entry:
+            sl = entry * 1.05
+            risk = sl - entry
+            tp1 = entry - risk * 3.0
+            tp2 = entry - risk * 4.5
+            tp3 = entry - risk * 6.0
+        min_tp = entry * 0.1 if entry > 0 else 0.0001
+        if tp3 <= 0:
+            tp3 = min_tp
+        if tp2 <= 0:
+            tp2 = min_tp * 2
+        if tp1 <= 0:
+            tp1 = min_tp * 3
+        
+        # SMART STOP VALIDATION: Check if stop makes sense for 4h structure
+        is_valid, adjusted_stop, warning = self.stop_validator.validate_stop(
+            entry=entry,
+            stop=sl,
+            timeframe='4h',
+            df=df,
+            direction=direction.value
+        )
+        
+        if not is_valid and adjusted_stop:
+            # Stop is too tight - use adjusted stop
+            logger.warning(f"4h stop adjusted: ${sl:.8f} -> ${adjusted_stop:.8f}. Reason: {warning}")
+            sl = adjusted_stop
+            # Recalculate TPs with new stop
+            if direction == SignalDirection.LONG:
+                risk = entry - sl
+                tp1 = entry + risk * 3.0
+                tp2 = entry + risk * 4.5
+                tp3 = entry + risk * 6.0
+            else:
+                risk = sl - entry
+                tp1 = entry - risk * 3.0
+                tp2 = entry - risk * 4.5
+                tp3 = entry - risk * 6.0
+        elif warning:
+            # Stop is valid but has a warning (tight structure, etc.)
+            logger.info(f"4h stop warning: {warning}")
+            # Store warning in setup for signal message
+            setup['stop_warning'] = warning
         
         return entry, sl, tp1, tp2, tp3
 
@@ -544,6 +669,44 @@ class DailyStrategy(BaseTimeframeStrategy):
             tp1 = entry - risk * 4.0
             tp2 = entry - risk * 6.0
             tp3 = entry - risk * 8.0
+        
+        # GUARD: prevent inverted SL (SL must be below entry for LONG, above for SHORT)
+        if direction == SignalDirection.LONG and sl >= entry:
+            sl = entry * 0.95
+            risk = entry - sl
+            tp1 = entry + risk * 4.0
+            tp2 = entry + risk * 6.0
+            tp3 = entry + risk * 8.0
+        elif direction == SignalDirection.SHORT and sl <= entry:
+            sl = entry * 1.05
+            risk = sl - entry
+            tp1 = entry - risk * 4.0
+            tp2 = entry - risk * 6.0
+            tp3 = entry - risk * 8.0
+        
+        # GUARD: prevent negative or zero TPs for very low-priced tokens
+        min_tp = entry * 0.1 if entry > 0 else 0.0001
+        if tp3 <= 0:
+            tp3 = min_tp
+        if tp2 <= 0:
+            tp2 = min_tp * 2
+        if tp1 <= 0:
+            tp1 = min_tp * 3
+        
+        # SMART STOP VALIDATION FOR DAILY
+        is_valid, adjusted_stop, warning = self.stop_validator.validate_stop(
+            entry=entry, stop=sl, timeframe='1d', df=df, direction=direction.value
+        )
+        if not is_valid and adjusted_stop:
+            logger.warning(f"1d stop adjusted: ${sl:.8f} -> ${adjusted_stop:.8f}. {warning}")
+            sl = adjusted_stop
+            risk = abs(entry - sl)
+            if direction == SignalDirection.LONG:
+                tp1, tp2, tp3 = entry + risk * 4.0, entry + risk * 6.0, entry + risk * 8.0
+            else:
+                tp1, tp2, tp3 = entry - risk * 4.0, entry - risk * 6.0, entry - risk * 8.0
+        elif warning:
+            setup['stop_warning'] = warning
         
         return entry, sl, tp1, tp2, tp3
 

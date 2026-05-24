@@ -17,6 +17,9 @@ class ChannelPublisher:
         self.free_channel_id = settings.TELEGRAM_FREE_CHANNEL_ID
         self.vip_channel_id = settings.TELEGRAM_VIP_CHANNEL_ID
         self.chart_generator = ChartGenerator()
+        # Deduplication: track which (signal_id, event_type) combos have been sent
+        # to prevent duplicate messages if stale recovery fires or signal is re-processed
+        self._sent_notifications: set = set()
 
     async def _send_with_retry(self, send_func, max_retries=3, backoff=2):
         """Retry Telegram sends on network errors with exponential backoff."""
@@ -49,32 +52,31 @@ class ChannelPublisher:
         try:
             vip_message = self._format_signal_for_channel(signal, vip_only=True)
             
-            # Generate chart with fallback to text-only if it fails
-            chart_path = None
+            # Send chart FIRST so it appears at the top of the thread
+            chart_msg_id = None
             try:
                 chart_path = await self.chart_generator.generate_chart(signal)
+                if chart_path:
+                    with open(chart_path, 'rb') as photo:
+                        short_caption = f"📊 {signal.symbol} | {signal.direction.value} | {signal.timeframe}"
+                        chart_msg = await self.bot.send_photo(
+                            chat_id=self.vip_channel_id,
+                            photo=photo,
+                            caption=short_caption,
+                            parse_mode='HTML'
+                        )
+                        chart_msg_id = chart_msg.message_id
             except Exception as chart_err:
-                logger.warning(f"Chart generation failed for {signal.symbol}, sending text-only: {chart_err}")
+                logger.warning(f"Chart generation failed for {signal.symbol}: {chart_err}")
             
-            if chart_path:
-                with open(chart_path, 'rb') as photo:
-                    msg = await self.bot.send_photo(
-                        chat_id=self.vip_channel_id,
-                        photo=photo,
-                        caption=vip_message,
-                        parse_mode='HTML'
-                    )
-                    signal.vip_channel_message_id = msg.message_id
-            else:
-                msg = await self.bot.send_message(
-                    chat_id=self.vip_channel_id,
-                    text=vip_message,
-                    parse_mode='HTML'
-                )
-                signal.vip_channel_message_id = msg.message_id
+            # Send full text as reply to chart (or standalone if no chart)
+            kwargs = {'chat_id': self.vip_channel_id, 'text': vip_message, 'parse_mode': 'HTML'}
+            if chart_msg_id:
+                kwargs['reply_to_message_id'] = chart_msg_id
+            msg = await self.bot.send_message(**kwargs)
+            signal.vip_channel_message_id = msg.message_id
             
             signal.vip_channel_posted = True
-            # NOTE: Do NOT set status here — on_signal_approved handles status based on order type
             logger.info(f"Published signal {signal.symbol} to VIP channel")
             
         except Exception as e:
@@ -164,6 +166,15 @@ class ChannelPublisher:
         
         return url
     
+    def _get_referral_cta(self) -> str:
+        """Return a prominent referral link CTA if AFFILIATE_CUSTOM_URL is configured."""
+        custom_url = settings.AFFILIATE_CUSTOM_URL
+        if not custom_url:
+            return ""
+        return f"""\n� <a href="{custom_url}"><b>Trade {self._current_symbol or ''} on MEXC</b></a> 🔷\n<i>Low fees · Deep liquidity · Support the channel</i>\n"""
+    
+    _current_symbol: str = ""
+    
     async def send_free_channel_message(self, text: str, parse_mode: str = 'HTML'):
         """Send a custom message to the free channel (for dashboard campaigns)"""
         try:
@@ -219,6 +230,7 @@ Join VIP to get:
             
             link = self._get_exchange_link(signal.symbol)
             ticker = signal.symbol.replace('/', '')
+            self._current_symbol = ticker
             
             # Build analysis section
             setup_name = signal.setup_type.value.replace('_', ' ').title()
@@ -307,7 +319,8 @@ TP1: ${signal.take_profit_1:.8f}
 📊 <b>Risk/Reward:</b> 1:{signal.risk_reward:.2f}
 ⚡ <b>Confidence:</b> {signal.confidence:.1f}%
 {chart_section}
-<b>� Institutional Analysis:</b>
+{self._get_referral_cta()}
+<b>📋 Analysis:</b>
 {signal.reasoning or 'Analysis loading...'}
 
 <b>📊 Market Context:</b>
@@ -328,13 +341,13 @@ TP1: ${signal.take_profit_1:.8f}
         else:
             link = self._get_exchange_link(signal.symbol)
             ticker = signal.symbol.replace('/', '')
+            self._current_symbol = ticker
             
             message = f"""
 {direction_emoji} <b>FREE SIGNAL</b> {direction_emoji}
 
-<a href="{link}"><b>#{ticker}</b></a>
-<b>Direction:</b> {signal.direction.value}
-
+<a href="{link}"><b>#{ticker}</b></a> | {signal.direction.value}
+{self._get_referral_cta()}
 💰 <b>Entry:</b> ${signal.entry_price:.8f}
 🛑 <b>Stop Loss:</b> ${signal.stop_loss:.8f}
 
@@ -370,25 +383,30 @@ Join VIP for premium signals!
             logger.error(f"Error updating signal: {e}")
     
     async def send_tp_hit(self, signal: TradingSignal, tp_level: int):
+        dedup_key = f"{signal.id}:tp{tp_level}"
+        if dedup_key in self._sent_notifications:
+            logger.debug(f"🛡️ Deduplicating TP{tp_level} hit for {signal.symbol}")
+            return
+        self._sent_notifications.add(dedup_key)
+        
         # VIP channel gets full update
         tp_val = getattr(signal, f'take_profit_{tp_level}', None)
         tp_str = f"${tp_val:.4f}" if tp_val is not None else "N/A"
-        vip_text = f"✅ <b>TP{tp_level} HIT!</b>\n\n"
-        vip_text += f"Target {tp_str} reached\n"
+        vip_text = f"🎯 <b>TP{tp_level} HIT</b> | {signal.symbol}\n"
+        vip_text += f"Target {tp_str} reached"
         
         if tp_level == 1:
-            vip_text += "\n💡 <b>Tip:</b> Move stop loss to breakeven"
-            vip_text += "\n🎯 <b>Next targets:</b> TP2 & TP3 still active"
+            vip_text += "\n➡️ Next: TP2, TP3 | SL → breakeven suggested"
         elif tp_level == 2:
-            vip_text += "\n🚀 <b>Halfway to max profit!</b>"
+            vip_text += "\n➡️ Next: TP3"
         elif tp_level == 3:
-            vip_text += "\n🎉 <b>MAX PROFIT ACHIEVED!</b>"
+            vip_text += "\n✅ Full position closed"
         
         # Send to VIP
         if signal.vip_channel_message_id:
             await self.bot.send_message(
                 chat_id=self.vip_channel_id,
-                text=f"📢 <b>UPDATE - {signal.symbol}</b>\n\n{vip_text}",
+                text=vip_text,
                 parse_mode='HTML'
             )
         
@@ -415,20 +433,15 @@ Join VIP for premium signals!
         if not signal.free_channel_message_id:
             return
         
+        dedup_key = f"{signal.id}:tp{tp_level}_free"
+        if dedup_key in self._sent_notifications:
+            return
+        self._sent_notifications.add(dedup_key)
+        
         tp_val = getattr(signal, f'take_profit_{tp_level}', None)
         tp_str = f"${tp_val:.4f}" if tp_val is not None else "N/A"
-        free_text = f"🎉 <b>{signal.symbol} TP{tp_level} HIT!</b>\n\n"
-        free_text += f"Target {tp_str} reached\n\n"
-        
-        if tp_level == 1:
-            free_text += "💎 <b>Want TP2, TP3 and live updates?</b>\n"
-        elif tp_level == 2:
-            free_text += "💎 <b>TP2 hit! VIP members getting TP3 target...</b>\n"
-        elif tp_level == 3:
-            free_text += "💎 <b>MAX PROFIT! VIP members just banked full gains!</b>\n"
-        
-        free_text += "Join VIP for full trade management!\n\n"
-        free_text += f"👉 DM @{settings.TELEGRAM_VIP_BOT_USERNAME} for VIP access"
+        free_text = f"� <b>{signal.symbol} TP{tp_level} HIT</b>\nTarget {tp_str} reached\n\n"
+        free_text += f"Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot'}"
         
         await self.bot.send_message(
             chat_id=self.free_channel_id,
@@ -446,36 +459,31 @@ Join VIP for premium signals!
         await self.update_signal(signal, update_text)
     
     async def send_trade_closed(self, signal: TradingSignal, result: str, pnl: float):
-        emoji = "✅" if pnl > 0 else "❌"
+        dedup_key = f"{signal.id}:closed"
+        if dedup_key in self._sent_notifications:
+            logger.debug(f"🛡️ Deduplicating trade close for {signal.symbol}")
+            return
+        self._sent_notifications.add(dedup_key)
+        
         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
         
-        # VIP gets full result message
-        vip_text = f"""{emoji} <b>TRADE CLOSED</b> {emoji}
-
-📊 <b>{signal.symbol}</b> {signal.direction.value}
-<b>{result}</b>
-
-💰 <b>Performance:</b>
-• Entry: ${signal.actual_entry or signal.entry_price:.4f}
-• Exit: ${signal.actual_exit or signal.entry_price:.4f}
-• P&L: {pnl_emoji} {pnl:+.2f}%
-
-⏰ Closed: {datetime.utcnow().strftime('%H:%M UTC')}
-"""
+        # VIP gets concise result
+        vip_text = (
+            f"{'✅' if pnl > 0 else '❌'} <b>TRADE CLOSED</b> | {signal.symbol} {signal.direction.value}\n"
+            f"Result: {result}\n"
+            f"Entry: ${signal.actual_entry or signal.entry_price:.4f} → Exit: ${signal.actual_exit or signal.entry_price:.4f}\n"
+            f"P&L: {pnl_emoji} {pnl:+.2f}%\n"
+            f"Closed: {datetime.utcnow().strftime('%H:%M UTC')}"
+        )
         
         # Free gets teaser
-        free_text = f"""{emoji} <b>TRADE CLOSED</b>
-
-📊 <b>{signal.symbol}</b> {signal.direction.value}
-Result: {result}
-P&L: {pnl_emoji} {pnl:+.2f}%
-
-💎 VIP members saw this live.
-Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot'}
-"""
+        free_text = (
+            f"{'✅' if pnl > 0 else '❌'} <b>TRADE CLOSED</b> | {signal.symbol}\n"
+            f"P&L: {pnl_emoji} {pnl:+.2f}%\n\n"
+            f"Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot'}"
+        )
         
         try:
-            # Send to VIP channel
             if self.vip_channel_id:
                 await self.bot.send_message(
                     chat_id=self.vip_channel_id,
@@ -483,12 +491,11 @@ Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-                logger.info(f"Trade closed result sent to VIP: {signal.symbol} ({pnl:+.2f}%)")
+                logger.info(f"Trade closed sent to VIP: {signal.symbol} ({pnl:+.2f}%)")
         except Exception as e:
             logger.error(f"Error sending trade close to VIP: {e}")
         
         try:
-            # Send to Free channel
             if self.free_channel_id:
                 await self.bot.send_message(
                     chat_id=self.free_channel_id,
@@ -496,9 +503,6 @@ Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-                logger.info(f"Trade closed teaser sent to Free: {signal.symbol} ({pnl:+.2f}%)")
+                logger.info(f"Trade closed sent to Free: {signal.symbol} ({pnl:+.2f}%)")
         except Exception as e:
             logger.error(f"Error sending trade close to Free: {e}")
-        
-        # Also update original messages as reply
-        await self.update_signal(signal, f"{emoji} <b>TRADE CLOSED</b>\nResult: {result}\nP&L: {pnl:+.2f}%")

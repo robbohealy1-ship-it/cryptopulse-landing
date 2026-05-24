@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     
     NEWS_API_KEY: Optional[str] = None
     
+    # LLM / AI Content Generation (optional)
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: Optional[str] = "gpt-4o-mini"
+    AI_DAILY_SUMMARY_ENABLED: bool = False
+    AI_EDUCATION_ENABLED: bool = False
+    
     # Fundamental Data Sources (all optional)
     CRYPTOPANIC_API_KEY: Optional[str] = None
     GLASSNODE_API_KEY: Optional[str] = None
@@ -62,6 +68,30 @@ class Settings(BaseSettings):
     SIGNAL_EXPIRY_MINUTES: int = 120
     MIN_RISK_REWARD: float = 2.0
     
+    # 8-Stage Signal Validation Pipeline
+    GRADE_THRESHOLDS: dict = {
+        'A_PLUS': 92,
+        'A': 85,
+        'B': 75,
+        'C': 65,
+    }
+    VALIDATION_WEIGHTS: dict = {
+        'structural': 0.10,
+        'risk_reward': 0.15,
+        'technical': 0.25,
+        'context': 0.20,
+        'liquidity': 0.15,
+        'institutional': 0.05,
+        'historical': 0.10,
+    }
+    MIN_RISK_REWARD_BY_TIMEFRAME: dict = {
+        '5m': 2.0,
+        '15m': 1.5,
+        '1h': 1.5,
+        '4h': 1.0,
+        '1d': 1.0,
+    }
+    
     # Free channel delay after VIP (minutes)
     FREE_CHANNEL_DELAY_MINUTES: int = 10
     
@@ -79,6 +109,10 @@ class Settings(BaseSettings):
     # Custom affiliate URL (overrides everything above when AFFILIATE_EXCHANGE=custom)
     # Paste ANY link you want here - Coinbase, Kraken, Luno, a blog, anything
     AFFILIATE_CUSTOM_URL: Optional[str] = None  # e.g. "https://kraken.com/?ref=XYZ"
+    
+    # Trust Wallet address for portfolio tracking (shown in alpha plays)
+    # DeBank profile link will be generated automatically
+    TRUST_WALLET_ADDRESS: Optional[str] = None  # e.g. "0x1234..."
     
     # Marketing automation settings
     MARKETING_POSTS_PER_DAY: int = 4  # Posts per day to free channel
@@ -108,6 +142,10 @@ class Settings(BaseSettings):
     
     # Admin Dashboard
     ADMIN_DASHBOARD_PORT: int = 8080
+    ADMIN_DASHBOARD_PASSWORD: Optional[str] = None  # Set to enable dashboard auth
+    
+    # Limit Order Settings
+    LIMIT_ORDER_TIMEOUT_HOURS: int = 24  # Auto-cancel limit orders not filled within this time
     
     # Viral content generation
     ENABLE_VIRAL_CONTENT: bool = True  # Generate shareable images for signals

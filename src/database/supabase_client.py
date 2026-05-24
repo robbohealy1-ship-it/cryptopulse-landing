@@ -168,17 +168,26 @@ class SupabaseClient:
             logger.error(f"Error getting signal from database: {e}")
             return None
     
-    async def get_active_signals(self) -> List[TradingSignal]:
-        """Get all active/approved signals that are being tracked (not closed or rejected)"""
+    async def get_active_signals(self, limit: int = 100) -> List[TradingSignal]:
+        """Get all active/approved signals that are being tracked (not closed or rejected).
+        Deduplicates by symbol, keeping only the most recently created signal per symbol."""
         try:
             # Include both 'active' and 'approved' status - these are running trades
             result = self.client.table('signals').select('*')\
                 .in_('status', ['active', 'approved'])\
+                .order('created_at', desc=True)\
+                .limit(limit)\
                 .execute()
             
+            # Deduplicate by symbol, keeping the most recent
+            seen_symbols = set()
             signals = []
             for data in result.data:
                 try:
+                    sym = data.get('symbol', '')
+                    if sym in seen_symbols:
+                        continue
+                    seen_symbols.add(sym)
                     signals.append(self._dict_to_signal(data))
                 except Exception as row_err:
                     logger.warning(f"Skipping signal row {data.get('id', '?')} due to load error: {row_err}")
@@ -666,7 +675,13 @@ class SupabaseClient:
     
     async def update_signal_result(self, signal_id: str, status: SignalStatus,
                                    actual_exit: float, pnl_percent: float,
-                                   tp_level: int = None) -> bool:
+                                   tp_level: int = None,
+                                   max_drawdown: float = None,
+                                   max_adverse: float = None,
+                                   max_favorable: float = None,
+                                   duration_minutes: float = None,
+                                   entry_slippage: float = None,
+                                   exit_slippage: float = None) -> bool:
         """Update signal when TP/SL is hit (AutoPilot performance tracking)"""
         try:
             data = {
@@ -677,6 +692,18 @@ class SupabaseClient:
             }
             if tp_level is not None:
                 data['tp_level'] = tp_level
+            if max_drawdown is not None:
+                data['max_drawdown_percent'] = max_drawdown
+            if max_adverse is not None:
+                data['max_adverse_excursion'] = max_adverse
+            if max_favorable is not None:
+                data['max_favorable_excursion'] = max_favorable
+            if duration_minutes is not None:
+                data['duration_minutes'] = duration_minutes
+            if entry_slippage is not None:
+                data['entry_slippage_percent'] = entry_slippage
+            if exit_slippage is not None:
+                data['exit_slippage_percent'] = exit_slippage
             
             self.client.table('signals').update(data).eq('id', signal_id).execute()
             logger.info(f"Signal {signal_id} result updated: {status.value} P&L={pnl_percent:+.2f}%")
@@ -942,23 +969,25 @@ class SupabaseClient:
             # If ANY column is missing, fallback to minimal safe fields
             if 'column' in err_str or 'pgrst204' in err_str:
                 logger.warning(f"DB column error ({e}) — retrying with minimal fields")
-                # Retry 1: basic fields without candidate_data
+                # Retry 1: safe fields only, but ALWAYS include candidate_data so __play_meta__ survives
                 try:
                     minimal = {
                         'id': data.get('id', str(uuid.uuid4())),
                         'symbol': data.get('symbol'),
                         'name': data.get('name'),
-                        'chain': data.get('chain'),
                         'status': data.get('status', 'active'),
                         'created_at': data.get('created_at', datetime.utcnow().isoformat()),
                     }
+                    # Strip None values, but keep candidate_data (JSONB blob with embedded metadata)
                     minimal = {k: v for k, v in minimal.items() if v is not None}
+                    if candidate_data:
+                        minimal['candidate_data'] = candidate_data
                     self.client.table('alpha_plays').upsert(minimal).execute()
-                    logger.info(f"✅ Alpha play {minimal.get('symbol')} saved with basic fields (no candidate_data)")
+                    logger.info(f"✅ Alpha play {minimal.get('symbol')} saved with safe fields + candidate_data")
                     return True
                 except Exception as e2:
                     err2 = str(e2).lower()
-                    # Retry 2: ultra-minimal (guaranteed to work with any table)
+                    # Retry 2: ultra-minimal — only guaranteed columns, but still preserve candidate_data
                     if 'column' in err2 or 'pgrst204' in err2:
                         try:
                             ultra = {
@@ -967,8 +996,10 @@ class SupabaseClient:
                                 'status': data.get('status', 'active'),
                             }
                             ultra = {k: v for k, v in ultra.items() if v is not None}
+                            if candidate_data:
+                                ultra['candidate_data'] = candidate_data
                             self.client.table('alpha_plays').upsert(ultra).execute()
-                            logger.info(f"✅ Alpha play {ultra.get('symbol')} saved with ultra-minimal fields")
+                            logger.info(f"✅ Alpha play {ultra.get('symbol')} saved with ultra-minimal fields + candidate_data")
                             return True
                         except Exception as e3:
                             logger.error(f"Error saving alpha play (ultra-minimal retry): {e3}")
@@ -1001,3 +1032,128 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error updating alpha play: {e}")
             return False
+
+    # ============== TRADE AUDIT LOG ==============
+
+    async def log_trade_event(self, signal_id: str, event_type: str, details: dict,
+                               price: float = None, pnl: float = None) -> bool:
+        """Write an immutable audit entry for a signal lifecycle event."""
+        try:
+            data = {
+                'signal_id': signal_id,
+                'event_type': event_type,
+                'details': details,
+                'price': price,
+                'pnl': pnl,
+                'timestamp': datetime.utcnow().isoformat(),
+            }
+            self.client.table('trade_audit_log').insert(data).execute()
+            return True
+        except Exception as e:
+            logger.debug(f"Audit log failed: {e}")
+            return False
+
+    async def get_signal_audit(self, signal_id: str) -> List[Dict]:
+        """Get full audit trail for a single signal."""
+        try:
+            result = self.client.table('trade_audit_log').select('*')\
+                .eq('signal_id', signal_id)\
+                .order('timestamp')\
+                .execute()
+            return result.data or []
+        except Exception as e:
+            logger.warning(f"Could not get audit trail: {e}")
+            return []
+
+    async def get_recent_audit(self, event_type: str = None, limit: int = 100) -> List[Dict]:
+        """Get recent audit entries, optionally filtered by event type."""
+        try:
+            query = self.client.table('trade_audit_log').select('*')\
+                .order('timestamp', desc=True)\
+                .limit(limit)
+            if event_type:
+                query = query.eq('event_type', event_type)
+            result = query.execute()
+            return result.data or []
+        except Exception as e:
+            logger.warning(f"Could not get recent audit: {e}")
+            return []
+
+    # ============== SETUP PERFORMANCE TRACKING ==============
+
+    async def get_closed_signals_for_analytics(self, days: int = 30) -> List[Dict]:
+        """Get closed signals with analytics fields for portfolio metrics."""
+        try:
+            since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+            result = self.client.table('signals').select('*')\
+                .in_('status', ['closed', 'stopped', 'target_hit'])\
+                .gte('closed_at', since)\
+                .execute()
+            return result.data or []
+        except Exception as e:
+            logger.warning(f"Could not get closed signals for analytics: {e}")
+            return []
+
+    async def record_setup_performance(self, signal: TradingSignal) -> bool:
+        """Record a signal's outcome for setup type performance tracking."""
+        try:
+            data = {
+                'signal_id': signal.id,
+                'setup_type': signal.setup_type.value if hasattr(signal.setup_type, 'value') else str(signal.setup_type),
+                'timeframe': signal.timeframe,
+                'grade': signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade),
+                'direction': signal.direction.value if hasattr(signal.direction, 'value') else str(signal.direction),
+                'confidence': signal.confidence,
+                'risk_reward': signal.risk_reward,
+                'entry_price': signal.entry_price,
+                'actual_entry': signal.actual_entry,
+                'actual_exit': signal.actual_exit,
+                'pnl_percent': signal.pnl_percent,
+                'tp1_hit': signal.tp1_hit,
+                'tp2_hit': signal.tp2_hit,
+                'tp3_hit': signal.tp3_hit,
+                'stop_hit': signal.stop_hit,
+                'created_at': signal.created_at.isoformat() if signal.created_at else datetime.utcnow().isoformat(),
+                'closed_at': signal.closed_at.isoformat() if signal.closed_at else None,
+            }
+            self.client.table('setup_performance').insert(data).execute()
+            return True
+        except Exception as e:
+            logger.warning(f"Could not record setup performance: {e}")
+            return False
+
+    async def get_setup_performance(self, setup_type: str, timeframe: str = None, days: int = 30) -> Dict:
+        """Get performance stats for a specific setup type."""
+        try:
+            since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+            query = self.client.table('setup_performance').select('*')\
+                .eq('setup_type', setup_type)\
+                .gte('created_at', since)
+
+            if timeframe:
+                query = query.eq('timeframe', timeframe)
+
+            result = query.execute()
+            rows = result.data or []
+
+            if not rows:
+                return {'total': 0, 'wins': 0, 'losses': 0, 'win_rate': 0, 'avg_pnl': 0}
+
+            total = len(rows)
+            wins = sum(1 for r in rows if (r.get('pnl_percent') or 0) > 0)
+            losses = total - wins
+            pnls = [r.get('pnl_percent', 0) or 0 for r in rows]
+            avg_pnl = sum(pnls) / len(pnls) if pnls else 0
+
+            return {
+                'total': total,
+                'wins': wins,
+                'losses': losses,
+                'win_rate': (wins / total) * 100 if total > 0 else 0,
+                'avg_pnl': avg_pnl,
+                'best': max(pnls) if pnls else 0,
+                'worst': min(pnls) if pnls else 0,
+            }
+        except Exception as e:
+            logger.warning(f"Could not get setup performance: {e}")
+            return {'total': 0, 'wins': 0, 'losses': 0, 'win_rate': 0, 'avg_pnl': 0}

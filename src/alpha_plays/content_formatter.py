@@ -40,6 +40,7 @@ class AlphaContentFormatter:
         'day_trade': '⚡ DAY TRADE',
         'swing': '📊 SWING TRADE',
         'fundamental': '🏗️ FUNDAMENTAL',
+        'portfolio': '💼 PORTFOLIO HOLD',
     }
     
     @classmethod
@@ -195,6 +196,24 @@ class AlphaContentFormatter:
 ⏰ Posted: {datetime.utcnow().strftime('%H:%M UTC')}
 """
         
+        # Add MEXC referral link (non-spammy, at the bottom)
+        from src.config import settings
+        mexc_url = getattr(settings, 'AFFILIATE_CUSTOM_URL', None)
+        if mexc_url:
+            message += f"""
+
+💎 <a href="{mexc_url}"><b>Trade on MEXC</b></a>
+<i>Sign up through our link to support the channel</i>
+"""
+        
+        # Add portfolio link if configured (TRUST_WALLET_ADDRESS or fallback to CRYPTO_WALLET_ETH)
+        portfolio_wallet = getattr(settings, 'TRUST_WALLET_ADDRESS', None) or getattr(settings, 'CRYPTO_WALLET_ETH', None)
+        if portfolio_wallet:
+            message += f"""
+
+🔐 <b>Portfolio:</b> <a href="https://debank.com/profile/{portfolio_wallet}">Track our live portfolio</a>
+"""
+        
         return message.strip()
     
     @classmethod
@@ -250,6 +269,15 @@ DM @{cls._get_vip_bot_username()} for instant access
 ⏰ Next free alpha: Coming this Sunday!
 """
         
+        # Add MEXC referral link (non-spammy, at the bottom)
+        from src.config import settings
+        mexc_url = getattr(settings, 'AFFILIATE_CUSTOM_URL', None)
+        if mexc_url:
+            message += f"""
+💎 <a href="{mexc_url}"><b>Trade on MEXC</b></a>
+<i>Sign up through our link to support the channel</i>
+"""
+        
         return message.strip()
     
     @classmethod
@@ -294,6 +322,14 @@ DM @{cls._get_vip_bot_username()} for instant access
 VIP members get 1 per day!
 
 👉 DM @{cls._get_vip_bot_username()} for access
+"""
+        
+        # Add MEXC referral link (non-spammy, at the bottom)
+        from src.config import settings
+        mexc_url = getattr(settings, 'AFFILIATE_CUSTOM_URL', None)
+        if mexc_url:
+            message += f"""
+💎 <a href="{mexc_url}"><b>Trade on MEXC</b></a>
 """
         
         return message.strip()
