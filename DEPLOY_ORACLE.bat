@@ -7,7 +7,7 @@ echo   CryptoPulse Oracle Cloud Deployer
 echo ==========================================
 echo.
 
-set KEY="c:\CascadeProjects\windsurf-project\CryptoPulse-Signals\ssh-keys-backup\ssh-key-2026-05-20 (2).key"
+set KEY="c:\CascadeProjects\windsurf-project\CryptoPulse-Signals\ssh-key-2026-05-20 (2).key"
 set HOST=opc@141.147.114.169
 set PROJECT=/home/opc/CryptoPulse-Signals
 set VENV=/home/opc/venv
