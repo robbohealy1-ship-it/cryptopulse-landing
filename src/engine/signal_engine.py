@@ -607,9 +607,15 @@ class SignalEngine:
             parts.append(f"POC (most traded): ${poc:,.4f} | VAH: ${vah:,.4f} | VAL: ${val:,.4f}")
             if entry:
                 if 'discount' in vquality.lower():
-                    parts.append(f"🟢 Entry at <b>discount</b> below VAL — high-probability buy zone where institutions accumulate.")
+                    if d == 'LONG':
+                        parts.append(f"🟢 Entry at <b>discount</b> below VAL — high-probability buy zone where institutions accumulate.")
+                    else:
+                        parts.append(f"🟢 Entry at <b>discount</b> below VAL — structural low where stops cluster, ideal for SHORT positioning.")
                 elif 'premium' in vquality.lower():
-                    parts.append(f"🔴 Entry at <b>premium</b> above VAH — high-probability sell zone where institutions distribute.")
+                    if d == 'SHORT':
+                        parts.append(f"🔴 Entry at <b>premium</b> above VAH — high-probability sell zone where institutions distribute.")
+                    else:
+                        parts.append(f"🔴 Entry at <b>premium</b> above VAH — distribution zone, caution for LONGs.")
                 elif 'fair value' in vquality.lower():
                     parts.append(f"🟡 Entry near <b>POC fair value</b> — acceptable but not at an extreme.")
                 else:

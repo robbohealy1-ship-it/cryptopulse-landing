@@ -197,6 +197,8 @@ class PerformanceTracker:
                         f"TP1: ${signal.take_profit_1:.8f}\n\n"
                         f"📊 Now tracking TP/SL automatically"
                     )
+                    if hasattr(self.channel_publisher, '_get_referral_cta'):
+                        msg += self.channel_publisher._get_referral_cta()
                     await self.channel_publisher.bot.send_message(
                         chat_id=self.channel_publisher.vip_channel_id,
                         text=msg,
@@ -737,9 +739,12 @@ class PublicStatsPoster:
         # Post to free Telegram channel
         if self.channel_publisher:
             try:
+                msg = message
+                if hasattr(self.channel_publisher, '_get_referral_cta'):
+                    msg += self.channel_publisher._get_referral_cta()
                 await self.channel_publisher.bot.send_message(
                     chat_id=settings.TELEGRAM_FREE_CHANNEL_ID,
-                    text=message,
+                    text=msg,
                     parse_mode='HTML'
                 )
                 logger.info("📣 Weekly stats posted to free channel")

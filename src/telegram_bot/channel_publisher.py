@@ -484,7 +484,7 @@ TP1: ${signal.take_profit_1:.8f}
 • Never risk more than 2% per trade
 • Move SL to breakeven after TP1
 
-� <b>New to trading?</b> Type /guide in this bot for a full walkthrough.
+💡 <b>New to trading?</b> <a href="https://t.me/{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPAccessBot'}">DM @CryptoPulseVIPAccessBot</a> and type /guide
 
 <i>Signal ID: {(signal.id[:8] if signal.id else 'MANUAL')}</i>
 """
@@ -513,17 +513,23 @@ Join VIP for premium signals!
     
     async def update_signal(self, signal: TradingSignal, update_text: str):
         try:
+            cta = self._get_referral_cta()
+            
             if signal.free_channel_message_id:
+                free_text = f"📢 <b>UPDATE - {signal.symbol}</b>\n\n{update_text}"
+                free_text += cta
                 await self.bot.send_message(
                     chat_id=self.free_channel_id,
-                    text=f"📢 <b>UPDATE - {signal.symbol}</b>\n\n{update_text}",
+                    text=free_text,
                     parse_mode='HTML'
                 )
             
             if signal.vip_channel_message_id:
+                vip_text = f"📢 <b>UPDATE - {signal.symbol}</b>\n\n{update_text}"
+                vip_text += cta
                 await self.bot.send_message(
                     chat_id=self.vip_channel_id,
-                    text=f"📢 <b>UPDATE - {signal.symbol}</b>\n\n{update_text}",
+                    text=vip_text,
                     parse_mode='HTML'
                 )
             

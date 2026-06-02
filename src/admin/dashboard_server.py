@@ -494,6 +494,7 @@ async def portfolio_data(request: Request, _=Depends(rate_limit_lenient)):
                 "tp1_hit": getattr(s, 'tp1_hit', False),
                 "tp2_hit": getattr(s, 'tp2_hit', False),
                 "tp3_hit": getattr(s, 'tp3_hit', False),
+                "cancellation_reason": getattr(s, 'cancellation_reason', None),
             })
         
         total_closed = wins + losses
@@ -575,6 +576,7 @@ async def public_portfolio_data(request: Request, _=Depends(rate_limit_lenient))
                 "tp1_hit": getattr(s, 'tp1_hit', False),
                 "tp2_hit": getattr(s, 'tp2_hit', False),
                 "tp3_hit": getattr(s, 'tp3_hit', False),
+                "cancellation_reason": getattr(s, 'cancellation_reason', None),
             })
         
         total = wins + losses

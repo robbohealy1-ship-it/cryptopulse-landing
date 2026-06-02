@@ -150,10 +150,15 @@ function renderPnl(pnl) {
   return `<span class="pnl ${cls}">${emoji}${pnl.toFixed(2)}%</span>`;
 }
 
-function getStatusBadge(tp1, tp2, tp3) {
+function getStatusBadge(tp1, tp2, tp3, reason) {
   if (tp3) return '<span class="badge tp3">TP3 HIT</span>';
   if (tp2) return '<span class="badge tp2">TP2 HIT</span>';
   if (tp1) return '<span class="badge tp1">TP1 HIT</span>';
+  if (reason) {
+    const r = reason.toLowerCase();
+    if (r.includes('manual')) return '<span class="badge closed">MANUAL</span>';
+    if (r.includes('expired')) return '<span class="badge pending">EXPIRED</span>';
+  }
   return '<span class="badge sl">SL HIT</span>';
 }
 
@@ -241,7 +246,7 @@ async function loadPortfolio() {
                   <tr>
                     <td><strong>${t.symbol}</strong> <span style="color:#64748b;font-size:11px;">${t.timeframe}</span></td>
                     <td><span class="badge ${t.direction.toLowerCase()}">${t.direction}</span></td>
-                    <td>${getStatusBadge(t.tp1_hit, t.tp2_hit, t.tp3_hit)}</td>
+                    <td>${getStatusBadge(t.tp1_hit, t.tp2_hit, t.tp3_hit, t.cancellation_reason)}</td>
                     <td>${formatPrice(t.entry_price)}</td>
                     <td>${formatPrice(t.actual_exit)}</td>
                     <td>${renderPnl(t.pnl_percent)}</td>
