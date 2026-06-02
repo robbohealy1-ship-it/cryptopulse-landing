@@ -1514,7 +1514,8 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal,
             'status': 'closed',
             'actual_exit': close_data.close_price,
             'pnl_percent': pnl,
-            'cancellation_reason': close_reason_display
+            'cancellation_reason': close_reason_display,
+            'closed_at': datetime.utcnow().isoformat()
         }
         
         success = await orch.db.update_signal(signal_id, updates)
@@ -1524,6 +1525,7 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal,
             signal.actual_exit = close_data.close_price
             signal.pnl_percent = pnl
             signal.status = SignalStatus.CLOSED
+            signal.closed_at = datetime.utcnow()
             
             # Send notification to VIP channel
             await orch.channel_publisher.send_trade_closed(
