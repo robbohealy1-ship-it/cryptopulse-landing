@@ -65,10 +65,10 @@ class PerformanceTracker:
                 'entry_price': entry,
                 'highest_price': entry,
                 'lowest_price': entry,
-                'tp1_hit': False,
-                'tp2_hit': False,
-                'tp3_hit': False,
-                'stop_moved_to_breakeven': False,
+                'tp1_hit': getattr(signal, 'tp1_hit', False),
+                'tp2_hit': getattr(signal, 'tp2_hit', False),
+                'tp3_hit': getattr(signal, 'tp3_hit', False),
+                'stop_moved_to_breakeven': getattr(signal, 'stop_moved_to_breakeven', False),
                 'partial_exits': [],
                 'entry_time': datetime.utcnow()
             }
@@ -88,10 +88,10 @@ class PerformanceTracker:
             'entry_price': entry,
             'highest_price': entry,
             'lowest_price': entry,
-            'tp1_hit': False,
-            'tp2_hit': False,
-            'tp3_hit': False,
-            'stop_moved_to_breakeven': False,
+            'tp1_hit': getattr(signal, 'tp1_hit', False),
+            'tp2_hit': getattr(signal, 'tp2_hit', False),
+            'tp3_hit': getattr(signal, 'tp3_hit', False),
+            'stop_moved_to_breakeven': getattr(signal, 'stop_moved_to_breakeven', False),
             'partial_exits': [],
             'entry_time': datetime.utcnow()
         }
