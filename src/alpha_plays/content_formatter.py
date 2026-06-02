@@ -206,13 +206,10 @@ class AlphaContentFormatter:
 <i>Sign up through our link to support the channel</i>
 """
         
-        # Add portfolio link if configured (TRUST_WALLET_ADDRESS or fallback to CRYPTO_WALLET_ETH)
-        portfolio_wallet = getattr(settings, 'TRUST_WALLET_ADDRESS', None) or getattr(settings, 'CRYPTO_WALLET_ETH', None)
-        if portfolio_wallet:
-            message += f"""
-
-🔐 <b>Portfolio:</b> <a href="https://debank.com/profile/{portfolio_wallet}">Track our live portfolio</a>
-"""
+        # Add portfolio section (respects SHOW_PORTFOLIO_IN_ALPHA toggle)
+        portfolio_section = cls._format_portfolio_section(play)
+        if portfolio_section:
+            message += portfolio_section
         
         return message.strip()
     
@@ -342,3 +339,72 @@ VIP members get 1 per day!
             return settings.TELEGRAM_VIP_BOT_USERNAME or "CryptoPulseVIPBot"
         except:
             return "CryptoPulseVIPBot"
+    
+    @classmethod
+    def _get_portfolio_wallets(cls) -> dict:
+        """
+        Get configured wallet addresses mapped by chain/token.
+        Returns dict like {'eth': '0x...', 'sol': 'abc...', 'btc': 'bc1...'}
+        """
+        from src.config import settings
+        wallets = {}
+        
+        # ETH / EVM chains (Base, ETH, Arbitrum all use ETH addresses)
+        eth_wallet = getattr(settings, 'TRUST_WALLET_ADDRESS', None) or getattr(settings, 'CRYPTO_WALLET_ETH', None)
+        if eth_wallet:
+            wallets['eth'] = eth_wallet
+            wallets['base'] = eth_wallet
+            wallets['arb'] = eth_wallet
+        
+        # Solana
+        sol_wallet = getattr(settings, 'CRYPTO_WALLET_SOL', None)
+        if sol_wallet:
+            wallets['sol'] = sol_wallet
+        
+        # Bitcoin
+        btc_wallet = getattr(settings, 'CRYPTO_WALLET_BTC', None)
+        if btc_wallet:
+            wallets['btc'] = btc_wallet
+        
+        return wallets
+    
+    @classmethod
+    def _format_portfolio_section(cls, play: AlphaPlayCandidate) -> str:
+        """
+        Format portfolio section showing the correct wallet for the token's chain.
+        Respects SHOW_PORTFOLIO_IN_ALPHA toggle.
+        """
+        from src.config import settings
+        
+        # Check if portfolio display is enabled
+        if not getattr(settings, 'SHOW_PORTFOLIO_IN_ALPHA', False):
+            return ""
+        
+        wallets = cls._get_portfolio_wallets()
+        if not wallets:
+            return ""
+        
+        lines = ["\n🔐 <b>Portfolio:</b>"]
+        
+        # Show the wallet matching this token's chain
+        chain_wallet = wallets.get(play.chain)
+        if chain_wallet:
+            if play.chain in ('eth', 'base', 'arb'):
+                lines.append(f"📊 <a href='https://debank.com/profile/{chain_wallet}'>Track ETH/BASE portfolio on DeBank</a>")
+            elif play.chain == 'sol':
+                lines.append(f"📊 <a href='https://solscan.io/account/{chain_wallet}'>Track SOL portfolio on Solscan</a>")
+            elif play.chain == 'btc':
+                lines.append(f"📊 <a href='https://mempool.space/address/{chain_wallet}'>Track BTC on Mempool</a>")
+        
+        # Show ALL configured wallets as a compact list (optional, only if more than 1)
+        unique_wallets = {}
+        for ch, addr in wallets.items():
+            unique_wallets[addr] = ch
+        
+        if len(unique_wallets) > 1:
+            lines.append("\n<i>All tracked wallets:</i>")
+            for addr, ch in unique_wallets.items():
+                ch_label = {'eth': 'ETH/BASE', 'base': 'ETH/BASE', 'arb': 'ETH/BASE', 'sol': 'SOL', 'btc': 'BTC'}.get(ch, ch.upper())
+                lines.append(f"• {ch_label}: <code>{addr[:10]}...{addr[-6:]}</code>")
+        
+        return "\n".join(lines)

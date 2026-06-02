@@ -75,8 +75,8 @@ class CommunityEngagement:
                 "⚡ <b>Last Signal Just Hit TP1</b>\n\nFree channel watched. VIP members banked.\n\nDon't wait for the next one.\n\n🤖 Instant access: @CryptoPulseVIPAccessBot\n🔗 {landing_page}",
             ],
             'content_roundups': [
-                "📊 <b>MARKET SNAPSHOT — {tf} Timeframe</b>\n\n• BTC: {btc_bias} (structural)\n• ETH: {eth_bias} (structural)\n• Altcoins: {alt_bias}\n\n💎 VIP gets exact entries, stops & 3 targets:\n🔗 {landing_page}",
-                "🎯 <b>MULTI-TIMEFRAME ALIGNMENT</b>\n\n📊 4H Trend: {trend_4h}\n📊 1H Momentum: {momentum_1h}\n📊 15M Entry Zone: {entry_15m}\n\nWhen higher timeframes align, probability increases.\n\n💎 VIP trades only aligned setups:\n🔗 {landing_page}",
+                "📊 <b>MARKET SNAPSHOT — {tf} Timeframe</b>\n\n• BTC: {btc_bias} (structural)\n• ETH: {eth_bias} (structural)\n• Altcoins: {alt_bias}\n\n💎 VIP gets exact entries, stops & 3 targets:\n🔗 @{vip_bot_username}",
+                "🎯 <b>MULTI-TIMEFRAME ALIGNMENT</b>\n\n📊 4H Trend: {trend_4h}\n📊 1H Momentum: {momentum_1h}\n📊 15M Entry Zone: {entry_15m}\n\nWhen higher timeframes align, probability increases.\n\n💎 VIP trades only aligned setups:\n🔗 @{vip_bot_username}",
                 "📈 <b>MARKET STRUCTURE — {timeframe}</b>\n\n{structure_emoji} <b>{bias}</b> on {timeframe}\n• Structure: {structure_type}\n• Key level: {key_level}\n• Invalidation: {invalidation}\n\n💎 VIP gets exact entry, stop & targets:\n🔗 @{vip_bot_username}",
             ],
         }
@@ -113,12 +113,16 @@ class CommunityEngagement:
     
     async def _format_placeholders(self, text: str) -> str:
         """Replace template placeholders with REAL signal data from DB. No fake numbers."""
-        landing = getattr(settings, 'LANDING_PAGE_URL', 'https://cryptopulsesignals.com')
+        landing = getattr(settings, 'LANDING_PAGE_URL', 'https://t.me/CryptoPulseVIPAccessBot')
         text = text.replace('{landing_page}', landing)
         
         # Replace VIP bot username
         vip_bot = getattr(settings, 'TELEGRAM_VIP_BOT_USERNAME', 'CryptoPulseVIPAccessBot')
         text = text.replace('{vip_bot_username}', vip_bot)
+        
+        # Referral / exchange link
+        referral = getattr(settings, 'AFFILIATE_CUSTOM_URL', '')
+        text = text.replace('{referral_link}', referral)
 
         # Try to fetch real stats from DB
         stats = {}

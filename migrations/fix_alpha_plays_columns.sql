@@ -5,9 +5,10 @@
 ALTER TABLE alpha_plays
 ADD COLUMN IF NOT EXISTS candidate_data JSONB;
 
--- 2. Add the missing play_type column
+-- 2. Add the missing play_type and chain columns
 ALTER TABLE alpha_plays
-ADD COLUMN IF NOT EXISTS play_type TEXT DEFAULT 'day_trade';
+ADD COLUMN IF NOT EXISTS play_type TEXT DEFAULT 'day_trade',
+ADD COLUMN IF NOT EXISTS chain TEXT DEFAULT 'sol';
 
 -- 3. Add price/tracking columns that the save method expects
 ALTER TABLE alpha_plays

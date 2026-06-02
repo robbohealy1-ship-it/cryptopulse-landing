@@ -34,8 +34,10 @@ class AIContentGenerator:
     async def _call_llm(self, system_prompt: str, user_prompt: str, max_tokens: int = 800) -> Optional[str]:
         """Call OpenAI ChatCompletion. Returns None on any failure."""
         if not self.enabled:
+            logger.debug("AI _call_llm skipped: not enabled (no API key or openai package missing)")
             return None
         try:
+            logger.info(f"🤖 AI API CALL: model={self.model}, max_tokens={max_tokens}, prompt_len={len(user_prompt)}")
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -46,10 +48,15 @@ class AIContentGenerator:
                 temperature=0.7,
             )
             content = response.choices[0].message.content
-            logger.info(f"AI content generated ({len(content)} chars)")
+            # Log usage for transparency
+            usage = response.usage
+            if usage:
+                logger.info(f"✅ AI content generated: {len(content)} chars | prompt_tokens={usage.prompt_tokens}, completion_tokens={usage.completion_tokens}, total={usage.total_tokens}")
+            else:
+                logger.info(f"✅ AI content generated: {len(content)} chars (no usage data)")
             return content.strip()
         except Exception as e:
-            logger.warning(f"LLM call failed: {e}")
+            logger.error(f"❌ LLM call failed: {e}")
             return None
 
     # ───────────────────────────────────────────────
@@ -70,20 +77,29 @@ class AIContentGenerator:
             "Max 400 words. Be insightful but not verbose. Include 1-2 actionable takeaways."
         )
 
+        # SAFE: handle None values that would crash string formatting
+        fr = market_data.get('funding_rate', 0) or 0
+        btc_price = market_data.get('btc_price')
+
         lines = [
             f"Date: {datetime.utcnow().strftime('%A, %d %B %Y')}",
             f"Fear & Greed: {market_data.get('fear_class', 'N/A')} ({market_data.get('fear_value', 'N/A')}/100)",
             f"Global Market Cap: ${market_data.get('total_market_cap', 'N/A')}T",
             f"BTC Dominance: {market_data.get('btc_dominance', 'N/A')}%",
-            f"BTC Price: ${market_data.get('btc_price', 'N/A'):,.0f}" if market_data.get('btc_price') else "",
-            f"BTC 24h Change: {market_data.get('btc_24h', 0):+.2f}%",
-            f"Funding Rate: {market_data.get('funding_rate', 0)*100:.4f}%",
+            f"BTC Price: ${btc_price:,.0f}" if btc_price else "",
+            f"BTC 24h Change: {market_data.get('btc_24h', 0) or 0:+.2f}%",
+            f"Funding Rate: {fr*100:.4f}%",
             f"Active Trades: {len(active_trades) if active_trades else 0}",
         ]
         user = "\n".join([l for l in lines if l])
         user += "\n\nWrite a compelling morning market outlook in Telegram HTML."
 
-        return await self._call_llm(system, user, max_tokens=600)
+        result = await self._call_llm(system, user, max_tokens=600)
+        if result:
+            logger.info("✅ AI daily summary generated successfully")
+        else:
+            logger.warning("⚠️ AI daily summary returned None (API error or disabled)")
+        return result
 
     async def generate_evening_recap(self, market_data: Dict[str, Any], closed_today: list = None, pnl_today: float = 0) -> Optional[str]:
         """Generate an AI-powered evening recap."""
@@ -96,20 +112,29 @@ class AIContentGenerator:
             "and what to watch tomorrow. Use Telegram HTML formatting. Max 350 words."
         )
 
+        # SAFE: handle None values that would crash string formatting
+        btc_24h = market_data.get('btc_24h', 0) or 0
+
         lines = [
             f"Date: {datetime.utcnow().strftime('%A, %d %B %Y')}",
             f"Today's P&L: {pnl_today:+.2f}%",
             f"Trades Closed Today: {len(closed_today) if closed_today else 0}",
             f"Fear & Greed: {market_data.get('fear_class', 'N/A')}",
-            f"BTC 24h: {market_data.get('btc_24h', 0):+.2f}%",
+            f"BTC 24h: {btc_24h:+.2f}%",
         ]
         if closed_today:
             for s in closed_today[:3]:
-                lines.append(f"- {s.get('symbol', '?')}: {s.get('pnl_percent', 0):+.2f}% ({s.get('result', 'closed')})")
+                pnl = s.get('pnl_percent', 0) or 0
+                lines.append(f"- {s.get('symbol', '?')}: {pnl:+.2f}% ({s.get('result', 'closed')})")
 
         user = "\n".join(lines)
         user += "\n\nWrite an evening recap in Telegram HTML."
-        return await self._call_llm(system, user, max_tokens=600)
+        result = await self._call_llm(system, user, max_tokens=600)
+        if result:
+            logger.info("✅ AI evening recap generated successfully")
+        else:
+            logger.warning("⚠️ AI evening recap returned None (API error or disabled)")
+        return result
 
     # ───────────────────────────────────────────────
     # EDUCATIONAL CONTENT

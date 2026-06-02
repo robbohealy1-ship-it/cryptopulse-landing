@@ -200,8 +200,16 @@ tr:hover { background: #0f172a; }
     <h1>CryptoPulse Admin</h1>
     <span id="systemStatus" style="font-size:13px;color:#64748b;"><span class="status-dot offline" id="statusDot"></span>Checking...</span>
   </div>
-  <div style="font-size:13px;color:#64748b;">
-    <span id="clock">--:-- UTC</span>
+  <div style="display:flex;gap:16px;align-items:center;">
+    <a href="/research" style="text-decoration:none;">
+      <button class="btn" style="padding:8px 16px;font-size:13px;">🔬 Research Center</button>
+    </a>
+    <a href="/portfolio" style="text-decoration:none;">
+      <button class="btn ghost" style="padding:8px 16px;font-size:13px;">📊 Portfolio</button>
+    </a>
+    <div style="font-size:13px;color:#64748b;">
+      <span id="clock">--:-- UTC</span>
+    </div>
   </div>
 </header>
 
@@ -560,6 +568,33 @@ tr:hover { background: #0f172a; }
     <div id="componentsStatus"></div>
   </div>
   <div class="section">
+    <h2>🔐 Portfolio Display Controls</h2>
+    <p style="color:#64748b;font-size:13px;margin-bottom:16px;">Control whether wallet/portfolio links appear in Alpha Play messages and enable public portfolio sharing.</p>
+    
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px;">
+      <div style="flex:1;min-width:300px;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <h3 style="color:#e2e8f0;font-size:14px;">Show Portfolio in Alpha Messages</h3>
+          <span id="portfolioToggleStatus" style="font-size:12px;color:#94a3b8;">Loading...</span>
+        </div>
+        <p style="font-size:12px;color:#64748b;margin-bottom:12px;">When ON, alpha play messages include wallet links. When OFF, portfolio section is hidden from Telegram.</p>
+        <button class="btn" id="portfolioToggleBtn" onclick="togglePortfolioDisplay()">Toggle</button>
+      </div>
+      
+      <div style="flex:1;min-width:300px;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <h3 style="color:#e2e8f0;font-size:14px;">Public Portfolio Page</h3>
+          <span id="publicPortfolioToggleStatus" style="font-size:12px;color:#94a3b8;">Loading...</span>
+        </div>
+        <p style="font-size:12px;color:#64748b;margin-bottom:12px;">Enable a shareable /public-portfolio page showing closed trades (no login required).</p>
+        <button class="btn" id="publicPortfolioToggleBtn" onclick="togglePublicPortfolio()">Toggle</button>
+        <a id="publicPortfolioLink" href="#" target="_blank" style="display:none;margin-left:8px;font-size:12px;color:#38bdf8;">Open &rarr;</a>
+      </div>
+    </div>
+    <div id="portfolioToggleResult" style="font-size:13px;margin-top:8px;"></div>
+  </div>
+  
+  <div class="section">
     <h2>Telegram Connectivity Test</h2>
     <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Send test messages to VIP and Free channels to verify the bot can post.</p>
     <button class="btn" onclick="testTelegram()">🔧 Test Telegram Channels</button>
@@ -861,7 +896,12 @@ function renderActiveSignals(signals) {
     const pnlSign = s.pnl_percent >= 0 ? '+' : '';
     const entryType = s.is_limit_order ? '⏳ LIMIT' : '⚡ MARKET';
     const entryColor = s.is_limit_order ? '#fbbf24' : '#22c55e';
-    const slMoved = s.stop_moved_to_breakeven ? '🔒 Breakeven' : 'Active';
+    // For approved limit orders that haven't filled, show "Pending Fill" instead of confusing "Active"
+    const isApprovedLimit = s.is_limit_order && s.status === 'approved';
+    let slMoved = s.stop_moved_to_breakeven ? '🔒 Breakeven' : 'SL Active';
+    if (isApprovedLimit) {
+      slMoved = '⏳ Pending Fill';
+    }
     
     // For limit orders, show fill status based on BACKEND status (not current price)
     let fillStatus = '';
@@ -1030,12 +1070,35 @@ async function loadHistory() {
   }).join('');
 }
 
+function updatePortfolioToggleUI(s) {
+  const show = s.show_portfolio_in_alpha;
+  document.getElementById('portfolioToggleStatus').textContent = show ? 'ON' : 'OFF';
+  document.getElementById('portfolioToggleStatus').style.color = show ? '#22c55e' : '#ef4444';
+  document.getElementById('portfolioToggleBtn').textContent = show ? 'Hide Portfolio' : 'Show Portfolio';
+  document.getElementById('portfolioToggleBtn').className = show ? 'btn' : 'btn success';
+  
+  const pub = s.public_portfolio_enabled;
+  document.getElementById('publicPortfolioToggleStatus').textContent = pub ? 'ON' : 'OFF';
+  document.getElementById('publicPortfolioToggleStatus').style.color = pub ? '#22c55e' : '#ef4444';
+  document.getElementById('publicPortfolioToggleBtn').textContent = pub ? 'Disable Public Page' : 'Enable Public Page';
+  document.getElementById('publicPortfolioToggleBtn').className = pub ? 'btn' : 'btn success';
+  
+  const link = document.getElementById('publicPortfolioLink');
+  if (pub) {
+    link.style.display = 'inline';
+    link.href = window.location.origin + '/public-portfolio';
+  } else {
+    link.style.display = 'none';
+  }
+}
+
 async function loadSettings() {
   try {
     const s = await fetchJSON('/api/settings');
     const tbody = document.getElementById('settingsTable');
     const rows = Object.entries(s).map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     tbody.innerHTML = rows;
+    updatePortfolioToggleUI(s);
   } catch (e) {}
   try {
     const status = await fetchJSON('/api/status');
@@ -1048,6 +1111,49 @@ async function loadSettings() {
     ).join('');
     document.getElementById('componentsStatus').innerHTML = html;
   } catch (e) {}
+}
+
+async function togglePortfolioDisplay() {
+  const resultEl = document.getElementById('portfolioToggleResult');
+  resultEl.innerHTML = '<span style="color:#38bdf8;">Updating...</span>';
+  try {
+    const data = await fetchJSON('/api/settings/portfolio-toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    if (data.success) {
+      resultEl.innerHTML = `<span style="color:#22c55e;">${data.message}</span>`;
+      loadSettings();
+    } else {
+      resultEl.innerHTML = `<span style="color:#ef4444;">Failed</span>`;
+    }
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:#ef4444;">Error: ${e.message}</span>`;
+  }
+}
+
+async function togglePublicPortfolio() {
+  const resultEl = document.getElementById('portfolioToggleResult');
+  resultEl.innerHTML = '<span style="color:#38bdf8;">Updating...</span>';
+  try {
+    const data = await fetchJSON('/api/settings/public-portfolio-toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    if (data.success) {
+      resultEl.innerHTML = `<span style="color:#22c55e;">${data.message}</span>`;
+      if (data.url) {
+        resultEl.innerHTML += ` <a href="${data.url}" target="_blank" style="color:#38bdf8;">Open page &rarr;</a>`;
+      }
+      loadSettings();
+    } else {
+      resultEl.innerHTML = `<span style="color:#ef4444;">Failed</span>`;
+    }
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:#ef4444;">Error: ${e.message}</span>`;
+  }
 }
 
 async function testTelegram() {

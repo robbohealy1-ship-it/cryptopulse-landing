@@ -123,10 +123,13 @@ class PerformanceTracker:
         direction = signal.direction.value
         
         # Update extremes tracking so we don't miss brief touches between checks
-        extremes = self.pending_limit_extremes.get(signal_id, {'lowest': float('inf'), 'highest': 0.0})
+        # Also track how many checks we've done — retrospective fills require >=3 checks
+        extremes = self.pending_limit_extremes.get(signal_id, {'lowest': float('inf'), 'highest': 0.0, 'checks': 0})
         extremes['lowest'] = min(extremes['lowest'], current_price)
         extremes['highest'] = max(extremes['highest'], current_price)
+        extremes['checks'] = extremes.get('checks', 0) + 1
         self.pending_limit_extremes[signal_id] = extremes
+        check_count = extremes['checks']
         
         hit = False
         fill_reason = ""
@@ -140,11 +143,11 @@ class PerformanceTracker:
             elif extremes['lowest'] <= entry:
                 hit = True
                 fill_reason = f"extreme low ${extremes['lowest']:.4f} touched entry ${entry:.4f}"
-            # Retrospective fill: price is now ABOVE entry, meaning it must have crossed through
-            elif current_price > entry * 1.003:
+            # Retrospective fill: ONLY after >=3 checks. Price now above entry AND we saw it dip below
+            elif check_count >= 3 and extremes['lowest'] <= entry and current_price > entry * 1.001:
                 hit = True
-                fill_reason = f"retrospective LONG fill — price ${current_price:.4f} now above entry ${entry:.4f} (must have crossed through)"
-                logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now above LONG entry")
+                fill_reason = f"retrospective LONG fill — dipped to ${extremes['lowest']:.4f} then recovered to ${current_price:.4f}"
+                logger.info(f"🔄 Retrospective LONG limit fill for {signal.symbol}: dipped to {extremes['lowest']:.4f}, now {current_price:.4f}")
         else:  # SHORT
             # For SHORT limit: price must rise to or above entry
             if current_price >= entry:
@@ -153,18 +156,16 @@ class PerformanceTracker:
             elif extremes['highest'] >= entry:
                 hit = True
                 fill_reason = f"extreme high ${extremes['highest']:.4f} touched entry ${entry:.4f}"
-            # Retrospective fill: price is now BELOW entry, meaning it must have crossed through
-            elif current_price < entry * 0.997:
+            # Retrospective fill: ONLY after >=3 checks. Price now below entry AND we saw it spike above
+            elif check_count >= 3 and extremes['highest'] >= entry and current_price < entry * 0.999:
                 hit = True
-                fill_reason = f"retrospective SHORT fill — price ${current_price:.4f} now below entry ${entry:.4f} (must have crossed through)"
-                logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now below SHORT entry")
+                fill_reason = f"retrospective SHORT fill — spiked to ${extremes['highest']:.4f} then dropped to ${current_price:.4f}"
+                logger.info(f"🔄 Retrospective SHORT limit fill for {signal.symbol}: spiked to {extremes['highest']:.4f}, now {current_price:.4f}")
         
         if hit:
-            # For retrospective fills, use entry price as actual fill price
-            if "retrospective" in fill_reason:
-                signal.actual_entry = entry
-            else:
-                signal.actual_entry = current_price
+            # ALWAYS use entry price as actual_entry for limit orders
+            # This ensures PnL starts at 0% when the limit fills
+            signal.actual_entry = entry
             signal.status = SignalStatus.ACTIVE
             del self.pending_limit_orders[signal_id]
             self.active_signals[signal_id] = {
@@ -264,12 +265,35 @@ class PerformanceTracker:
                 await self._close_signal(signal_id, sl or entry, pnl, sl_hit=True)
                 continue
             
+            # CRITICAL: Auto-close stale signals that have been open too long without TP/SL hit
+            # This catches signals that somehow bypassed SL/TP detection (scanner failures, state bugs, etc.)
+            entry_time = signal_data['entry_time']
+            elapsed_hours = (datetime.utcnow() - entry_time).total_seconds() / 3600
+            if elapsed_hours > 48:
+                entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
+                sl = signal.stop_loss
+                if entry and entry != 0 and sl:
+                    if signal.direction.value == "SHORT":
+                        pnl = ((entry - sl) / entry) * 100
+                    else:
+                        pnl = ((sl - entry) / entry) * 100
+                else:
+                    pnl = 0.0
+                logger.warning(f"🔄 STALE AUTO-CLOSE: {signal.symbol} active for {elapsed_hours:.1f}h with no TP/SL hit. Forcing SL close.")
+                await self._close_signal(signal_id, sl or entry or signal.entry_price, pnl, sl_hit=True)
+                continue
+            
             await self._check_signal(signal_id)
         
         # Save updated signals to DB
         signals = [data['signal'] for data in self.active_signals.values()]
         if signals:
             await self.db.save_signals_batch(signals)
+        
+        active_count = len(self.active_signals)
+        pending_count = len(self.pending_limit_orders)
+        if active_count > 0 or pending_count > 0:
+            logger.info(f"🤖 Autopilot check complete: {active_count} active tracked, {pending_count} pending limits")
     
     async def _check_signal(self, signal_id: str):
         """Check if a signal has hit TP or SL"""
@@ -289,7 +313,8 @@ class PerformanceTracker:
             ticker = await self.scanner.fetch_ticker(signal.symbol)
             current_price = ticker.get('last', 0)
             
-            if current_price == 0:
+            if current_price == 0 or current_price is None:
+                logger.warning(f"⚠️ Scanner returned 0 price for {signal.symbol} — skipping SL/TP check (signal at risk!)")
                 return
             
             direction = signal.direction
@@ -318,7 +343,7 @@ class PerformanceTracker:
                 else:
                     mfe_pct = ((entry - signal_data['lowest_price']) / entry) * 100
                     mae_pct = ((entry - signal_data['highest_price']) / entry) * 100
-                    if signal_data['lowest_price'] < entry:
+                    if signal_data['lowest_price'] < entry and signal_data['lowest_price'] > 0:
                         mdd_pct = ((signal_data['lowest_price'] - current_price) / signal_data['lowest_price']) * 100
                     else:
                         mdd_pct = mae_pct
@@ -331,14 +356,27 @@ class PerformanceTracker:
             
             # Check SL first (after breakeven move, SL = entry_price)
             sl_price = signal.entry_price if stop_moved_to_breakeven else sl
+            
+            # CRITICAL GUARD: if SL is invalid, log and skip (but this should never happen)
+            if sl_price is None or sl_price == 0:
+                logger.error(f"🚨 {signal.symbol} has invalid SL ({sl_price}) — cannot check stop loss!")
+                return
+            
+            # Log every SL check for debugging
             if direction == SignalDirection.LONG:
-                if current_price <= sl_price:
+                sl_triggered = current_price <= sl_price
+                logger.debug(f"🔍 {signal.symbol} LONG SL check: price={current_price:.6f} <= sl={sl_price:.6f} ? {sl_triggered}")
+                if sl_triggered:
                     pnl = ((current_price - safe_entry) / safe_entry) * 100
+                    logger.info(f"🛑 SL HIT: {signal.symbol} LONG at {current_price:.6f} (SL was {sl_price:.6f}), P&L: {pnl:+.2f}%")
                     await self._close_signal(signal_id, current_price, pnl, sl_hit=True)
                     return
             else:
-                if current_price >= sl_price:
+                sl_triggered = current_price >= sl_price
+                logger.debug(f"🔍 {signal.symbol} SHORT SL check: price={current_price:.6f} >= sl={sl_price:.6f} ? {sl_triggered}")
+                if sl_triggered:
                     pnl = ((safe_entry - current_price) / safe_entry) * 100
+                    logger.info(f"🛑 SL HIT: {signal.symbol} SHORT at {current_price:.6f} (SL was {sl_price:.6f}), P&L: {pnl:+.2f}%")
                     await self._close_signal(signal_id, current_price, pnl, sl_hit=True)
                     return
             
@@ -365,7 +403,7 @@ class PerformanceTracker:
                     pnl = ((tp_price - safe_entry) / safe_entry) * 100
                 else:
                     pnl = ((safe_entry - tp_price) / safe_entry) * 100
-                logger.info(f"🎯 {signal.symbol} hit TP{hit_tp}! P&L: {pnl:+.2f}%")
+                logger.info(f"🎯 {signal.symbol} hit TP{hit_tp} at ${tp_price:.6f}! P&L: {pnl:+.2f}%")
                 
                 # Mark TP as hit
                 signal_data[f'tp{hit_tp}_hit'] = True
@@ -377,10 +415,14 @@ class PerformanceTracker:
                 
                 # Send channel notification
                 if self.on_channel_notification:
+                    logger.info(f"📨 Sending TP{hit_tp} notification for {signal.symbol} to channel handler...")
                     try:
                         await self.on_channel_notification(signal, hit_tp, False, current_price)
+                        logger.info(f"✅ TP{hit_tp} notification sent for {signal.symbol}")
                     except Exception as e:
-                        logger.error(f"Channel notification error: {e}")
+                        logger.error(f"❌ Channel notification error for {signal.symbol} TP{hit_tp}: {e}")
+                else:
+                    logger.warning(f"⚠️ No channel notification handler for {signal.symbol} TP{hit_tp} — notification skipped!")
                 
                 # Move SL to breakeven after TP1 (only once)
                 if hit_tp == 1 and not stop_moved_to_breakeven:

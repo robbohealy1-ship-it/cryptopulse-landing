@@ -112,12 +112,13 @@ class AlphaDiscovery:
         self.cache_duration = timedelta(minutes=5)
         self.gem_hunter = GemHunter()
         
-        # Minimum thresholds for a play to be considered
-        self.min_liquidity_usd = 20000  # $20k minimum liquidity
-        self.min_volume_24h = 25000     # $25k minimum volume
-        self.max_market_cap = 100_000_000  # $100M max (low cap)
-        self.min_holders = 50
-        self.min_overall_score = 35.0  # Realistic for low-cap DEX tokens
+        # TRUE GEM THRESHOLDS - Find hidden micro-caps, not mainstream coins
+        self.min_liquidity_usd = 10000  # $10k minimum (lower for true gems)
+        self.min_volume_24h = 15000     # $15k minimum (lower for early discoveries)
+        self.max_market_cap = 10_000_000  # $10M max (TRUE low cap - excludes BONK, WIF, etc.)
+        self.min_market_cap = 50_000    # $50k minimum (avoid complete rugs)
+        self.min_holders = 30  # Lower threshold for early gems
+        self.min_overall_score = 30.0  # Lower to catch early-stage gems
         
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session"""
@@ -287,8 +288,12 @@ class AlphaDiscovery:
                 # Volume check
                 if c.volume_24h < self.min_volume_24h:
                     continue
-                # Market cap check (low cap only)
+                # Market cap check (TRUE GEMS: $50K - $10M)
                 if c.market_cap_usd > self.max_market_cap:
+                    logger.debug(f"  ⏭️ Skipped {c.symbol}: Market cap too high (${c.market_cap_usd/1e6:.1f}M > $10M)")
+                    continue
+                if c.market_cap_usd < self.min_market_cap:
+                    logger.debug(f"  ⏭️ Skipped {c.symbol}: Market cap too low (${c.market_cap_usd/1e3:.0f}K < $50K - rug risk)")
                     continue
                 # Scam/rug pull checks
                 if self._is_likely_scam(c):
@@ -309,16 +314,47 @@ class AlphaDiscovery:
                 
                 qualified.append(c)
             
-            # Sort by overall score
-            qualified.sort(key=lambda x: x.overall_score, reverse=True)
+            # Sort by TRUE GEM POTENTIAL: prioritize micro-caps and new pairs
+            # Lower market cap = higher upside potential (10x-1000x)
+            def gem_priority(c):
+                # Base score
+                score = c.overall_score
+                
+                # BONUS: Micro-cap bonus (smaller = better for gems)
+                if c.market_cap_usd < 500_000:  # Under $500k = huge bonus
+                    score += 20
+                elif c.market_cap_usd < 1_000_000:  # Under $1M = big bonus
+                    score += 15
+                elif c.market_cap_usd < 3_000_000:  # Under $3M = medium bonus
+                    score += 10
+                elif c.market_cap_usd < 5_000_000:  # Under $5M = small bonus
+                    score += 5
+                
+                # BONUS: New pair bonus (early discovery)
+                if c.pair_created_at:
+                    days_old = (datetime.utcnow() - c.pair_created_at).days
+                    if days_old < 7:  # Less than 1 week old
+                        score += 15
+                    elif days_old < 30:  # Less than 1 month old
+                        score += 10
+                
+                return score
+            
+            qualified.sort(key=gem_priority, reverse=True)
             
             # Take top N
             top_plays = qualified[:limit]
             
-            logger.info(f"🎯 Found {len(top_plays)} qualified alpha plays")
+            logger.info(f"💎 Found {len(top_plays)} TRUE GEM candidates (micro-cap alpha)")
             for p in top_plays:
-                logger.info(f"  • {p.symbol} ({p.chain}) [{p.trade_type}] - Score: {p.overall_score:.1f} | "
-                             f"MC: ${p.market_cap_usd/1e6:.1f}M | Vol: ${p.volume_24h/1e3:.0f}K | Risk: {p.risk_level}")
+                # Show market cap in K for micro-caps, M for larger
+                if p.market_cap_usd < 1_000_000:
+                    mc_str = f"${p.market_cap_usd/1e3:.0f}K"
+                else:
+                    mc_str = f"${p.market_cap_usd/1e6:.1f}M"
+                
+                logger.info(f"  💎 {p.symbol} ({p.chain}) [{p.trade_type}] - Score: {p.overall_score:.1f} | "
+                             f"MC: {mc_str} | Vol: ${p.volume_24h/1e3:.0f}K | Risk: {p.risk_level}")
             
             return top_plays
             
@@ -399,15 +435,20 @@ class AlphaDiscovery:
                 pair_sym = pair.get('symbol', '') or pair.get('baseToken', {}).get('symbol', '')
                 if pair_sym:
                     symbol = pair_sym.strip()
-            if not symbol:
-                symbol = 'UNKNOWN'
+            if not symbol or symbol == 'UNKNOWN':
+                logger.warning("Skipping candidate with no valid symbol")
+                return None
             
             # Name: use baseToken.name if available, otherwise fall back to symbol
             name = (base_token.get('name', '') or '').strip()
-            if not name:
+            if not name or name.lower() == 'unknown':
                 name = (quote_token.get('name', '') or '').strip()
-            if not name:
-                name = symbol
+            if not name or name.lower() == 'unknown':
+                if symbol and symbol != 'UNKNOWN':
+                    name = symbol
+                else:
+                    logger.warning(f"Skipping candidate with no valid name/symbol")
+                    return None
             token_address = base_token.get('address') or quote_token.get('address')
             pair_address = pair.get('pairAddress')
             

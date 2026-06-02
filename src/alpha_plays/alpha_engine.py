@@ -5,6 +5,8 @@ Main engine for managing alpha/degen plays lifecycle:
 - Discovery → Approval → Publishing → Tracking → Closing
 
 Isolated from main signal engine to prevent breaking existing functionality.
+
+ENHANCED: Now creates research projects for investment intelligence tracking.
 """
 
 import uuid
@@ -82,6 +84,12 @@ class AlphaPlaysEngine:
         self._admin_bot = admin_bot
         self.session: Optional[aiohttp.ClientSession] = None
         
+        # Research Engine Integration (lazy init to avoid circular imports)
+        self.research_project_db = None
+        self.conviction_engine = None
+        self.basket_manager = None
+        self.report_generator = None
+        
         # Active plays being tracked
         self.active_plays: Dict[str, ActiveAlphaPlay] = {}
         
@@ -157,6 +165,22 @@ class AlphaPlaysEngine:
     async def initialize(self):
         """Initialize the engine and reload persisted active and pending plays from DB."""
         logger.info("🎰 Initializing Alpha Plays Engine...")
+        
+        # Initialize Research Engine components
+        if self.db and not self.research_project_db:
+            try:
+                from src.research.conviction_engine import ConvictionEngine
+                from src.research.project_database import ProjectDatabase
+                from src.research.basket_manager import BasketManager
+                from src.research.report_generator import ReportGenerator
+                
+                self.conviction_engine = ConvictionEngine(self.db)
+                self.research_project_db = ProjectDatabase(self.db, self.conviction_engine)
+                self.basket_manager = BasketManager(self.db)
+                self.report_generator = ReportGenerator(self.db)
+                logger.info("✅ Research Engine initialized")
+            except Exception as e:
+                logger.warning(f"Research Engine init failed (non-critical): {e}")
         
         # Create aiohttp session for price fetching
         if self.session is None or self.session.closed:
@@ -480,6 +504,15 @@ class AlphaPlaysEngine:
         approved_candidates = []
         
         for candidate in candidates:
+            # Create research project for investment tracking
+            if self.research_project_db:
+                try:
+                    project = await self.research_project_db.create_from_alpha_candidate(candidate)
+                    if project:
+                        logger.info(f"📊 Research project created: {candidate.symbol} (Conviction: {project.conviction_score:.1f}/100)")
+                except Exception as e:
+                    logger.warning(f"Could not create research project for {candidate.symbol}: {e}")
+            
             # Auto-approve if score is very high and auto-approve is enabled
             if self.auto_approve and candidate.overall_score >= 85:
                 logger.info(f"🤖 Auto-approving high-score alpha: {candidate.symbol} ({candidate.overall_score:.1f})")
@@ -546,6 +579,13 @@ class AlphaPlaysEngine:
         if not candidate:
             logger.warning(f"Alpha play {symbol} not found in pending queue")
             return None
+        
+        # Refresh price BEFORE generating trade parameters to avoid stale prices
+        fresh_data = await self._get_price_and_liquidity(candidate)
+        if fresh_data and fresh_data.get('price'):
+            candidate.price_usd = fresh_data['price']
+            candidate.liquidity_usd = fresh_data.get('liquidity', candidate.liquidity_usd)
+            logger.info(f"🔄 Refreshed price for {symbol}: ${candidate.price_usd:.6f}")
         
         # Generate trade parameters
         entry, sl, tp1, tp2 = self._generate_trade_parameters(candidate)
@@ -797,12 +837,18 @@ class AlphaPlaysEngine:
                 
                 current_price = data.get('price')
                 current_liquidity = data.get('liquidity')
+                current_volume = data.get('volume_24h', 0)
+                current_market_cap = data.get('market_cap', 0)
                 
                 if current_price is None or current_price <= 0:
                     logger.warning(f"Skipping {play.candidate.symbol}: invalid price {current_price}")
                     continue
                 
+                # Update ALL live data (not just price)
                 play.current_price = current_price
+                play.candidate.liquidity_usd = current_liquidity if current_liquidity else play.candidate.liquidity_usd
+                play.candidate.volume_24h = current_volume if current_volume else play.candidate.volume_24h
+                play.candidate.market_cap_usd = current_market_cap if current_market_cap else play.candidate.market_cap_usd
                 
                 # Calculate P&L
                 if play.entry_price and play.entry_price > 0:
@@ -914,7 +960,11 @@ class AlphaPlaysEngine:
                 if current_price is None or current_price <= 0:
                     continue
                 
+                # Update ALL live data
                 play.current_price = current_price
+                play.candidate.liquidity_usd = data.get('liquidity', play.candidate.liquidity_usd)
+                play.candidate.volume_24h = data.get('volume_24h', play.candidate.volume_24h)
+                play.candidate.market_cap_usd = data.get('market_cap', play.candidate.market_cap_usd)
                 
                 # Calculate P&L
                 entry = play.actual_entry or play.entry_price
@@ -1079,6 +1129,13 @@ class AlphaPlaysEngine:
                             price = float(best.get('priceUsd', 0) or 0)
                             liquidity = float(best.get('liquidity', {}).get('usd', 0) or 0)
                             volume_24h = float(best.get('volume', {}).get('h24', 0) or 0)
+                            fdv = float(best.get('fdv', 0) or 0)
+                            market_cap = float(best.get('marketCap', 0) or 0)
+                            
+                            # If market cap not provided, use FDV as fallback
+                            if market_cap == 0 and fdv > 0:
+                                market_cap = fdv
+                            
                             if price > 0:
                                 # If we searched by symbol, verify the symbol matches
                                 if 'search?q=' in url:
@@ -1091,6 +1148,8 @@ class AlphaPlaysEngine:
                                     'price': price,
                                     'liquidity': liquidity,
                                     'volume_24h': volume_24h,
+                                    'market_cap': market_cap,
+                                    'fdv': fdv,
                                     'dex_id': best.get('dexId', ''),
                                     'pair_address': best.get('pairAddress', '')
                                 }

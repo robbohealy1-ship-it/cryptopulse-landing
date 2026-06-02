@@ -45,29 +45,39 @@ class ViralGrowthEngine:
     async def post_to_reddit(self, signal=None, content_type='performance'):
         """
         Post to crypto subreddits (FREE)
-        Subreddits: r/CryptoMoonShots, r/CryptoSignals, r/altcoin, etc.
+        Runs sync praw in thread pool to avoid async warnings
         """
         if not self.platforms['reddit']:
             logger.info("Reddit posting disabled (enable with REDDIT_CLIENT_ID in .env)")
             return False
         
         try:
-            import praw  # Reddit API
+            import praw
             
+            # Build reddit instance with timeout
             reddit = praw.Reddit(
                 client_id=getattr(settings, 'REDDIT_CLIENT_ID', None),
                 client_secret=getattr(settings, 'REDDIT_CLIENT_SECRET', None),
                 username=getattr(settings, 'REDDIT_USERNAME', None),
                 password=getattr(settings, 'REDDIT_PASSWORD', None),
-                user_agent='CryptoPulseSignals/1.0'
+                user_agent='CryptoPulseSignals/1.0 by /u/' + str(getattr(settings, 'REDDIT_USERNAME', 'bot'))
             )
             
+            # Verify auth works
+            try:
+                me = reddit.user.me()
+                if not me:
+                    logger.error("Reddit auth failed: check credentials in .env")
+                    return False
+                logger.info(f"✅ Reddit authenticated as /u/{me.name}")
+            except Exception as auth_err:
+                logger.error(f"Reddit auth failed: {auth_err}")
+                return False
+            
             if content_type == 'performance':
-                # Post weekly performance
                 stats = await self._get_weekly_stats()
-                title = f"🎯 {stats['win_rate']:.0f}% Win Rate This Week - Free Crypto Signals"
-                body = f"""
-**CryptoPulse Signals - Weekly Results**
+                title = f"🎯 {stats['win_rate']:.0f}% Win Rate - Free Crypto Signals (Weekly Report)"
+                body = f"""**CryptoPulse Signals - Weekly Results**
 
 📊 **Performance:**
 - Win Rate: {stats['win_rate']:.1f}%
@@ -80,15 +90,37 @@ class ViralGrowthEngine:
 🌟 **VIP Access:** t.me/CryptoPulseVIPAccessBot
 
 All signals backed by AI + technical analysis. Join 1000+ traders!
+
+*This is an automated weekly performance report.*
 """
                 
-                # Post to multiple subreddits
+                # Post to multiple subreddits (use thread pool for sync praw)
                 subreddits = ['CryptoMoonShots', 'CryptoSignals', 'altcoin', 'SatoshiStreetBets']
+                loop = asyncio.get_event_loop()
+                
                 for sub in subreddits:
                     try:
-                        reddit.subreddit(sub).submit(title, selftext=body)
-                        logger.info(f"✅ Posted to r/{sub}")
+                        # Run sync praw in thread pool to avoid blocking event loop
+                        def _submit():
+                            try:
+                                reddit.subreddit(sub).submit(title, selftext=body)
+                                return True
+                            except Exception as submit_err:
+                                return submit_err
+                        
+                        result = await asyncio.wait_for(
+                            loop.run_in_executor(None, _submit),
+                            timeout=30.0
+                        )
+                        
+                        if result is True:
+                            logger.info(f"✅ Posted to r/{sub}")
+                        else:
+                            logger.warning(f"Reddit post to r/{sub} failed: {result}")
+                        
                         await asyncio.sleep(300)  # 5 min delay between posts
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Reddit post to r/{sub} timed out")
                     except Exception as e:
                         logger.warning(f"Reddit post to r/{sub} failed: {e}")
                 
@@ -335,9 +367,9 @@ Start inviting now! 🚀
             total_pnl = sum(s.get('pnl_percent', 0) or 0 for s in signals)
             win_rate = (len(wins) / len(signals) * 100) if signals else 0
             
-            best_signal = max(signals, key=lambda x: x.get('pnl_percent', 0))
+            best_signal = max(signals, key=lambda x: x.get('pnl_percent') or 0)
             
-            best_trades = sorted(signals, key=lambda x: x.get('pnl_percent', 0) or 0, reverse=True)[:3]
+            best_trades = sorted(signals, key=lambda x: x.get('pnl_percent') or 0, reverse=True)[:3]
             
             return {
                 'total': len(signals),

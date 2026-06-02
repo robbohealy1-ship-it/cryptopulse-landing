@@ -15,6 +15,7 @@ from src.models.signal import (
 from src.config import settings
 from src.utils.logger import get_logger
 from src.utils.signal_validation_pipeline import SignalValidationPipeline
+from src.conviction.conviction_engine import ConvictionEngine
 
 logger = get_logger(__name__)
 
@@ -42,6 +43,7 @@ class SignalEngine:
         self.context_engine = ContextEngine()
         self.strategy_factory = TimeframeStrategyFactory()
         self.signal_ranker = SignalRanker()  # NEW: Ranks signals, selects best 3/day
+        self.conviction_engine = ConvictionEngine()  # NEW: Multi-factor conviction scoring
         self.db = db
         self.validation_pipeline = SignalValidationPipeline(db=db)
         
@@ -52,11 +54,19 @@ class SignalEngine:
         self.max_signals_per_day = 3  # CHANGED: Always 3 signals per day
         self.min_risk_reward = settings.MIN_RISK_REWARD
         
+        # Signal mode (Strict/Balanced/Aggressive)
+        self.signal_mode = getattr(settings, 'SIGNAL_MODE', 'strict')  # Default: strict
+        
         # Dynamic threshold adjustment based on rolling win rate
         self._signal_history = deque(maxlen=50)  # Last 50 signal outcomes
         self._setup_performance = {}  # Setup type -> {wins, losses, win_rate}
         self._base_threshold = settings.MIN_CONFIDENCE_SCORE
         self._threshold_adjustment = 0.0  # +/- applied dynamically
+        
+        # Teaser signals: lower-confidence candidates sent to free channel as teasers
+        self.teaser_threshold = 60.0
+        self.teaser_candidates = []
+        self._sent_teasers = set()  # (symbol, timeframe) dedup
         
     async def initialize(self):
         logger.info("Initializing signal engine...")
@@ -78,7 +88,7 @@ class SignalEngine:
                 logger.warning(f"Could not reload signals from DB: {e}")
         logger.info("Signal engine initialized")
     
-    def reset_daily_counter(self):
+    def _reset_daily_counter(self):
         today = datetime.utcnow().date()
         if today > self.last_reset:
             self.signals_today = []
@@ -86,9 +96,23 @@ class SignalEngine:
             logger.info("Daily signal counter reset")
     
     def can_generate_signal(self) -> bool:
-        """Check if we can generate more signals today"""
-        approved_today = len([s for s in self.signals_today if s.status == SignalStatus.APPROVED])
-        return approved_today < self.max_signals_per_day
+        """Check if we can generate more signals today (VIP or free real)"""
+        self._reset_daily_counter()
+        vip_today = len([s for s in self.signals_today if s.status == SignalStatus.APPROVED and s.confidence >= 85])
+        free_today = len([s for s in self.signals_today if s.status == SignalStatus.APPROVED and 70 <= s.confidence < 85])
+        return vip_today < self.max_signals_per_day or free_today < 1
+    
+    def can_generate_vip_signal(self) -> bool:
+        """Check if we can generate more VIP signals today (85%+, max 3)"""
+        self._reset_daily_counter()
+        vip_today = len([s for s in self.signals_today if s.status == SignalStatus.APPROVED and s.confidence >= 85])
+        return vip_today < self.max_signals_per_day
+    
+    def can_generate_free_signal(self) -> bool:
+        """Check if we can generate more free real signals today (70-80%, max 1)"""
+        self._reset_daily_counter()
+        free_today = len([s for s in self.signals_today if s.status == SignalStatus.APPROVED and 70 <= s.confidence < 85])
+        return free_today < 1
     
     async def scan_for_signals(self, timeframe: str = '15m', min_confidence_override: float = None) -> List[TradingSignal]:
         if not self.can_generate_signal():
@@ -98,12 +122,12 @@ class SignalEngine:
         # Get timeframe-specific strategy for confidence threshold
         strategy = self.strategy_factory.get_strategy(timeframe)
         
-        if min_confidence_override:
-            min_confidence = min_confidence_override
-        else:
-            min_confidence = strategy.min_confidence
+        # Collect all signals ≥ 60% for tiered routing (VIP 85%+, Free 70-80%, Teasers <70%)
+        scan_threshold = min_confidence_override if min_confidence_override is not None else 60
+        strategy_min = strategy.min_confidence
+        min_confidence = scan_threshold
         
-        logger.info(f"🔍 Scanning {timeframe} timeframe (institutional analysis, min confidence: {min_confidence}%)...")
+        logger.info(f"🔍 Scanning {timeframe} timeframe (institutional analysis, collecting signals ≥ {min_confidence}%)...")
         
         pairs = await self.scanner.get_liquid_pairs()
         
@@ -115,7 +139,7 @@ class SignalEngine:
                 try:
                     # Small delay to avoid hammering the exchange
                     await asyncio.sleep(0.05)
-                    return await self.analyze_pair(symbol, timeframe)
+                    return await self.analyze_pair(symbol, timeframe, min_confidence_override=min_confidence)
                 except Exception as e:
                     logger.debug(f"Error analyzing {symbol}: {e}")
                     return None
@@ -124,32 +148,41 @@ class SignalEngine:
         tasks = [_analyze_with_limit(symbol) for symbol in pairs[:100]]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        candidates = []
+        all_signals = []
         for signal in results:
             if isinstance(signal, Exception):
                 continue
             if signal and signal.confidence >= min_confidence:
-                candidates.append(signal)
-                logger.info(f"🎯 Candidate: {signal.symbol} {timeframe} — Confidence: {signal.confidence:.1f}% | R:R {signal.risk_reward:.1f}")
+                all_signals.append(signal)
+                if signal.confidence >= 85:
+                    logger.info(f"🎯 Candidate: {signal.symbol} {timeframe} — Confidence: {signal.confidence:.1f}% | R:R {signal.risk_reward:.1f}")
+                else:
+                    logger.info(f"📢 Warm-up: {signal.symbol} {timeframe} — Confidence: {signal.confidence:.1f}% | R:R {signal.risk_reward:.1f}")
         
-        candidates.sort(key=lambda x: x.confidence, reverse=True)
+        all_signals.sort(key=lambda x: x.confidence, reverse=True)
         
-        # Top 3 candidates above minimum confidence
-        # 90%+ = VIP-exclusive routing, 85-89% = dual-channel routing
-        top_candidates = candidates[:3]
+        # Categorize into tiers
+        vip_candidates = [s for s in all_signals if s.confidence >= 85][:3]
+        free_real = [s for s in all_signals if 70 <= s.confidence < 85][:1]
         
-        if top_candidates:
-            vip_count = len([c for c in top_candidates if c.confidence >= 90])
-            dual_count = len(top_candidates) - vip_count
-            logger.info(f"Found {len(top_candidates)} candidates: {vip_count} VIP-only (90%+), {dual_count} dual-channel (85-89%)")
-            
-            # Filter out duplicates (same symbol already pending/active)
-            top_candidates = await self._filter_duplicates(top_candidates)
-            logger.info(f"After dedup: {len(top_candidates)} unique candidates")
+        # Teasers: everything else (below 70, or extra 70-80 beyond the 1 free real)
+        used_symbols = {s.symbol for s in vip_candidates + free_real}
+        teasers = [s for s in all_signals if s.symbol not in used_symbols][:2]
+        
+        self.free_real_candidates = free_real
+        self.teaser_candidates = teasers
+        
+        if vip_candidates:
+            logger.info(f"Found {len(vip_candidates)} VIP candidates (85%+), {len(free_real)} free real (70-80%), {len(teasers)} teasers")
         else:
-            logger.info(f"No candidates found above {min_confidence}% confidence")
+            logger.info(f"No VIP candidates. {len(free_real)} free real, {len(teasers)} teasers collected.")
         
-        return top_candidates
+        # Filter out duplicates for VIP candidates only
+        if vip_candidates:
+            vip_candidates = await self._filter_duplicates(vip_candidates)
+            logger.info(f"After dedup: {len(vip_candidates)} unique VIP candidates")
+        
+        return vip_candidates
     
     async def _filter_duplicates(self, candidates):
         """Remove candidates for symbols that already have pending/active signals in memory AND DB."""
@@ -179,7 +212,7 @@ class SignalEngine:
         
         return filtered
     
-    async def analyze_pair(self, symbol: str, timeframe: str) -> Optional[TradingSignal]:
+    async def analyze_pair(self, symbol: str, timeframe: str, min_confidence_override: float = None) -> Optional[TradingSignal]:
         """
         Institutional-grade signal analysis per timeframe.
         Uses timeframe-specific strategy + institutional tools + multi-TF alignment.
@@ -287,10 +320,53 @@ class SignalEngine:
             ) + confluence_bonus
             confidence = max(0, min(confidence, 100))
             
-            # Dynamic threshold adjustment based on recent performance
-            adjusted_min_conf = self._get_dynamic_threshold(strategy.min_confidence)
+            # NEW: Calculate conviction score using multi-factor engine
+            try:
+                conviction_breakdown = await self.conviction_engine.calculate_conviction(
+                    df, symbol, direction.value
+                )
+                conviction_score = conviction_breakdown.conviction_score
+                conviction_tier = conviction_breakdown.tier
+                
+                logger.info(
+                    f"🎯 {symbol} Conviction: {conviction_score:.1f}/100 ({conviction_tier}) | "
+                    f"Old Confidence: {confidence:.1f}% | "
+                    f"Struct: {conviction_breakdown.market_structure_score:.1f}/20 | "
+                    f"Liq: {conviction_breakdown.liquidity_score:.1f}/20 | "
+                    f"Vol: {conviction_breakdown.volume_score:.1f}/15"
+                )
+            except Exception as e:
+                logger.warning(f"Conviction engine failed for {symbol}, using old confidence: {e}")
+                conviction_score = confidence
+                conviction_tier = 'UNKNOWN'
+                conviction_breakdown = None
+            
+            # Use conviction score for filtering (replaces old confidence threshold)
+            # Allow override for warm-up signal collection
+            if min_confidence_override is not None:
+                min_conviction = min_confidence_override
+                adjusted_min_conf = min_confidence_override
+                filter_reason = f"override={min_confidence_override}"
+            else:
+                mode_thresholds = {
+                    'strict': 85,      # 0-5 signals/day, elite quality
+                    'balanced': 75,    # 5-15 signals/day, high quality
+                    'aggressive': 65   # 15-40 signals/day, moderate quality
+                }
+                min_conviction = mode_thresholds.get(self.signal_mode, 85)
+                adjusted_min_conf = self._get_dynamic_threshold(strategy.min_confidence)
+                filter_reason = f"{self.signal_mode} mode"
+            
+            if conviction_score < min_conviction:
+                logger.debug(
+                    f"📊 {symbol} {timeframe}: Conviction {conviction_score:.1f} < "
+                    f"threshold {min_conviction} ({filter_reason})"
+                )
+                return None
+            
+            # Dynamic threshold adjustment based on recent performance (legacy)
             if confidence < adjusted_min_conf:
-                logger.debug(f"📊 {symbol} {timeframe}: Confidence {confidence:.1f}% < adjusted threshold {adjusted_min_conf:.1f}%")
+                logger.debug(f"📊 {symbol} {timeframe}: Confidence {confidence:.1f}% < adjusted threshold {adjusted_min_conf:.1f}% ({filter_reason})")
                 return None
             
             # 11. MULTI-TIMEFRAME ALIGNMENT GATE
@@ -398,6 +474,9 @@ class SignalEngine:
                     total_score=context_score.total_score
                 ),
                 confidence=confidence,
+                conviction_score=conviction_score if conviction_breakdown else None,
+                conviction_tier=conviction_tier if conviction_breakdown else None,
+                conviction_breakdown=conviction_breakdown.to_dict() if conviction_breakdown else None,
                 reasoning=reasoning,
                 risk_reward=risk_reward,
                 atr=(df['high'].iloc[-20:] - df['low'].iloc[-20:]).mean(),

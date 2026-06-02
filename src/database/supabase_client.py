@@ -436,7 +436,7 @@ class SupabaseClient:
             closed = [s for s in signals if s.get('status') == 'closed']
             active = [s for s in signals if s.get('status') == 'active']
             
-            wins = len([s for s in closed if s.get('pnl_percent', 0) > 0])
+            wins = len([s for s in closed if (s.get('pnl_percent') or 0) > 0])
             
             # TP Hit tracking
             tp1_hits = sum(1 for s in signals if s.get('tp1_hit'))
@@ -469,8 +469,8 @@ class SupabaseClient:
                 'wins': wins,
                 'losses': len(closed) - wins,
                 'win_rate': (wins / len(closed) * 100) if closed else 0,
-                'total_pnl': sum(s.get('pnl_percent', 0) for s in closed),
-                'avg_confidence': sum(s.get('confidence', 0) for s in approved) / len(approved) if approved else 0,
+                'total_pnl': sum((s.get('pnl_percent') or 0) for s in closed),
+                'avg_confidence': sum((s.get('confidence') or 0) for s in approved) / len(approved) if approved else 0,
                 # TP/SL tracking
                 'tp1_hits': tp1_hits,
                 'tp2_hits': tp2_hits,
@@ -1052,6 +1052,128 @@ class SupabaseClient:
         except Exception as e:
             logger.debug(f"Audit log failed: {e}")
             return False
+
+    # ============== RESEARCH ENGINE ==============
+    
+    async def save_research_project(self, project: dict) -> bool:
+        """Save or update a research project"""
+        try:
+            self.client.table('research_projects').upsert(project).execute()
+            logger.info(f"✅ Research project {project.get('symbol')} saved")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving research project: {e}")
+            return False
+    
+    async def get_research_project(self, project_id: str) -> Optional[Dict]:
+        """Get a single research project by ID"""
+        try:
+            result = self.client.table('research_projects').select('*').eq('id', project_id).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error getting research project: {e}")
+            return None
+    
+    async def get_all_research_projects(self, status: str = None, limit: int = 100) -> List[Dict]:
+        """Get all research projects with optional status filter"""
+        try:
+            query = self.client.table('research_projects').select('*').order('conviction_score', desc=True).limit(limit)
+            if status:
+                query = query.eq('status', status)
+            result = query.execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting research projects: {e}")
+            return []
+    
+    async def update_research_project(self, project_id: str, updates: dict) -> bool:
+        """Update a research project"""
+        try:
+            self.client.table('research_projects').update(updates).eq('id', project_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating research project: {e}")
+            return False
+    
+    async def save_conviction_score(self, score: dict) -> bool:
+        """Save conviction score history"""
+        try:
+            self.client.table('conviction_history').insert(score).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error saving conviction score: {e}")
+            return False
+    
+    async def get_conviction_history(self, project_id: str, days: int = 30) -> List[Dict]:
+        """Get conviction score history for a project"""
+        try:
+            from datetime import timedelta
+            start_date = datetime.utcnow() - timedelta(days=days)
+            result = self.client.table('conviction_history').select('*')\
+                .eq('project_id', project_id)\
+                .gte('recorded_at', start_date.isoformat())\
+                .order('recorded_at', desc=True)\
+                .execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting conviction history: {e}")
+            return []
+    
+    async def get_alpha_basket(self) -> List[Dict]:
+        """Get current alpha basket"""
+        try:
+            result = self.client.table('alpha_basket').select('*')\
+                .eq('status', 'active')\
+                .order('rank')\
+                .execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting alpha basket: {e}")
+            return []
+    
+    async def add_to_basket(self, basket_entry: dict) -> bool:
+        """Add project to alpha basket"""
+        try:
+            self.client.table('alpha_basket').upsert(basket_entry).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding to basket: {e}")
+            return False
+    
+    async def remove_from_basket(self, project_id: str, reason: str = "") -> bool:
+        """Remove project from alpha basket"""
+        try:
+            self.client.table('alpha_basket').update({
+                'status': 'removed',
+                'removed_at': datetime.utcnow().isoformat(),
+                'removal_reason': reason
+            }).eq('project_id', project_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error removing from basket: {e}")
+            return False
+    
+    async def save_research_report(self, report: dict) -> bool:
+        """Save a research report"""
+        try:
+            self.client.table('research_reports').insert(report).execute()
+            logger.info(f"✅ Research report saved: {report.get('title')}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving research report: {e}")
+            return False
+    
+    async def get_research_reports(self, project_id: str = None, limit: int = 50) -> List[Dict]:
+        """Get research reports"""
+        try:
+            query = self.client.table('research_reports').select('*').order('generated_at', desc=True).limit(limit)
+            if project_id:
+                query = query.eq('project_id', project_id)
+            result = query.execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting research reports: {e}")
+            return []
 
     async def get_signal_audit(self, signal_id: str) -> List[Dict]:
         """Get full audit trail for a single signal."""

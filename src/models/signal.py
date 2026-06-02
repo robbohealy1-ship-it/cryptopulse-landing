@@ -86,6 +86,11 @@ class TradingSignal(BaseModel):
     context_score: ContextScore
     confidence: float = Field(ge=0, le=100)
     
+    # NEW: Conviction engine scores
+    conviction_score: Optional[float] = None  # 0-100 from conviction engine
+    conviction_tier: Optional[str] = None  # 'ELITE', 'VIP', 'WATCHLIST', 'REJECTED'
+    conviction_breakdown: Optional[dict] = None  # Full breakdown from conviction engine
+    
     reasoning: str
     chart_url: Optional[str] = None
     chart_path: Optional[str] = None

@@ -46,7 +46,7 @@ class CampaignEngine:
         self._notify_admin = admin_notification
 
         # Landing page URL (configured in .env or fallback)
-        self.landing_url = getattr(settings, 'LANDING_PAGE_URL', 'https://cryptopulsesignals.com')
+        self.landing_url = getattr(settings, 'LANDING_PAGE_URL', 'https://t.me/CryptoPulseVIPAccessBot')
         self.free_channel = getattr(settings, 'TELEGRAM_FREE_CHANNEL_ID', None)
         self.vip_channel = getattr(settings, 'TELEGRAM_VIP_CHANNEL_ID', None)
 

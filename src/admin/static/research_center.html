@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Research Center - CryptoPulse</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0e27; color: #e0e0e0; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #00d4ff; margin-bottom: 10px; }
+        .subtitle { color: #888; margin-bottom: 30px; }
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #1a1f3a; }
+        .tab { padding: 12px 24px; background: none; border: none; color: #888; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.3s; }
+        .tab:hover { color: #00d4ff; }
+        .tab.active { color: #00d4ff; border-bottom-color: #00d4ff; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
+        .stat-card { background: #1a1f3a; padding: 20px; border-radius: 8px; border-left: 4px solid #00d4ff; }
+        .stat-label { color: #888; font-size: 0.9em; margin-bottom: 5px; }
+        .stat-value { font-size: 2em; font-weight: bold; color: #00d4ff; }
+        table { width: 100%; background: #1a1f3a; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 15px; text-align: left; border-bottom: 1px solid #0a0e27; }
+        th { background: #151932; color: #00d4ff; font-weight: 600; }
+        tr:hover { background: #1f2542; }
+        .badge { padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+        .badge-high { background: #00ff8820; color: #00ff88; }
+        .badge-medium { background: #ffa50020; color: #ffa500; }
+        .badge-low { background: #ff444420; color: #ff4444; }
+        .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.3s; }
+        .btn-primary { background: #00d4ff; color: #0a0e27; }
+        .btn-primary:hover { background: #00a8cc; }
+        .btn-secondary { background: #1a1f3a; color: #00d4ff; border: 1px solid #00d4ff; }
+        .btn-secondary:hover { background: #00d4ff20; }
+        .loading { text-align: center; padding: 40px; color: #888; }
+        .empty { text-align: center; padding: 40px; color: #888; }
+        .score-bar { height: 8px; background: #0a0e27; border-radius: 4px; overflow: hidden; margin-top: 5px; }
+        .score-fill { height: 100%; background: linear-gradient(90deg, #ff4444, #ffa500, #00ff88); transition: width 0.3s; }
+        .actions { display: flex; gap: 8px; }
+        .clickable-row { cursor: pointer; transition: background 0.2s; }
+        .clickable-row:hover { background: #252b4d !important; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center; padding: 20px; }
+        .modal-overlay.active { display: flex; }
+        .modal-content { background: #0a0e27; border: 1px solid #1e2547; border-radius: 12px; width: 100%; max-width: 1000px; max-height: 90vh; overflow-y: auto; position: relative; }
+        .modal-header { padding: 20px; border-bottom: 1px solid #1e2547; display: flex; justify-content: space-between; align-items: center; }
+        .modal-header h2 { color: #00d4ff; margin: 0; }
+        .modal-close { background: none; border: none; color: #888; font-size: 1.5em; cursor: pointer; padding: 0; width: 32px; height: 32px; }
+        .modal-close:hover { color: #ff4444; }
+        .modal-body { padding: 0; }
+        .report-iframe { width: 100%; height: 70vh; border: none; background: #0a0e27; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔬 Research Center</h1>
+        <p class="subtitle">AI-Powered Crypto Investment Intelligence</p>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('projects')">Research Projects</button>
+            <button class="tab" onclick="switchTab('basket')">Alpha Basket</button>
+            <button class="tab" onclick="switchTab('reports')">Reports</button>
+        </div>
+
+        <!-- Projects Tab -->
+        <div id="projects-tab" class="tab-content active">
+            <div class="stats" id="project-stats">
+                <div class="stat-card">
+                    <div class="stat-label">Total Projects</div>
+                    <div class="stat-value" id="total-projects">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Avg Conviction</div>
+                    <div class="stat-value" id="avg-conviction">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">In Basket</div>
+                    <div class="stat-value" id="in-basket">0</div>
+                </div>
+            </div>
+
+            <div id="projects-loading" class="loading">Loading projects...</div>
+            <div id="projects-empty" class="empty" style="display:none;">No research projects yet. Run alpha discovery to create projects.</div>
+            <table id="projects-table" style="display:none;">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Chain</th>
+                        <th>Market Cap</th>
+                        <th>Conviction</th>
+                        <th>Quality</th>
+                        <th>Risk</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="projects-body"></tbody>
+            </table>
+        </div>
+
+        <!-- Basket Tab -->
+        <div id="basket-tab" class="tab-content">
+            <div style="margin-bottom: 20px;">
+                <button class="btn btn-primary" onclick="updateBasket()">🔄 Update Basket</button>
+            </div>
+
+            <div id="basket-loading" class="loading">Loading basket...</div>
+            <div id="basket-empty" class="empty" style="display:none;">Basket is empty. Update basket to populate.</div>
+            <table id="basket-table" style="display:none;">
+                <thead>
+                    <tr>
+                        <th>Rank</th>
+                        <th>Symbol</th>
+                        <th>Conviction</th>
+                        <th>Entry Price</th>
+                        <th>Current Price</th>
+                        <th>P&L</th>
+                        <th>Added</th>
+                    </tr>
+                </thead>
+                <tbody id="basket-body"></tbody>
+            </table>
+        </div>
+
+        <!-- Reports Tab -->
+        <div id="reports-tab" class="tab-content">
+            <div id="reports-loading" class="loading">Loading reports...</div>
+            <div id="reports-empty" class="empty" style="display:none;">No reports generated yet.</div>
+            <table id="reports-table" style="display:none;">
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Type</th>
+                        <th>Conviction</th>
+                        <th>Generated</th>
+                        <th>Published</th>
+                    </tr>
+                </thead>
+                <tbody id="reports-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'projects';
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById(`${tab}-tab`).classList.add('active');
+            
+            if (tab === 'projects') loadProjects();
+            else if (tab === 'basket') loadBasket();
+            else if (tab === 'reports') loadReports();
+        }
+
+        async function loadProjects() {
+            try {
+                const response = await fetch('/api/research/projects');
+                const data = await response.json();
+                
+                document.getElementById('projects-loading').style.display = 'none';
+                
+                if (!data.projects || data.projects.length === 0) {
+                    document.getElementById('projects-empty').style.display = 'block';
+                    document.getElementById('projects-table').style.display = 'none';
+                    return;
+                }
+                
+                // Update stats
+                document.getElementById('total-projects').textContent = data.projects.length;
+                const avgConv = data.projects.reduce((sum, p) => sum + (p.conviction_score || 0), 0) / data.projects.length;
+                document.getElementById('avg-conviction').textContent = avgConv.toFixed(1);
+                document.getElementById('in-basket').textContent = data.projects.filter(p => p.in_basket).length;
+                
+                // Populate table
+                const tbody = document.getElementById('projects-body');
+                tbody.innerHTML = data.projects.map(p => `
+                    <tr>
+                        <td><strong>${p.symbol}</strong><br><small>${p.name}</small></td>
+                        <td>${p.chain.toUpperCase()}</td>
+                        <td>$${(p.market_cap / 1e6).toFixed(2)}M</td>
+                        <td>
+                            <strong class="${getConvictionClass(p.conviction_score)}">${p.conviction_score?.toFixed(1) || 0}</strong>
+                            <div class="score-bar"><div class="score-fill" style="width: ${p.conviction_score || 0}%"></div></div>
+                        </td>
+                        <td>${p.quality_score?.toFixed(1) || 0}</td>
+                        <td>${p.risk_score?.toFixed(1) || 0}</td>
+                        <td><span class="badge badge-${p.in_basket ? 'high' : 'medium'}">${p.in_basket ? 'In Basket' : p.status}</span></td>
+                        <td class="actions">
+                            <button class="btn btn-secondary" onclick="rescoreProject('${p.id}')">Rescore</button>
+                            <button class="btn btn-secondary" onclick="generateReport('${p.id}')">Report</button>
+                        </td>
+                    </tr>
+                `).join('');
+                
+                document.getElementById('projects-empty').style.display = 'none';
+                document.getElementById('projects-table').style.display = 'table';
+                
+            } catch (error) {
+                console.error('Error loading projects:', error);
+                document.getElementById('projects-loading').innerHTML = `<span style="color:#ff4444;">Error loading projects: ${error.message}</span>`;
+            }
+        }
+
+        async function loadBasket() {
+            try {
+                const response = await fetch('/api/basket/current');
+                const data = await response.json();
+                
+                document.getElementById('basket-loading').style.display = 'none';
+                
+                if (!data.basket || data.basket.length === 0) {
+                    document.getElementById('basket-empty').style.display = 'block';
+                    document.getElementById('basket-table').style.display = 'none';
+                    return;
+                }
+                
+                const tbody = document.getElementById('basket-body');
+                tbody.innerHTML = data.basket.map(item => {
+                    const p = item.project;
+                    const e = item.entry;
+                    return `
+                        <tr>
+                            <td><strong>#${e.rank}</strong></td>
+                            <td><strong>${p.symbol}</strong></td>
+                            <td class="${getConvictionClass(p.conviction_score)}">${p.conviction_score?.toFixed(1) || 0}</td>
+                            <td>$${e.entry_price?.toFixed(6) || 0}</td>
+                            <td>$${e.current_price?.toFixed(6) || 0}</td>
+                            <td class="${e.pnl_percent >= 0 ? 'badge-high' : 'badge-low'}">${e.pnl_percent?.toFixed(2) || 0}%</td>
+                            <td>${new Date(e.added_at).toLocaleDateString()}</td>
+                        </tr>
+                    `;
+                }).join('');
+                
+                document.getElementById('basket-empty').style.display = 'none';
+                document.getElementById('basket-table').style.display = 'table';
+                
+            } catch (error) {
+                console.error('Error loading basket:', error);
+                document.getElementById('basket-loading').innerHTML = `<span style="color:#ff4444;">Error: ${error.message}</span>`;
+            }
+        }
+
+        async function loadReports() {
+            try {
+                const response = await fetch('/api/reports/list');
+                const data = await response.json();
+                
+                document.getElementById('reports-loading').style.display = 'none';
+                
+                if (!data.reports || data.reports.length === 0) {
+                    document.getElementById('reports-empty').style.display = 'block';
+                    document.getElementById('reports-table').style.display = 'none';
+                    return;
+                }
+                
+                const tbody = document.getElementById('reports-body');
+                tbody.innerHTML = data.reports.map(r => {
+                    var safeTitle = (r.title || 'Report').replace(/'/g, "\\'");
+                    return '<tr class="clickable-row" onclick="viewReport(\'' + r.id + '\', \'' + safeTitle + '\')">' +
+                        '<td><strong>' + (r.title || 'Untitled') + '</strong><br><small>' + r.report_type + '</small></td>' +
+                        '<td><span class="badge badge-medium">' + r.report_type + '</span></td>' +
+                        '<td>' + (r.conviction_score ? r.conviction_score.toFixed(1) : 0) + '</td>' +
+                        '<td>' + new Date(r.generated_at).toLocaleString() + '</td>' +
+                        '<td>' + (r.published ? '✅ Yes' : '❌ No') + '</td>' +
+                        '</tr>';
+                }).join('');
+                
+                document.getElementById('reports-empty').style.display = 'none';
+                document.getElementById('reports-table').style.display = 'table';
+                
+            } catch (error) {
+                console.error('Error loading reports:', error);
+                document.getElementById('reports-loading').innerHTML = `<span style="color:#ff4444;">Error: ${error.message}</span>`;
+            }
+        }
+
+        async function rescoreProject(projectId) {
+            if (!confirm('Recalculate conviction score for this project?')) return;
+            try {
+                const response = await fetch(`/api/research/projects/${projectId}/rescore`, { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    alert(`✅ Rescored! New conviction: ${data.new_conviction_score.toFixed(1)}/100`);
+                    loadProjects();
+                } else {
+                    alert('❌ Rescore failed');
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        async function generateReport(projectId) {
+            if (!confirm('Generate research report for this project?')) return;
+            try {
+                const response = await fetch('/api/reports/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ project_id: projectId })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    alert('✅ Report generated!');
+                    switchTab('reports');
+                    loadReports();
+                } else {
+                    alert('❌ Report generation failed');
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        async function updateBasket() {
+            if (!confirm('Update alpha basket rankings?')) return;
+            try {
+                const response = await fetch('/api/basket/update', { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    alert(`✅ Basket updated! ${data.count} projects`);
+                    loadBasket();
+                } else {
+                    alert('❌ Basket update failed');
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        function getConvictionClass(score) {
+            if (score >= 70) return 'badge-high';
+            if (score >= 50) return 'badge-medium';
+            return 'badge-low';
+        }
+
+        async function viewReport(reportId, title) {
+            try {
+                const response = await fetch(`/api/reports/${reportId}`);
+                const data = await response.json();
+                
+                if (!data.success || !data.report) {
+                    alert('Report not found');
+                    return;
+                }
+                
+                const report = data.report;
+                const modal = document.getElementById('report-modal');
+                const iframe = document.getElementById('report-iframe');
+                const modalTitle = document.getElementById('modal-title');
+                
+                modalTitle.textContent = '📄 ' + (report.title || 'Research Report');
+                
+                // If we have rich AI content, display it; otherwise build from sections
+                if (report.ai_report_content) {
+                    iframe.srcdoc = report.ai_report_content;
+                } else {
+                    // Build basic report HTML from sections
+                    const html = buildBasicReportHtml(report, data.project);
+                    iframe.srcdoc = html;
+                }
+                
+                modal.classList.add('active');
+            } catch (error) {
+                console.error('Error viewing report:', error);
+                alert('Error loading report: ' + error.message);
+            }
+        }
+        
+        function buildBasicReportHtml(report, project) {
+            var risksHtml = '';
+            var risks = report.key_risks || [];
+            for (var i = 0; i < risks.length; i++) {
+                risksHtml += '<li>' + risks[i] + '</li>';
+            }
+            return '<!DOCTYPE html><html><head><style>' +
+                'body { font-family: sans-serif; background: #0a0e27; color: #e0e0e0; padding: 20px; line-height: 1.6; }' +
+                'h2 { color: #00d4ff; border-bottom: 2px solid #1e2547; padding-bottom: 10px; }' +
+                '.section { margin-bottom: 20px; } .section h3 { color: #00d4ff; }' +
+                '.meta { color: #888; font-size: 0.9em; margin-bottom: 20px; }' +
+                '</style></head><body>' +
+                '<h2>' + (report.title || 'Report') + '</h2>' +
+                '<div class="meta">Generated: ' + new Date(report.generated_at).toLocaleString() + '</div>' +
+                '<div class="section"><h3>Executive Summary</h3><p>' + (report.executive_summary || '') + '</p></div>' +
+                '<div class="section"><h3>Investment Thesis</h3><p>' + (report.investment_thesis || '').replace(/\\n/g, '<br>') + '</p></div>' +
+                '<div class="section"><h3>Bull Case</h3><p>' + (report.bull_case || '').replace(/\\n/g, '<br>') + '</p></div>' +
+                '<div class="section"><h3>Bear Case</h3><p>' + (report.bear_case || '').replace(/\\n/g, '<br>') + '</p></div>' +
+                '<div class="section"><h3>Key Risks</h3><ul>' + risksHtml + '</ul></div>' +
+                '<div class="section"><h3>Scores</h3><p>Conviction: ' + (report.conviction_score ? report.conviction_score.toFixed(1) : 0) + 
+                '/100 | Risk: ' + (report.risk_score ? report.risk_score.toFixed(1) : 0) + '/100</p></div>' +
+                '</body></html>';
+        }
+        
+        function closeModal(event) {
+            if (!event || event.target.id === 'report-modal') {
+                document.getElementById('report-modal').classList.remove('active');
+                document.getElementById('report-iframe').srcdoc = '';
+            }
+        }
+
+        // Load initial data
+        loadProjects();
+    </script>
+
+    <!-- Report Detail Modal -->
+    <div id="report-modal" class="modal-overlay" onclick="closeModal(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2 id="modal-title">📄 Research Report</h2>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <iframe id="report-iframe" class="report-iframe"></iframe>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

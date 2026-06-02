@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import datetime
 from telegram import Bot
 from telegram.error import NetworkError
@@ -70,6 +71,9 @@ class ChannelPublisher:
                 logger.warning(f"Chart generation failed for {signal.symbol}: {chart_err}")
             
             # Send full text as reply to chart (or standalone if no chart)
+            # Append referral CTA at the very end of the message
+            vip_message += self._get_referral_cta()
+            
             kwargs = {'chat_id': self.vip_channel_id, 'text': vip_message, 'parse_mode': 'HTML'}
             if chart_msg_id:
                 kwargs['reply_to_message_id'] = chart_msg_id
@@ -104,6 +108,9 @@ class ChannelPublisher:
                 f"or DM @CryptoPulseVIPAccessBot"
             )
             
+            # Append referral CTA
+            text += self._get_referral_cta()
+            
             msg = await self.bot.send_message(
                 chat_id=self.free_channel_id,
                 text=text,
@@ -125,9 +132,11 @@ class ChannelPublisher:
         # CUSTOM: User pasted their own URL — use it exactly as-is
         if exchange == 'custom':
             custom_url = settings.AFFILIATE_CUSTOM_URL
-            if custom_url:
+            if custom_url and not self._is_placeholder_url(custom_url):
                 return custom_url
-            # Fallback if custom URL not set
+            elif custom_url and self._is_placeholder_url(custom_url):
+                logger.warning(f"⚠️ Skipping custom exchange link — placeholder detected in {custom_url}")
+            # Fallback if custom URL not set or is placeholder
             return "https://www.google.com/search?q=" + symbol.replace('/', '') + "+USDT+price"
         
         base = symbol.replace('/', '').replace('USDT', '').replace('USD', '')
@@ -160,18 +169,69 @@ class ChannelPublisher:
         else:
             # Default to custom URL or search fallback
             custom_url = settings.AFFILIATE_CUSTOM_URL
-            if custom_url:
+            if custom_url and not self._is_placeholder_url(custom_url):
                 return custom_url
             return f"https://www.google.com/search?q={base}+USDT+price"
         
         return url
     
+    def _is_placeholder_url(self, url: str) -> bool:
+        """Detect unreplaced placeholder URLs that should not be sent."""
+        if not url:
+            return True
+        placeholders = ['HYPERLIQUIDCODE', 'YOURCODE', 'YOUR_REF', 'PLACEHOLDER', 'EXAMPLE', 'XXXXXX', 'ABC123']
+        url_upper = url.upper()
+        for p in placeholders:
+            # Only match as a whole segment (not followed by more letters/numbers)
+            # e.g. HYPERLIQUIDCODE blocks, HYPERLIQUIDCODECP allows
+            pattern = re.escape(p) + r'(?![A-Z0-9])'
+            if re.search(pattern, url_upper):
+                return True
+        return False
+
     def _get_referral_cta(self) -> str:
-        """Return a prominent referral link CTA if AFFILIATE_CUSTOM_URL is configured."""
-        custom_url = settings.AFFILIATE_CUSTOM_URL
-        if not custom_url:
-            return ""
-        return f"""\n� <a href="{custom_url}"><b>Trade {self._current_symbol or ''} on MEXC</b></a> 🔷\n<i>Low fees · Deep liquidity · Support the channel</i>\n"""
+        """Return referral links for Hyperliquid, MEXC, and HYROTrader at the bottom of signals."""
+        hyperliquid_url = settings.AFFILIATE_CUSTOM_URL
+        mexc_ref = getattr(settings, 'MEXC_REFERRAL_CODE', None)
+        hyro_url = getattr(settings, 'HYROTRADER_REFERRAL_URL', None)
+        
+        cta = ""
+        
+        # Hyperliquid referral link — skip if it's a placeholder URL
+        if hyperliquid_url and not self._is_placeholder_url(hyperliquid_url):
+            cta += f"\n\n<a href=\"{hyperliquid_url}\"><b>🔥 Trade on Hyperliquid</b></a>"
+        elif hyperliquid_url and self._is_placeholder_url(hyperliquid_url):
+            logger.warning(f"⚠️ Skipping Hyperliquid referral link — placeholder detected in {hyperliquid_url}")
+        
+        # MEXC referral link — handle full URLs, paths, or plain codes
+        if mexc_ref:
+            mexc_url = None
+            mexc_ref_stripped = mexc_ref.strip()
+            
+            if mexc_ref_stripped.startswith('http'):
+                # It's already a full URL — use it directly
+                mexc_url = mexc_ref_stripped
+            elif mexc_ref_stripped.startswith('/r/'):
+                # It's a path like /r/CODE — prepend promote.mexc.com
+                mexc_url = f"https://promote.mexc.com{mexc_ref_stripped}"
+            elif '/' in mexc_ref_stripped:
+                # It contains a slash but doesn't start with /r/ — might be a full path
+                mexc_url = f"https://promote.mexc.com{mexc_ref_stripped}"
+            else:
+                # Plain referral code
+                mexc_url = f"https://www.mexc.com/register?inviteCode={mexc_ref_stripped}"
+            
+            if mexc_url:
+                cta += f"\n<a href=\"{mexc_url}\"><b>💎 Trade on MEXC</b></a>"
+        
+        # HYROTrader (Prop Firm) referral link
+        if hyro_url:
+            cta += f"\n<a href=\"{hyro_url}\"><b>🚀 Trade using prop — HYROTrader</b></a>"
+        
+        if cta:
+            cta += "\n<i>Low fees · Deep liquidity · Support the channel</i>"
+        
+        return cta
     
     _current_symbol: str = ""
     
@@ -210,6 +270,7 @@ Join VIP to get:
 👉 DM @{settings.TELEGRAM_VIP_BOT_USERNAME} for instant VIP access
 💰 Crypto payments accepted"""
             
+            teaser += self._get_referral_cta()
             await self.bot.send_message(
                 chat_id=self.free_channel_id,
                 text=teaser,
@@ -219,6 +280,94 @@ Join VIP to get:
             
         except Exception as e:
             logger.error(f"Error sending VIP teaser: {e}")
+    
+    async def publish_teaser_to_free(self, signal: TradingSignal):
+        """Send a 'warm-up' teaser for a lower-confidence signal to the free channel.
+        These signals don't make the VIP cut but still show value to free members."""
+        try:
+            direction_emoji = "🟢 LONG" if signal.direction.value == "LONG" else "🔴 SHORT"
+            ticker = signal.symbol.replace('/', '')
+            
+            text = (
+                f"📊 <b>{direction_emoji} WARM-UP SIGNAL</b>\n\n"
+                f"<b>#{ticker}</b> | Confidence: {signal.confidence:.0f}%\n"
+                f"⏱ Timeframe: {signal.timeframe}\n\n"
+                f"💡 <b>This is a warm-up setup.</b>\n"
+                f"💎 <b>VIP members get the elite signals:</b>\n"
+                f"   ✅ 85%+ confidence only\n"
+                f"   ✅ Exact entry, SL & 3 TPs\n"
+                f"   ✅ Live trade management\n"
+                f"   ✅ Risk guidance & sizing\n\n"
+                f"🔐 <a href='https://t.me/CryptoPulseVIPAccessBot'>Join VIP for elite signals</a>\n"
+                f"or DM @CryptoPulseVIPAccessBot"
+            )
+            
+            text += self._get_referral_cta()
+            
+            msg = await self.bot.send_message(
+                chat_id=self.free_channel_id,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=False
+            )
+            logger.info(f"Published warm-up teaser for {signal.symbol} to FREE channel")
+            return msg
+            
+        except Exception as e:
+            logger.error(f"Error publishing teaser to free channel: {e}")
+    
+    async def publish_free_real_to_free(self, signal: TradingSignal):
+        """Send a full signal (entry, SL, TPs) to the free channel.
+        This is the 1-per-day 70-80% confidence free-tier signal."""
+        try:
+            direction_emoji = "🟢" if signal.direction.value == "LONG" else "🔴"
+            link = self._get_exchange_link(signal.symbol)
+            ticker = signal.symbol.replace('/', '')
+            self._current_symbol = ticker
+            
+            tp2_line = f"TP2: ${signal.take_profit_2:.8f}" if signal.take_profit_2 else ""
+            tp3_line = f"TP3: ${signal.take_profit_3:.8f}" if signal.take_profit_3 else ""
+            
+            entry_type = "⏳ <b>LIMIT ORDER</b>" if signal.is_limit_order else "⚡ <b>MARKET ENTRY</b>"
+            entry_instruction = f"Set limit order at ${signal.entry_price:.8f} — wait for retest" if signal.is_limit_order else f"Enter now at market price (~${signal.entry_price:.8f})"
+            
+            text = (
+                f"📊 {direction_emoji} <b>FREE SIGNAL</b> {direction_emoji}\n\n"
+                f"<a href='{link}'><b>#{ticker}</b></a>\n"
+                f"<b>Direction:</b> {signal.direction.value}\n"
+                f"<b>Timeframe:</b> {signal.timeframe}\n\n"
+                f"{entry_type}\n"
+                f"💰 <b>Entry:</b> ${signal.entry_price:.8f}\n"
+                f"🔹 <i>{entry_instruction}</i>\n\n"
+                f"🛑 <b>Stop Loss:</b> ${signal.stop_loss:.8f}\n\n"
+                f"🎯 <b>Targets:</b>\n"
+                f"TP1: ${signal.take_profit_1:.8f}\n"
+                f"{tp2_line}\n"
+                f"{tp3_line}\n\n"
+                f"📊 <b>Risk/Reward:</b> 1:{signal.risk_reward:.2f}\n"
+                f"⚡ <b>Confidence:</b> {signal.confidence:.1f}%\n"
+                f"⚠️ <b>Risk Management:</b>\n"
+                f"• Use proper position sizing\n"
+                f"• Never risk more than 2% per trade\n"
+                f"• Move SL to breakeven after TP1\n\n"
+                f"<i>💎 Want 85%+ elite signals with live management?\n"
+                f"Join VIP for premium signals!</i>"
+            )
+            
+            # Append referral CTA at the very end
+            text += self._get_referral_cta()
+            
+            msg = await self.bot.send_message(
+                chat_id=self.free_channel_id,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=False
+            )
+            logger.info(f"Published FREE REAL signal for {signal.symbol} to FREE channel")
+            return msg
+            
+        except Exception as e:
+            logger.error(f"Error publishing free real signal to free channel: {e}")
     
     def _format_signal_for_channel(self, signal: TradingSignal, vip_only: bool = False) -> str:
         direction_emoji = "🟢" if signal.direction.value == "LONG" else "🔴"
@@ -319,7 +468,6 @@ TP1: ${signal.take_profit_1:.8f}
 📊 <b>Risk/Reward:</b> 1:{signal.risk_reward:.2f}
 ⚡ <b>Confidence:</b> {signal.confidence:.1f}%
 {chart_section}
-{self._get_referral_cta()}
 <b>📋 Analysis:</b>
 {signal.reasoning or 'Analysis loading...'}
 
@@ -336,6 +484,8 @@ TP1: ${signal.take_profit_1:.8f}
 • Never risk more than 2% per trade
 • Move SL to breakeven after TP1
 
+� <b>New to trading?</b> Type /guide in this bot for a full walkthrough.
+
 <i>Signal ID: {(signal.id[:8] if signal.id else 'MANUAL')}</i>
 """
         else:
@@ -347,7 +497,7 @@ TP1: ${signal.take_profit_1:.8f}
 {direction_emoji} <b>FREE SIGNAL</b> {direction_emoji}
 
 <a href="{link}"><b>#{ticker}</b></a> | {signal.direction.value}
-{self._get_referral_cta()}
+
 💰 <b>Entry:</b> ${signal.entry_price:.8f}
 🛑 <b>Stop Loss:</b> ${signal.stop_loss:.8f}
 
@@ -403,6 +553,7 @@ Join VIP for premium signals!
             vip_text += "\n✅ Full position closed"
         
         # Send to VIP
+        vip_text += self._get_referral_cta()
         if signal.vip_channel_message_id:
             await self.bot.send_message(
                 chat_id=self.vip_channel_id,
@@ -418,7 +569,8 @@ Join VIP for premium signals!
             free_text += f"Target {tp_str} reached\n\n"
             free_text += "💎 <b>Want TP2, TP3 and live updates?</b>\n"
             free_text += "Join VIP for full trade management!\n\n"
-            free_text += "👉 DM @{settings.TELEGRAM_VIP_BOT_USERNAME} for VIP access"
+            free_text += f"👉 DM @{settings.TELEGRAM_VIP_BOT_USERNAME} for VIP access"
+            free_text += self._get_referral_cta()
             
             await self.bot.send_message(
                 chat_id=self.free_channel_id,
@@ -440,8 +592,9 @@ Join VIP for premium signals!
         
         tp_val = getattr(signal, f'take_profit_{tp_level}', None)
         tp_str = f"${tp_val:.4f}" if tp_val is not None else "N/A"
-        free_text = f"� <b>{signal.symbol} TP{tp_level} HIT</b>\nTarget {tp_str} reached\n\n"
+        free_text = f"🎯 <b>{signal.symbol} TP{tp_level} HIT</b>\nTarget {tp_str} reached\n\n"
         free_text += f"Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot'}"
+        free_text += self._get_referral_cta()
         
         await self.bot.send_message(
             chat_id=self.free_channel_id,
@@ -475,6 +628,7 @@ Join VIP for premium signals!
             f"P&L: {pnl_emoji} {pnl:+.2f}%\n"
             f"Closed: {datetime.utcnow().strftime('%H:%M UTC')}"
         )
+        vip_text += self._get_referral_cta()
         
         # Free gets teaser
         free_text = (
@@ -482,6 +636,7 @@ Join VIP for premium signals!
             f"P&L: {pnl_emoji} {pnl:+.2f}%\n\n"
             f"Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot'}"
         )
+        free_text += self._get_referral_cta()
         
         try:
             if self.vip_channel_id:

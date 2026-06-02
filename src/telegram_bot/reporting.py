@@ -138,91 +138,128 @@ See you tomorrow! 💎"""
             return {'admin': 'Error generating report', 'vip': 'Error generating report'}
     
     async def generate_weekly_report(self) -> Dict[str, str]:
-        """Generate weekly report for admin and VIP - ALWAYS positive framing"""
+        """Generate weekly report with REAL trade data — no generic templates"""
         try:
-            stats = await self.db.get_weekly_stats()
+            from datetime import datetime, timedelta
+            today = datetime.utcnow()
+            start_of_week = today - timedelta(days=today.weekday())
+            start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
             
-            week_start = stats.get('week_start', '')
-            wins = stats.get('wins', 0)
-            losses = stats.get('losses', 0)
-            total = stats.get('total_signals', 0)
-            win_rate = stats.get('win_rate', 0)
-            pnl = stats.get('total_pnl', 0)
-            avg_rr = stats.get('avg_rr', 0)
+            # Pull REAL closed signals from this week
+            week_closed = await self.db.get_closed_signals(days=7)
+            week_closed = [s for s in week_closed
+                          if s.closed_at and s.closed_at >= start_of_week]
             
-            # Positive framing
-            pnl_emoji = "🟢" if pnl >= 0 else "📊"
-            pnl_text = f"+{pnl:.2f}% profit" if pnl >= 0 else f"{pnl:.2f}% (risk managed)"
+            # Pull ALL closed signals for running total
+            all_closed = await self.db.get_closed_signals(days=365)
             
-            # VIP narrative
-            if win_rate >= 60 and pnl > 0:
-                narrative = "Another profitable week following the system. Discipline pays."
-            elif win_rate >= 50:
-                narrative = "Solid week with professional risk management. Consistency is key."
+            # Calculate REAL weekly stats from actual signals
+            wins = [s for s in week_closed if (s.pnl_percent or 0) > 0]
+            losses = [s for s in week_closed if (s.pnl_percent or 0) <= 0]
+            week_pnl = sum((s.pnl_percent or 0) for s in week_closed)
+            win_rate = (len(wins) / len(week_closed) * 100) if week_closed else 0
+            
+            # Running total PnL (all time)
+            total_pnl = sum((s.pnl_percent or 0) for s in all_closed)
+            total_wins = len([s for s in all_closed if (s.pnl_percent or 0) > 0])
+            total_losses = len(all_closed) - total_wins
+            total_win_rate = (total_wins / len(all_closed) * 100) if all_closed else 0
+            
+            # Best and worst trade this week
+            best_trade = max(week_closed, key=lambda s: s.pnl_percent or 0) if week_closed else None
+            worst_trade = min(week_closed, key=lambda s: s.pnl_percent or 0) if week_closed else None
+            
+            # Build individual trade lines
+            trade_lines = []
+            for s in week_closed:
+                emoji = "🟢" if (s.pnl_percent or 0) > 0 else "🔴"
+                trade_lines.append(
+                    f"{emoji} {s.symbol} {s.direction.value}: {s.pnl_percent or 0:+.2f}%"
+                )
+            trades_text = "\n".join(trade_lines) if trade_lines else "No trades closed this week yet."
+            
+            pnl_emoji = "🟢" if week_pnl >= 0 else "📊"
+            pnl_text = f"+{week_pnl:.2f}%" if week_pnl >= 0 else f"{week_pnl:.2f}%"
+            
+            # Specific narrative based on REAL data
+            if week_closed:
+                if week_pnl > 0:
+                    narrative = f"Week closed +{week_pnl:.2f}%. Best trade: {best_trade.symbol} at +{best_trade.pnl_percent:.2f}%."
+                elif week_pnl < 0:
+                    narrative = f"Week closed {week_pnl:.2f}%. {len(wins)} win(s), {len(losses)} loss(es). Edge plays out over sample size."
+                else:
+                    narrative = f"Week closed flat. {len(wins)} win(s), {len(losses)} loss(es)."
             else:
-                narrative = "Tough week but every signal followed the plan. The edge plays out over time."
+                narrative = "No signals closed this week yet. Active trades still running."
             
-            # Free channel CTA based on performance
-            if win_rate >= 60:
-                free_cta = f"🔥 {win_rate:.0f}% win rate this week! Imagine your results with VIP access..."
-            else:
-                free_cta = "💎 VIP signals are filtered through 6+ quality gates. The edge adds up over time."
+            # Active trades still running
+            active_signals = await self.db.get_active_signals()
+            active_text = ""
+            if active_signals:
+                active_lines = [f"⏳ {s.symbol} {s.direction.value} (entry ${s.actual_entry or s.entry_price:.4f})" for s in active_signals[:5]]
+                active_text = "\n<b>Still Running:</b>\n" + "\n".join(active_lines)
             
-            # Admin report (full)
-            admin_report = f"""📊 <b>WEEKLY REPORT</b>
-<b>Week of {week_start}</b>
+            # Admin report (full details)
+            admin_report = f"""📊 <b>WEEKLY REPORT — {start_of_week.strftime('%d %b')} to {today.strftime('%d %b')}</b>
 
-<b>Signal Summary:</b>
-📡 Total Signals: {total}
-🏆 Winners: {wins}
-📊 Managed: {losses} (stopped per plan)
+<b>This Week's Closed Trades ({len(week_closed)}):</b>
+{trades_text}
+
+<b>This Week:</b>
+{pnl_emoji} Weekly P&L: {pnl_text}
+🏆 Wins: {len(wins)} | 📊 Losses: {len(losses)}
 📈 Win Rate: {win_rate:.1f}%
 
-<b>Performance:</b>
-{pnl_emoji} Total Result: {pnl_text}
-📊 Average R/R: {avg_rr:.2f}
-🏆 Most Traded: {stats.get('most_traded', 'N/A')}
+<b>Running Total (All Time):</b>
+💰 Total P&L: {total_pnl:+.2f}%
+🏆 {total_wins} wins | 📊 {total_losses} losses
+� Overall Win Rate: {total_win_rate:.1f}%
 
-<b>System Health:</b>
-✅ Quality-first filtering working
-🎯 Only elite setups make the cut
+<b>Best This Week:</b>
+{best_trade.symbol if best_trade else 'N/A'}: +{best_trade.pnl_percent:.2f}%"""
+            if worst_trade and worst_trade != best_trade:
+                admin_report += f"\n<b>Worst This Week:</b>\n{worst_trade.symbol}: {worst_trade.pnl_percent:.2f}%"
+            admin_report += f"""
+{active_text}
 
 Keep up the great work! 🚀"""
 
-            # VIP report (summary)
+            # VIP report — real data, no generic templates
             vip_report = f"""🏆 <b>WEEKLY VIP SUMMARY</b>
+<b>{start_of_week.strftime('%d %b')} — {today.strftime('%d %b')}</b>
 
-<b>This Week:</b>
-✅ {total} elite signals delivered
-🏆 {wins} hit profit targets
-📈 Win Rate: {win_rate:.1f}%
-{pnl_emoji} {pnl_text}
-📊 Avg R/R: {avg_rr:.2f}
+<b>This Week's Results ({len(week_closed)} closed):</b>
+{trades_text}
+
+<b>Week P&L:</b> {pnl_emoji} {pnl_text}
+<b>Win Rate:</b> {win_rate:.1f}% ({len(wins)}W / {len(losses)}L)
+
+<b>Running Total P&L:</b> � {total_pnl:+.2f}%
+<b>All-Time Record:</b> {total_wins}W / {total_losses}L ({total_win_rate:.1f}%)
 
 <b>The Bottom Line:</b>
 {narrative}
 
-<b>VIP Advantage:</b>
-Every signal passed 85%+ confidence, multi-timeframe alignment,
-strict risk management, and fundamental analysis.
-
-That's why professionals use systems, not guesswork.
+{active_text}
 
 See you next week! 💎"""
 
-            # Free channel marketing summary
+            # Free channel marketing — specific numbers only
+            if week_closed and week_pnl != 0:
+                free_cta = f"🔥 VIPs closed {len(week_closed)} signals this week for {pnl_text} P&L."
+            else:
+                free_cta = "💎 VIP signals with full trade management and live updates."
+            
             free_report = f"""📊 <b>Weekly VIP Performance</b>
+<b>{start_of_week.strftime('%d %b')} — {today.strftime('%d %b')}</b>
 
-Our VIP members this week:
-✅ {total} premium signals
-🏆 {wins} hit profit targets
-📈 {win_rate:.1f}% win rate
-{pnl_emoji} {pnl_text}
+This week VIPs:
+✅ {len(week_closed)} signals closed
+🏆 {len(wins)} wins | � {len(losses)} losses
+{pnl_emoji} Weekly P&L: {pnl_text}
+� Running total: {total_pnl:+.2f}%
 
 {free_cta}
-
-💎 Want these results?
-Join VIP for elite signals!
 
 👉 DM @{settings.TELEGRAM_VIP_BOT_USERNAME} for access
 💰 Crypto payments accepted"""
@@ -236,9 +273,9 @@ Join VIP for elite signals!
         except Exception as e:
             logger.error(f"Error generating weekly report: {e}")
             return {
-                'admin': 'Error generating weekly report',
-                'vip': 'Error generating weekly report',
-                'free': 'Error generating weekly report'
+                'admin': f'Error generating weekly report: {e}',
+                'vip': f'Error generating weekly report: {e}',
+                'free': f'Error generating weekly report: {e}'
             }
     
     async def generate_vip_outlook(self) -> str:

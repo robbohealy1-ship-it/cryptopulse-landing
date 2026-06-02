@@ -18,6 +18,8 @@ from src.marketing.traffic_tracker import TrafficTracker, ReferralTracker
 from src.marketing.autopilot_system import AutoPilotSystem
 from src.marketing.campaign_engine import CampaignEngine
 from src.marketing.viral_growth_engine import ViralGrowthEngine
+from src.marketing.telegram_group_poster import TelegramGroupPoster
+from src.marketing.discord_webhook_poster import DiscordWebhookPoster
 from src.marketing.pro_features import (
     WhaleAlertSystem, EducationalContentEngine, CustomAlertSystem,
     GiveawayEngine, BonusReportEngine, PrioritySupport
@@ -171,6 +173,15 @@ class CryptoPulseOrchestrator:
                 channel_publisher=self.channel_publisher
             )
             logger.info("🚀 Viral Growth Engine initialized")
+            
+            # Initialize Telegram Group Poster
+            self.telegram_group_poster = TelegramGroupPoster(db=self.db)
+            logger.info("📱 Telegram Group Poster initialized")
+            
+            # Initialize Discord Webhook Poster
+            self.discord_webhook_poster = DiscordWebhookPoster(db=self.db)
+            webhook_count = len(self.discord_webhook_poster.webhooks)
+            logger.info(f"🔷 Discord Webhook Poster initialized ({webhook_count} webhooks)")
             
             # Log marketing engine status
             logger.info("📣 Marketing Engine Status:")
@@ -453,6 +464,48 @@ class CryptoPulseOrchestrator:
             replace_existing=True
         )
         
+        # Telegram Group Marketing: 3 times per day (09:00, 14:00, 20:00 UTC)
+        self.scheduler.add_job(
+            self._post_to_telegram_groups_morning,
+            CronTrigger(hour=9, minute=0),
+            id='telegram_groups_morning',
+            name='Telegram Groups: Morning post (09:00 UTC)',
+            replace_existing=True
+        )
+        
+        self.scheduler.add_job(
+            self._post_to_telegram_groups_afternoon,
+            CronTrigger(hour=14, minute=0),
+            id='telegram_groups_afternoon',
+            name='Telegram Groups: Afternoon post (14:00 UTC)',
+            replace_existing=True
+        )
+        
+        self.scheduler.add_job(
+            self._post_to_telegram_groups_evening,
+            CronTrigger(hour=20, minute=0),
+            id='telegram_groups_evening',
+            name='Telegram Groups: Evening post (20:00 UTC)',
+            replace_existing=True
+        )
+        
+        # Discord Webhook Marketing: 2 times per day (10:00, 18:00 UTC)
+        self.scheduler.add_job(
+            self._post_to_discord_webhooks_morning,
+            CronTrigger(hour=10, minute=0),
+            id='discord_webhooks_morning',
+            name='Discord Webhooks: Morning post (10:00 UTC)',
+            replace_existing=True
+        )
+        
+        self.scheduler.add_job(
+            self._post_to_discord_webhooks_evening,
+            CronTrigger(hour=18, minute=0),
+            id='discord_webhooks_evening',
+            name='Discord Webhooks: Evening post (18:00 UTC)',
+            replace_existing=True
+        )
+        
         # 🧠 AI Content Generation (if enabled)
         if settings.AI_EDUCATION_ENABLED:
             self.scheduler.add_job(
@@ -510,6 +563,8 @@ class CryptoPulseOrchestrator:
             if candidates:
                 logger.info(f"✅ 4h scan found {len(candidates)} position candidate(s)")
             await self.process_candidates(candidates)
+            await self._process_free_real_candidates()
+            await self._publish_teasers('4h')
         except Exception as e:
             logger.error(f"Error in 4h scan: {e}")
     
@@ -520,8 +575,26 @@ class CryptoPulseOrchestrator:
             if candidates:
                 logger.info(f"✅ Daily scan found {len(candidates)} macro candidate(s)")
             await self.process_candidates(candidates)
+            await self._process_free_real_candidates()
+            await self._publish_teasers('1d')
         except Exception as e:
             logger.error(f"Error in daily scan: {e}")
+    
+    async def _publish_teasers(self, timeframe: str):
+        """Publish warm-up teasers (60-84% confidence) to free channel after a scan."""
+        try:
+            teasers = self.signal_engine.teaser_candidates
+            if not teasers:
+                return
+            for signal in teasers:
+                key = (signal.symbol, timeframe)
+                if key in self.signal_engine._sent_teasers:
+                    continue
+                await self.channel_publisher.publish_teaser_to_free(signal)
+                self.signal_engine._sent_teasers.add(key)
+            self.signal_engine.teaser_candidates = []
+        except Exception as e:
+            logger.error(f"Error publishing teasers: {e}")
     
     async def scan_15m(self):
         logger.info("🔍 Scanning 15m timeframe (institutional, liquidity + session)...")
@@ -530,6 +603,8 @@ class CryptoPulseOrchestrator:
             if candidates:
                 logger.info(f"✅ 15m scan found {len(candidates)} candidate(s)")
             await self.process_candidates(candidates)
+            await self._process_free_real_candidates()
+            await self._publish_teasers('15m')
         except Exception as e:
             logger.error(f"Error in 15m scan: {e}")
     
@@ -540,6 +615,8 @@ class CryptoPulseOrchestrator:
             if candidates:
                 logger.info(f"✅ 1h scan found {len(candidates)} candidate(s)")
             await self.process_candidates(candidates)
+            await self._process_free_real_candidates()
+            await self._publish_teasers('1h')
         except Exception as e:
             logger.error(f"Error in 1h scan: {e}")
     
@@ -634,17 +711,30 @@ class CryptoPulseOrchestrator:
             logger.error(f"Error sending portfolio summary: {e}")
     
     async def _dashboard_alpha_tracker(self):
-        """Background task for dashboard-only mode: track alpha plays every 5 minutes"""
-        logger.info("🎰 Dashboard alpha tracker started (5-min interval)")
+        """Background task for dashboard-only mode: track alpha plays AND signal limit fills every 60 seconds"""
+        logger.info("🎰 Dashboard alpha tracker started (60-sec interval)")
         while self.running:
             try:
-                await asyncio.sleep(300)  # 5 minutes
+                await asyncio.sleep(60)  # Check every minute
                 if not self.running:
                     break
+                
+                # CRITICAL: Check signal limit fills in dashboard-only mode
+                # (normally handled by scheduler which is skipped in dashboard-only)
+                await self.check_active_signals()
+                
+                # CRITICAL: Run autopilot TP/SL performance check in dashboard-only mode
+                # This detects TP hits and sends Telegram notifications
+                if self.autopilot:
+                    try:
+                        await self.autopilot.run_performance_check()
+                    except Exception as e:
+                        logger.error(f"Dashboard autopilot performance check error: {e}")
+                
                 if self.alpha_engine:
                     await self.alpha_engine.track_active_plays()
                     await self.alpha_engine.track_portfolio_holds()
-                    logger.info(f"📊 Dashboard alpha tracker: checked {len(self.alpha_engine.active_plays)} active plays, {len(self.alpha_engine.portfolio_holds)} portfolio holds")
+                    logger.info(f"📊 Dashboard alpha tracker: checked limit fills + autopilot TP/SL + {len(self.alpha_engine.active_plays)} alpha plays, {len(self.alpha_engine.portfolio_holds)} portfolio holds")
             except Exception as e:
                 logger.error(f"Dashboard alpha tracker error: {e}")
                 await asyncio.sleep(60)
@@ -681,13 +771,11 @@ class CryptoPulseOrchestrator:
                     await self.db.save_signal(candidate)
                     continue
                 
-                # Check if we already hit max signals today
-                if not self.signal_engine.can_generate_signal():
-                    logger.info("Max signals reached for today - skipping remaining candidates")
-                    candidate.cancelled = True
-                    candidate.cancellation_reason = "Daily signal limit reached"
-                    await self.db.save_signal(candidate)
-                    break
+                # Check VIP quota (85%+ signals only)
+                if not self.signal_engine.can_generate_vip_signal():
+                    logger.info(f"VIP quota reached - {candidate.symbol} converted to teaser")
+                    await self._publish_teaser_signal(candidate)
+                    continue
                 
                 await self.db.save_signal(candidate)
                 
@@ -697,17 +785,73 @@ class CryptoPulseOrchestrator:
                 
                 self.signal_engine.add_signal(candidate)
                 
-                logger.info(f"✅ Candidate {candidate.symbol} sent for approval")
+                logger.info(f"✅ Candidate {candidate.symbol} sent for VIP approval")
                 
             except Exception as e:
                 logger.error(f"Error processing candidate {candidate.symbol}: {e}")
+    
+    async def _process_free_real_candidates(self):
+        """Process free real signals (70-80% confidence, max 1/day)"""
+        candidates = getattr(self.signal_engine, 'free_real_candidates', [])
+        if not candidates:
+            return
+        
+        for candidate in candidates:
+            try:
+                # Validate signal
+                is_valid, error_msg = self.signal_validator.validate_signal(candidate)
+                if not is_valid:
+                    logger.warning(f"❌ Invalid free signal {candidate.symbol}: {error_msg}")
+                    candidate.admin_rejected = True
+                    candidate.rejection_reason = f"Validation failed: {error_msg}"
+                    await self.db.save_signal(candidate)
+                    continue
+                
+                # Check for duplicate symbol
+                existing = await self.db.get_active_signal_for_symbol(candidate.symbol)
+                if existing:
+                    logger.info(f"⏭️  Skipping free signal {candidate.symbol} - active signal already exists")
+                    candidate.cancelled = True
+                    candidate.cancellation_reason = "Duplicate: active signal already exists for this symbol"
+                    await self.db.save_signal(candidate)
+                    continue
+                
+                # Check free real quota (70-80%, max 1/day)
+                if not self.signal_engine.can_generate_free_signal():
+                    logger.info(f"Free real quota reached - {candidate.symbol} converted to teaser")
+                    await self._publish_teaser_signal(candidate)
+                    continue
+                
+                await self.db.save_signal(candidate)
+                
+                # Send to admin for approval
+                if not self.dashboard_only:
+                    await self.admin_bot.send_signal_for_approval(candidate)
+                
+                self.signal_engine.add_signal(candidate)
+                
+                logger.info(f"✅ Free real candidate {candidate.symbol} sent for approval")
+                
+            except Exception as e:
+                logger.error(f"Error processing free real candidate {candidate.symbol}: {e}")
+    
+    async def _publish_teaser_signal(self, signal):
+        """Publish a single teaser signal to free channel"""
+        try:
+            key = (signal.symbol, signal.timeframe)
+            if key in self.signal_engine._sent_teasers:
+                return
+            await self.channel_publisher.publish_teaser_to_free(signal)
+            self.signal_engine._sent_teasers.add(key)
+        except Exception as e:
+            logger.error(f"Error publishing teaser for {signal.symbol}: {e}")
     
     async def on_signal_approved(self, signal):
         logger.info(f"[APPROVE] on_signal_approved START for {signal.symbol} (status={signal.status.value}, source={'dashboard' if self.dashboard_only else 'telegram'})")
         try:
             # Guard against duplicate approvals — only skip if already ACTIVE (published)
-            if signal.status == SignalStatus.ACTIVE or getattr(signal, 'vip_channel_posted', False):
-                logger.warning(f"[APPROVE] Signal {signal.symbol} already ACTIVE/vip_channel_posted — SKIPPING")
+            if signal.status == SignalStatus.ACTIVE or getattr(signal, 'vip_channel_posted', False) or getattr(signal, 'free_channel_posted', False):
+                logger.warning(f"[APPROVE] Signal {signal.symbol} already ACTIVE/vip_channel_posted/free_channel_posted — SKIPPING")
                 return
             
             # Admin manually approved — their judgment overrides auto-expiry
@@ -743,60 +887,91 @@ class CryptoPulseOrchestrator:
                 raise RuntimeError(f"Signal {signal.symbol} could not be saved to database")
             logger.info(f"[APPROVE] ✅ DB save OK for {signal.symbol}")
             
-            vip_only = signal.confidence >= 90
-            logger.info(f"[APPROVE] Signal {signal.symbol} vip_only={vip_only} (confidence={signal.confidence})")
-            
-            # Publish VIP channel immediately
-            logger.info(f"[APPROVE] Calling channel_publisher.publish_to_vip for {signal.symbol}")
-            await self.channel_publisher.publish_to_vip(signal)
-            signal.vip_channel_posted = True
-            logger.info(f"[APPROVE] ✅ VIP publish OK for {signal.symbol} (msg_id={signal.vip_channel_message_id})")
-            
-            # Set actual entry price and status for market orders
-            if not signal.is_limit_order:
-                try:
-                    actual_price = await self._get_current_price(signal.symbol)
-                    if actual_price and actual_price > 0:
-                        signal.actual_entry = actual_price
-                        logger.info(f"[APPROVE] Actual entry price for {signal.symbol}: ${actual_price:.4f}")
-                except Exception as price_err:
-                    logger.warning(f"[APPROVE] Could not fetch actual entry price for {signal.symbol}: {price_err}")
-                # Market orders are active immediately after VIP publish
-                signal.status = SignalStatus.ACTIVE
-                if self.db:
-                    await self.db.log_trade_event(
-                        signal_id=signal.id,
-                        event_type='signal_active',
-                        details={'symbol': signal.symbol, 'reason': 'market_order', 'actual_entry': signal.actual_entry},
-                        price=signal.actual_entry
-                    )
-            # Limit orders stay as APPROVED until the limit price is actually hit
-            
-            # AUTOPILOT: Start tracking
-            if self.autopilot:
-                logger.info(f"[APPROVE] Starting autopilot tracking for {signal.symbol}")
-                await self.autopilot.on_signal_approved(signal)
-            
-            # Free channel teaser
-            if not vip_only:
-                logger.info(f"[APPROVE] Sending free channel teaser for {signal.symbol}")
-                if self.campaign_engine:
-                    await self.campaign_engine.signal_approved_campaign(signal)
-                    logger.info(f"[APPROVE] ✅ Free teaser sent for {signal.symbol}")
-                else:
-                    logger.warning(f"[APPROVE] campaign_engine is None — free teaser NOT sent")
-            else:
-                logger.info(f"[APPROVE] Sending VIP-exclusive teaser for {signal.symbol}")
+            # Route by confidence tier
+            if signal.confidence >= 85:
+                # VIP tier: publish to VIP channel + teaser to free
+                logger.info(f"[APPROVE] Signal {signal.symbol} is VIP-tier (≥85%) — publishing to VIP + teaser to FREE")
+                
+                # Publish VIP channel immediately
+                logger.info(f"[APPROVE] Calling channel_publisher.publish_to_vip for {signal.symbol}")
+                await self.channel_publisher.publish_to_vip(signal)
+                signal.vip_channel_posted = True
+                logger.info(f"[APPROVE] ✅ VIP publish OK for {signal.symbol} (msg_id={signal.vip_channel_message_id})")
+                
+                # Send VIP teaser to free channel
+                logger.info(f"[APPROVE] Sending VIP teaser to free channel for {signal.symbol}")
                 await self.channel_publisher.send_vip_teaser(signal)
-                logger.info(f"[APPROVE] ✅ VIP teaser sent for {signal.symbol}")
-            
-            # Admin notification (only in full mode)
-            if not self.dashboard_only:
-                await self.admin_bot.send_notification(
-                    f"✅ Signal {signal.symbol} approved!\n"
-                    f"🌟 VIP channel: Published NOW\n"
-                    f"📢 Free channel: Teaser sent"
-                )
+                signal.free_channel_posted = True
+                logger.info(f"[APPROVE] ✅ VIP teaser sent to free channel for {signal.symbol}")
+                
+                # Set actual entry price and status for market orders
+                if not signal.is_limit_order:
+                    try:
+                        actual_price = await self._get_current_price(signal.symbol)
+                        if actual_price and actual_price > 0:
+                            signal.actual_entry = actual_price
+                            logger.info(f"[APPROVE] Actual entry price for {signal.symbol}: ${actual_price:.4f}")
+                    except Exception as price_err:
+                        logger.warning(f"[APPROVE] Could not fetch actual entry price for {signal.symbol}: {price_err}")
+                    signal.status = SignalStatus.ACTIVE
+                    if self.db:
+                        await self.db.log_trade_event(
+                            signal_id=signal.id,
+                            event_type='signal_active',
+                            details={'symbol': signal.symbol, 'reason': 'market_order', 'actual_entry': signal.actual_entry},
+                            price=signal.actual_entry
+                        )
+                
+                # AUTOPILOT: Start tracking
+                if self.autopilot:
+                    logger.info(f"[APPROVE] Starting autopilot tracking for {signal.symbol}")
+                    await self.autopilot.on_signal_approved(signal)
+                
+                # Admin notification
+                if not self.dashboard_only:
+                    await self.admin_bot.send_notification(
+                        f"✅ Signal {signal.symbol} approved!\n"
+                        f"🌟 VIP channel: Published NOW\n"
+                        f"📢 Free channel: VIP teaser sent"
+                    )
+                
+            elif 70 <= signal.confidence < 85:
+                # Free real tier: publish to FREE channel with full details
+                logger.info(f"[APPROVE] Signal {signal.symbol} is FREE-tier (70-80%) — publishing full signal to FREE")
+                
+                # Publish to free channel with full details
+                await self.channel_publisher.publish_free_real_to_free(signal)
+                signal.free_channel_posted = True
+                logger.info(f"[APPROVE] ✅ Free real publish OK for {signal.symbol}")
+                
+                # Set actual entry price and status for market orders
+                if not signal.is_limit_order:
+                    try:
+                        actual_price = await self._get_current_price(signal.symbol)
+                        if actual_price and actual_price > 0:
+                            signal.actual_entry = actual_price
+                            logger.info(f"[APPROVE] Actual entry price for {signal.symbol}: ${actual_price:.4f}")
+                    except Exception as price_err:
+                        logger.warning(f"[APPROVE] Could not fetch actual entry price for {signal.symbol}: {price_err}")
+                    signal.status = SignalStatus.ACTIVE
+                    if self.db:
+                        await self.db.log_trade_event(
+                            signal_id=signal.id,
+                            event_type='signal_active',
+                            details={'symbol': signal.symbol, 'reason': 'market_order', 'actual_entry': signal.actual_entry},
+                            price=signal.actual_entry
+                        )
+                
+                # Admin notification
+                if not self.dashboard_only:
+                    await self.admin_bot.send_notification(
+                        f"✅ Signal {signal.symbol} approved!\n"
+                        f"📢 Free channel: Published full signal NOW\n"
+                        f"🌟 VIP channel: Not sent (free-tier signal)"
+                    )
+                
+            else:
+                logger.warning(f"[APPROVE] Signal {signal.symbol} confidence {signal.confidence} is below both tiers — this should not happen")
             
             # Cross-post
             logger.info(f"[APPROVE] Cross-posting {signal.symbol}")
@@ -813,11 +988,16 @@ class CryptoPulseOrchestrator:
             raise
     
     async def _publish_free_delayed(self, signal_id: str):
-        """Publish signal to free channel after delay"""
+        """Publish signal to free channel after delay (legacy — only free-tier 70-80%)"""
         try:
             signal = await self.db.get_signal(signal_id)
             if not signal or signal.cancelled:
                 logger.info(f"Signal {signal_id} not found or cancelled - skipping free channel post")
+                return
+            
+            # Only publish free-tier signals (70-80%); VIP signals don't go to free
+            if signal.confidence >= 85:
+                logger.info(f"[DELAYED] Signal {signal.symbol} is VIP-tier (≥85%) — skipping free channel post")
                 return
             
             await self.channel_publisher.publish_to_free(signal)
@@ -987,10 +1167,14 @@ class CryptoPulseOrchestrator:
                         continue
                     
                     sid = signal.id
-                    extremes = self._pending_limit_extremes.get(sid, {'lowest': float('inf'), 'highest': 0.0})
+                    # Track price extremes AND how many checks we've done
+                    # Retrospective fills require >=3 checks so price has time to actually move
+                    extremes = self._pending_limit_extremes.get(sid, {'lowest': float('inf'), 'highest': 0.0, 'checks': 0})
                     extremes['lowest'] = min(extremes['lowest'], current_price)
                     extremes['highest'] = max(extremes['highest'], current_price)
+                    extremes['checks'] = extremes.get('checks', 0) + 1
                     self._pending_limit_extremes[sid] = extremes
+                    check_count = extremes['checks']
                     
                     entry = signal.entry_price
                     limit_filled = False
@@ -1004,12 +1188,12 @@ class CryptoPulseOrchestrator:
                         elif extremes['lowest'] <= entry:
                             limit_filled = True
                             fill_reason = f"extreme low ${extremes['lowest']:.4f} touched entry ${entry:.4f}"
-                        # Check 2: Retrospective fill — price is now ABOVE entry, meaning it must have
-                        # crossed UP through entry after dipping down to fill the limit (while bot was down)
-                        elif current_price > entry * 1.003:
+                        # Check 2: Retrospective fill — ONLY after >=3 price checks (gives price time to move)
+                        # Price is now above entry AND we have evidence it dipped below entry previously
+                        elif check_count >= 3 and extremes['lowest'] <= entry and current_price > entry * 1.001:
                             limit_filled = True
-                            fill_reason = f"retrospective LONG fill — price ${current_price:.4f} now above entry ${entry:.4f} (must have crossed through)"
-                            logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now above LONG entry")
+                            fill_reason = f"retrospective LONG fill — price dipped to ${extremes['lowest']:.4f} then recovered to ${current_price:.4f}"
+                            logger.info(f"🔄 Retrospective LONG limit fill for {signal.symbol}: dipped to {extremes['lowest']:.4f}, now {current_price:.4f}")
                     else:  # SHORT
                         if current_price >= entry:
                             limit_filled = True
@@ -1017,24 +1201,21 @@ class CryptoPulseOrchestrator:
                         elif extremes['highest'] >= entry:
                             limit_filled = True
                             fill_reason = f"extreme high ${extremes['highest']:.4f} touched entry ${entry:.4f}"
-                        # Check 2: Retrospective fill — price is now ABOVE entry, meaning it must have
-                        # crossed UP through entry after spiking to fill the SHORT limit (while bot was down)
-                        elif current_price > entry * 1.003:
+                        # Check 2: Retrospective fill — ONLY after >=3 price checks
+                        # Price is now below entry AND we have evidence it spiked above entry previously
+                        elif check_count >= 3 and extremes['highest'] >= entry and current_price < entry * 0.999:
                             limit_filled = True
-                            fill_reason = f"retrospective SHORT fill — price ${current_price:.4f} now above entry ${entry:.4f} (must have crossed through)"
-                            logger.info(f"🔄 Retrospective limit fill detected for {signal.symbol}: price now above SHORT entry")
+                            fill_reason = f"retrospective SHORT fill — price spiked to ${extremes['highest']:.4f} then dropped to ${current_price:.4f}"
+                            logger.info(f"🔄 Retrospective SHORT limit fill for {signal.symbol}: spiked to {extremes['highest']:.4f}, now {current_price:.4f}")
                     
                     if not limit_filled:
                         continue
                     
                     # Limit filled — update status and hand off to autopilot
                     signal.status = SignalStatus.ACTIVE
-                    # For retrospective fills, use entry price as actual fill price
-                    # (current price may be far from entry since fill happened while bot was down)
-                    if "retrospective" in fill_reason:
-                        signal.actual_entry = entry
-                    else:
-                        signal.actual_entry = current_price
+                    # ALWAYS use entry price as actual_entry for limit orders
+                    # This ensures PnL starts at 0% when the limit fills
+                    signal.actual_entry = entry
                     await self.db.save_signal(signal)
                     self._pending_limit_extremes.pop(sid, None)
                     logger.info(f"🎯 Limit order filled for {signal.symbol} at ${signal.actual_entry:.4f} ({fill_reason})")
@@ -1326,11 +1507,14 @@ class CryptoPulseOrchestrator:
             # Try AI-generated summary first (if enabled & API key available)
             ai_summary = None
             if hasattr(self, 'ai_generator') and self.ai_generator:
+                logger.info("🤖 Morning outlook: attempting AI generation...")
                 ai_summary = await self.ai_generator.generate_daily_summary(market_data)
+            else:
+                logger.info("🤖 Morning outlook: no ai_generator available, will use template")
 
             if ai_summary:
                 vip_outlook = f"🌅 <b>AI MORNING OUTLOOK</b>\n<b>{now.strftime('%A, %d %B %Y')}</b>\n\n{ai_summary}"
-                logger.info("Posted AI-generated morning outlook")
+                logger.info("✅ Posted AI-generated morning outlook")
             else:
                 vip_outlook = f"""🌅 <b>MORNING MARKET OUTLOOK</b>
 <b>{now.strftime('%A, %d %B %Y')}</b>
@@ -1539,13 +1723,16 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
             # Try AI-generated evening recap first
             ai_recap = None
             if hasattr(self, 'ai_generator') and self.ai_generator:
+                logger.info("🤖 Evening recap: attempting AI generation...")
                 pnl_today = sum(s.pnl_percent for s in today_signals) if today_signals else 0
                 closed_meta = [{'symbol': s.symbol, 'pnl_percent': s.pnl_percent, 'result': 'TP Hit' if s.pnl_percent > 0 else 'SL Hit' if s.pnl_percent < 0 else 'Closed'} for s in today_signals[:5]]
                 ai_recap = await self.ai_generator.generate_evening_recap(mctx, closed_meta, pnl_today)
+            else:
+                logger.info("🤖 Evening recap: no ai_generator available, will use template")
 
             if ai_recap:
                 outlook = f"🌙 <b>AI EVENING RECAP</b>\n📅 {datetime.utcnow().strftime('%A, %B %d, %Y')}\n\n{ai_recap}"
-                logger.info("Posted AI-generated evening recap")
+                logger.info("✅ Posted AI-generated evening recap")
             else:
                 # Build tomorrow's market outlook
                 outlook = f"""🌙 <b>EVENING MARKET OUTLOOK</b>
@@ -1934,6 +2121,51 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
             except Exception as e:
                 logger.error(f"Viral weekly marketing error: {e}")
     
+    async def _post_to_telegram_groups_morning(self):
+        """Post morning marketing message to Telegram groups (09:00 UTC)"""
+        if self.telegram_group_poster:
+            try:
+                await self.telegram_group_poster.daily_marketing_post()
+                logger.info("📱 Morning Telegram group post completed")
+            except Exception as e:
+                logger.error(f"Telegram group morning post error: {e}")
+    
+    async def _post_to_telegram_groups_afternoon(self):
+        """Post afternoon marketing message to Telegram groups (14:00 UTC)"""
+        if self.telegram_group_poster:
+            try:
+                await self.telegram_group_poster.daily_marketing_post()
+                logger.info("📱 Afternoon Telegram group post completed")
+            except Exception as e:
+                logger.error(f"Telegram group afternoon post error: {e}")
+    
+    async def _post_to_telegram_groups_evening(self):
+        """Post evening marketing message to Telegram groups (20:00 UTC)"""
+        if self.telegram_group_poster:
+            try:
+                await self.telegram_group_poster.daily_marketing_post()
+                logger.info("📱 Evening Telegram group post completed")
+            except Exception as e:
+                logger.error(f"Telegram group evening post error: {e}")
+    
+    async def _post_to_discord_webhooks_morning(self):
+        """Post morning marketing embed to Discord webhooks (10:00 UTC)"""
+        if self.discord_webhook_poster:
+            try:
+                await self.discord_webhook_poster.daily_marketing_post()
+                logger.info("🔷 Morning Discord webhook post completed")
+            except Exception as e:
+                logger.error(f"Discord webhook morning post error: {e}")
+    
+    async def _post_to_discord_webhooks_evening(self):
+        """Post evening marketing embed to Discord webhooks (18:00 UTC)"""
+        if self.discord_webhook_poster:
+            try:
+                await self.discord_webhook_poster.daily_marketing_post()
+                logger.info("🔷 Evening Discord webhook post completed")
+            except Exception as e:
+                logger.error(f"Discord webhook evening post error: {e}")
+    
     async def start(self, dashboard_only: bool = False):
         logger.info("🚀 Starting CRYPTO PULSE SIGNALS...")
         
@@ -2006,6 +2238,7 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
         Deduplication is handled in ChannelPublisher to prevent stale recovery duplicates."""
         try:
             if sl_hit:
+                logger.info(f"📨 Channel handler: SL hit for {signal.symbol}")
                 entry = signal.actual_entry or signal.entry_price
                 pnl = 0.0
                 if entry and entry != 0:
@@ -2013,10 +2246,12 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                     if signal.direction.value == "SHORT":
                         pnl = -pnl
                 await self.channel_publisher.send_trade_closed(signal, "Stop Loss Hit", pnl)
+                logger.info(f"✅ SL notification sent for {signal.symbol}")
                 return
             
             # TP3: trade is closing — just send close message (no separate TP3 hit)
             if tp_level == 3:
+                logger.info(f"📨 Channel handler: TP3 hit for {signal.symbol}")
                 entry = signal.actual_entry or signal.entry_price
                 pnl = 0.0
                 if entry and entry != 0:
@@ -2024,10 +2259,13 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                     if signal.direction.value == "SHORT":
                         pnl = -pnl
                 await self.channel_publisher.send_trade_closed(signal, "TP3 Hit", pnl)
+                logger.info(f"✅ TP3 close notification sent for {signal.symbol}")
                 return
             
             # TP1 / TP2: send hit update
+            logger.info(f"📨 Channel handler: TP{tp_level} hit for {signal.symbol} — calling send_tp_hit")
             await self.channel_publisher.send_tp_hit(signal, tp_level)
+            logger.info(f"✅ TP{tp_level} hit notification sent for {signal.symbol}")
             
             # Free channel teasers for TP2
             if tp_level == 2:
@@ -2042,7 +2280,7 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                     pass
                 
         except Exception as e:
-            logger.error(f"Failed to send channel notification: {e}")
+            logger.error(f"❌ Failed to send channel notification for {signal.symbol}: {e}")
     
     async def shutdown(self):
         logger.info("🛑 Shutting down CRYPTO PULSE SIGNALS...")

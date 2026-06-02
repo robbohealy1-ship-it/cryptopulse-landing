@@ -98,8 +98,9 @@ async def verify_admin_auth(credentials: HTTPBasicCredentials = Depends(security
 async def dashboard_auth_middleware(request: Request, call_next):
     """Protect API routes with Basic auth when ADMIN_DASHBOARD_PASSWORD is configured."""
     # Skip auth for static files and HTML pages
-    skip_paths = {"/", "/login", "/marketing", "/portfolio"}
-    if request.url.path in skip_paths or not request.url.path.startswith("/api/"):
+    skip_paths = {"/", "/login", "/marketing", "/portfolio", "/public-portfolio"}
+    # Also skip auth for public API routes
+    if request.url.path in skip_paths or not request.url.path.startswith("/api/") or request.url.path.startswith("/api/public/"):
         return await call_next(request)
     
     # Skip auth if not configured (backwards compatible)
@@ -210,6 +211,23 @@ async def marketing_dashboard():
 async def portfolio_page():
     """Serve the full portfolio page with all trades and live P&L."""
     return FileResponse(os.path.join(_STATIC_DIR, "portfolio.html"))
+
+
+@app.get("/public-portfolio")
+async def public_portfolio_page():
+    """Serve the PUBLIC portfolio page (read-only, no auth required)."""
+    if not settings.PUBLIC_PORTFOLIO_ENABLED:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Public portfolio is disabled. Enable PUBLIC_PORTFOLIO_ENABLED in settings."}
+        )
+    return FileResponse(os.path.join(_STATIC_DIR, "public_portfolio.html"))
+
+
+@app.get("/research")
+async def research_center_page():
+    """Serve the Research Center page for investment intelligence."""
+    return FileResponse(os.path.join(_STATIC_DIR, "research_center.html"))
 
 
 @app.get("/api/status")
@@ -366,8 +384,13 @@ async def active_signals(request: Request, _=Depends(rate_limit_lenient)):
             current_price = await orch._get_current_price(s.symbol)
             entry = s.actual_entry or s.entry_price
             
+            # CRITICAL FIX: For approved limit orders that haven't filled yet,
+            # show 0% PnL. Only calculate PnL once status is 'active' (limit filled)
+            status_val = s.status.value if hasattr(s.status, 'value') else str(s.status)
+            is_approved_limit = getattr(s, 'is_limit_order', False) and status_val == 'approved'
+            
             pnl = 0
-            if current_price and entry and entry != 0:
+            if not is_approved_limit and current_price and entry and entry != 0:
                 pnl = ((current_price - entry) / entry) * 100
                 if s.direction.value == "SHORT":
                     pnl = -pnl
@@ -496,13 +519,91 @@ async def portfolio_data(request: Request, _=Depends(rate_limit_lenient)):
         return {"count": 0, "signals": [], "error": str(e)}
 
 
+@app.get("/api/public/portfolio")
+async def public_portfolio_data(request: Request, _=Depends(rate_limit_lenient)):
+    """
+    PUBLIC read-only portfolio endpoint (no auth required).
+    Returns closed trades only - no active positions or sensitive data.
+    """
+    if not settings.PUBLIC_PORTFOLIO_ENABLED:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Public portfolio is disabled", "enabled": False}
+        )
+    
+    orch = require_orch()
+    try:
+        all_signals = await orch.db.get_all_signals(limit=500)
+        
+        closed_items = []
+        wins = 0
+        losses = 0
+        
+        for s in all_signals:
+            status = getattr(s, 'status', None)
+            status_val = status.value if hasattr(status, 'value') else str(status) if status else 'unknown'
+            
+            # Only include closed trades in public view
+            if status_val != 'closed':
+                continue
+            
+            pnl = getattr(s, 'pnl_percent', 0) or 0
+            entry = s.actual_entry or s.entry_price or 0
+            
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+            
+            closed_items.append({
+                "id": s.id,
+                "symbol": s.symbol,
+                "direction": s.direction.value if hasattr(s.direction, 'value') else str(s.direction),
+                "timeframe": s.timeframe,
+                "status": status_val,
+                "entry_price": entry,
+                "actual_exit": getattr(s, 'actual_exit', None),
+                "stop_loss": s.stop_loss,
+                "take_profit_1": s.take_profit_1,
+                "take_profit_2": s.take_profit_2,
+                "take_profit_3": s.take_profit_3,
+                "pnl_percent": round(pnl, 2),
+                "confidence": s.confidence,
+                "risk_reward": s.risk_reward,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "closed_at": getattr(s, 'closed_at', None).isoformat() if getattr(s, 'closed_at', None) else None,
+                "tp1_hit": getattr(s, 'tp1_hit', False),
+                "tp2_hit": getattr(s, 'tp2_hit', False),
+                "tp3_hit": getattr(s, 'tp3_hit', False),
+            })
+        
+        total = wins + losses
+        win_rate = (wins / total * 100) if total > 0 else 0
+        total_pnl = sum(p['pnl_percent'] for p in closed_items)
+        
+        return {
+            "enabled": True,
+            "count": len(closed_items),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(win_rate, 1),
+            "total_pnl": round(total_pnl, 2),
+            "signals": closed_items
+        }
+    except Exception as e:
+        logger.error(f"Error getting public portfolio: {e}")
+        return {"enabled": True, "count": 0, "signals": [], "error": str(e)}
+
+
 @app.get("/api/account")
 async def account_data():
     """Fetch live account data from cTrader (BEM Funding) and MEXC (personal)."""
     accounts = []
     
-    # cTrader / BEM Funding
-    if settings.CTRADER_ACCESS_TOKEN and settings.CTRADER_ACCOUNT_ID:
+    # cTrader / BEM Funding (skip if placeholder values)
+    if (settings.CTRADER_ACCESS_TOKEN and settings.CTRADER_ACCOUNT_ID and 
+        "your_account_id_here" not in settings.CTRADER_ACCOUNT_ID.lower() and
+        "placeholder" not in settings.CTRADER_ACCOUNT_ID.lower()):
         try:
             client = CTraderClient(
                 access_token=settings.CTRADER_ACCESS_TOKEN,
@@ -513,15 +614,13 @@ async def account_data():
             await client.close()
             accounts.append(data)
         except Exception as e:
-            logger.error(f"cTrader account fetch failed: {e}")
-            accounts.append({
-                "source": "ctrader",
-                "label": "BEM Funding Challenge",
-                "error": str(e),
-            })
+            logger.debug(f"cTrader account fetch failed: {e}")  # Changed to debug to reduce noise
     
-    # MEXC Personal
-    if settings.MEXC_API_KEY and settings.MEXC_API_SECRET:
+    # MEXC Personal (skip if placeholder/invalid values)
+    if (settings.MEXC_API_KEY and settings.MEXC_API_SECRET and
+        len(settings.MEXC_API_KEY) > 10 and len(settings.MEXC_API_SECRET) > 10 and
+        "your_api" not in settings.MEXC_API_KEY.lower() and
+        "placeholder" not in settings.MEXC_API_KEY.lower()):
         try:
             client = MEXCClient(
                 api_key=settings.MEXC_API_KEY,
@@ -845,6 +944,9 @@ async def approve_alpha(request: Request, symbol: str, is_limit_order: bool = Fa
         
         play = await orch.alpha_engine.approve_play(symbol, is_limit_order=is_limit_order)
         if play:
+            # Enrich token info BEFORE publishing to avoid "UNKNOWN" symbols
+            await orch.alpha_engine._enrich_token_info(play.candidate)
+            
             if not play.is_limit_order:
                 await orch.alpha_engine.publish_to_vip(play)
                 await orch.alpha_engine.publish_teaser_to_free(play)
@@ -1382,10 +1484,19 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal,
         # Calculate P&L
         entry = signal.actual_entry or signal.entry_price
         pnl = 0
-        if entry and entry != 0:
+        
+        # If signal expired (never triggered/filled), PnL must be 0%
+        if close_data.reason == "expired":
+            pnl = 0.0
+            close_reason_display = "Signal Expired"
+        elif entry and entry != 0:
             pnl = ((close_data.close_price - entry) / entry) * 100
             if signal.direction.value == "SHORT":
                 pnl = -pnl
+            close_reason_display = f"Manually closed ({close_data.reason})"
+        else:
+            pnl = 0.0
+            close_reason_display = f"Manually closed ({close_data.reason})"
         
         # Check if already closed to prevent duplicate messages
         if signal.status.value == 'closed':
@@ -1401,16 +1512,21 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal,
             'status': 'closed',
             'actual_exit': close_data.close_price,
             'pnl_percent': pnl,
-            'cancellation_reason': f"Manual close: {close_data.reason}"
+            'cancellation_reason': close_reason_display
         }
         
         success = await orch.db.update_signal(signal_id, updates)
         
         if success:
+            # CRITICAL: Update signal object in memory so notification displays correct exit price
+            signal.actual_exit = close_data.close_price
+            signal.pnl_percent = pnl
+            signal.status = SignalStatus.CLOSED
+            
             # Send notification to VIP channel
             await orch.channel_publisher.send_trade_closed(
                 signal, 
-                f"Manually closed ({close_data.reason})",
+                close_reason_display,
                 pnl
             )
             
@@ -2198,6 +2314,11 @@ async def add_beta_tester(tester: AddBetaTester):
                         disable_web_page_preview=True
                     )
                     sent = True
+                    # Auto-send trading guide to new beta user
+                    try:
+                        await orch.vip_bot._send_trading_guide(int(tester.telegram_user_id))
+                    except Exception as guide_err:
+                        logger.warning(f"Beta trading guide send failed: {guide_err}")
                 except Exception as e:
                     logger.warning(f"VIP bot welcome failed, falling back to admin: {e}")
             # Fall back to admin bot
@@ -2715,6 +2836,423 @@ async def get_social_proof():
     except Exception as e:
         logger.error(f"Social proof error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/settings")
+async def get_settings(request: Request, _=Depends(rate_limit_lenient)):
+    """Get current dashboard settings (public toggles only)."""
+    return {
+        "show_portfolio_in_alpha": settings.SHOW_PORTFOLIO_IN_ALPHA,
+        "public_portfolio_enabled": settings.PUBLIC_PORTFOLIO_ENABLED,
+        "affiliate_exchange": settings.AFFILIATE_EXCHANGE,
+        "affiliate_custom_url": bool(settings.AFFILIATE_CUSTOM_URL),
+        "marketing_posts_per_day": settings.MARKETING_POSTS_PER_DAY,
+        "enable_viral_content": settings.ENABLE_VIRAL_CONTENT,
+        "enable_engagement_loop": settings.ENABLE_ENGAGEMENT_LOOP,
+    }
+
+
+@app.post("/api/settings/portfolio-toggle")
+async def toggle_portfolio_display(request: Request, _=Depends(rate_limit_moderate)):
+    """Toggle portfolio visibility in alpha play messages."""
+    from pydantic import BaseModel
+    import json
+    
+    body = await request.body()
+    try:
+        data = json.loads(body) if body else {}
+    except:
+        data = {}
+    
+    show = data.get("show", not settings.SHOW_PORTFOLIO_IN_ALPHA)
+    
+    # Update the setting in memory
+    settings.SHOW_PORTFOLIO_IN_ALPHA = bool(show)
+    
+    logger.info(f"Portfolio display in alpha messages: {'ENABLED' if show else 'DISABLED'}")
+    return {
+        "success": True,
+        "show_portfolio_in_alpha": settings.SHOW_PORTFOLIO_IN_ALPHA,
+        "message": f"Portfolio links {'shown' if show else 'hidden'} in alpha messages"
+    }
+
+
+# ============== RESEARCH ENGINE API ==============
+
+@app.get("/api/research/projects")
+async def get_research_projects(request: Request, status: str = None, _=Depends(rate_limit_lenient)):
+    """Get all research projects"""
+    orch = require_orch()
+    try:
+        if not orch.db:
+            return {"projects": [], "message": "Database not initialized"}
+        
+        projects = await orch.db.get_all_research_projects(status=status, limit=100)
+        return {"success": True, "projects": projects, "count": len(projects)}
+    except Exception as e:
+        logger.error(f"Error getting research projects: {e}")
+        return {"success": False, "error": str(e), "projects": []}
+
+
+@app.get("/api/research/projects/{project_id}")
+async def get_research_project(request: Request, project_id: str, _=Depends(rate_limit_lenient)):
+    """Get single research project with full details"""
+    orch = require_orch()
+    try:
+        if not orch.db:
+            raise HTTPException(status_code=503, detail="Database not initialized")
+        
+        project = await orch.db.get_research_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        # Get conviction history
+        history = await orch.db.get_conviction_history(project_id, days=30)
+        
+        return {"success": True, "project": project, "conviction_history": history}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting project: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/research/projects/{project_id}/rescore")
+async def rescore_project(request: Request, project_id: str, _=Depends(rate_limit_moderate)):
+    """Recalculate conviction score for a project"""
+    orch = require_orch()
+    try:
+        if not orch.alpha_engine or not orch.alpha_engine.research_project_db:
+            raise HTTPException(status_code=503, detail="Research engine not initialized")
+        
+        new_score = await orch.alpha_engine.research_project_db.rescore_project(project_id)
+        if new_score is None:
+            raise HTTPException(status_code=404, detail="Project not found or rescore failed")
+        
+        return {"success": True, "new_conviction_score": new_score}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rescoring project: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/basket/current")
+async def get_alpha_basket(request: Request, _=Depends(rate_limit_lenient)):
+    """Get current alpha basket"""
+    orch = require_orch()
+    try:
+        if not orch.alpha_engine or not orch.alpha_engine.basket_manager:
+            return {"basket": [], "message": "Basket manager not initialized"}
+        
+        basket = await orch.alpha_engine.basket_manager.get_basket()
+        return {"success": True, "basket": basket, "count": len(basket)}
+    except Exception as e:
+        logger.error(f"Error getting basket: {e}")
+        return {"success": False, "error": str(e), "basket": []}
+
+
+@app.post("/api/basket/update")
+async def update_alpha_basket(request: Request, _=Depends(rate_limit_moderate)):
+    """Manually trigger basket update"""
+    orch = require_orch()
+    try:
+        if not orch.alpha_engine or not orch.alpha_engine.basket_manager:
+            raise HTTPException(status_code=503, detail="Basket manager not initialized")
+        
+        basket = await orch.alpha_engine.basket_manager.update_basket()
+        return {"success": True, "basket": basket, "count": len(basket)}
+    except Exception as e:
+        logger.error(f"Error updating basket: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/reports/list")
+async def list_research_reports(request: Request, project_id: str = None, _=Depends(rate_limit_lenient)):
+    """List research reports"""
+    orch = require_orch()
+    try:
+        if not orch.db:
+            return {"reports": [], "message": "Database not initialized"}
+        
+        reports = await orch.db.get_research_reports(project_id=project_id, limit=50)
+        return {"success": True, "reports": reports, "count": len(reports)}
+    except Exception as e:
+        logger.error(f"Error listing reports: {e}")
+        return {"success": False, "error": str(e), "reports": []}
+
+
+@app.post("/api/reports/generate")
+async def generate_research_report(request: Request, _=Depends(rate_limit_moderate)):
+    """Generate a new research report"""
+    import json
+    orch = require_orch()
+    
+    try:
+        if not orch.alpha_engine or not orch.alpha_engine.report_generator:
+            raise HTTPException(status_code=503, detail="Report generator not initialized")
+        
+        body = await request.body()
+        data = json.loads(body) if body else {}
+        project_id = data.get('project_id')
+        report_type = data.get('report_type', 'new_candidate')
+        
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id required")
+        
+        # Get project
+        project_data = await orch.db.get_research_project(project_id)
+        if not project_data:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        from src.research.models import ResearchProject
+        project = ResearchProject.from_dict(project_data)
+        
+        # Get latest conviction score
+        history = await orch.db.get_conviction_history(project_id, days=1)
+        if not history:
+            raise HTTPException(status_code=400, detail="No conviction score found. Rescore project first.")
+        
+        from src.research.models import ConvictionScore
+        score = ConvictionScore(
+            project_id=project_id,
+            conviction_score=history[0]['conviction_score'],
+            quality_score=history[0].get('quality_score', 0),
+            valuation_score=history[0].get('valuation_score', 0),
+            momentum_score=history[0].get('momentum_score', 0),
+            risk_score=history[0].get('risk_score', 0)
+        )
+        
+        # Generate report
+        report = await orch.alpha_engine.report_generator.generate_new_candidate_report(project, score)
+        
+        if not report:
+            raise HTTPException(status_code=500, detail="Report generation failed")
+        
+        return {"success": True, "report": report.to_dict()}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/reports/{report_id}")
+async def get_research_report_detail(request: Request, report_id: str, _=Depends(rate_limit_lenient)):
+    """Get a single research report by ID with full content"""
+    orch = require_orch()
+    try:
+        if not orch.db:
+            return {"success": False, "error": "Database not initialized"}
+        
+        # Get report from DB
+        reports = await orch.db.get_research_reports(limit=100)
+        report = None
+        for r in reports:
+            if r.get('id') == report_id:
+                report = r
+                break
+        
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+        
+        # Get project details too
+        project = await orch.db.get_research_project(report.get('project_id'))
+        
+        return {
+            "success": True,
+            "report": report,
+            "project": project
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/public-portfolio-toggle")
+async def toggle_public_portfolio(request: Request, _=Depends(rate_limit_moderate)):
+    """Toggle public portfolio page (/public-portfolio)."""
+    import json
+    
+    body = await request.body()
+    try:
+        data = json.loads(body) if body else {}
+    except:
+        data = {}
+    
+    enabled = data.get("enabled", not settings.PUBLIC_PORTFOLIO_ENABLED)
+    settings.PUBLIC_PORTFOLIO_ENABLED = bool(enabled)
+    
+    logger.info(f"Public portfolio page: {'ENABLED' if enabled else 'DISABLED'}")
+    return {
+        "success": True,
+        "public_portfolio_enabled": settings.PUBLIC_PORTFOLIO_ENABLED,
+        "url": f"http://localhost:{settings.ADMIN_DASHBOARD_PORT}/public-portfolio" if enabled else None,
+        "message": f"Public portfolio {'enabled' if enabled else 'disabled'}"
+    }
+
+
+# ==================== CONVICTION ENGINE SETTINGS ====================
+
+@app.get("/api/conviction/mode")
+async def get_conviction_mode(request: Request, _=Depends(rate_limit_lenient)):
+    """Get current signal mode (strict/balanced/aggressive)."""
+    return {
+        "mode": settings.SIGNAL_MODE,
+        "thresholds": {
+            "strict": {"min_conviction": 85, "expected_signals": "0-5/day", "quality": "Elite"},
+            "balanced": {"min_conviction": 75, "expected_signals": "5-15/day", "quality": "High"},
+            "aggressive": {"min_conviction": 65, "expected_signals": "15-40/day", "quality": "Moderate"}
+        },
+        "current_threshold": {
+            "strict": 85,
+            "balanced": 75,
+            "aggressive": 65
+        }.get(settings.SIGNAL_MODE, 85)
+    }
+
+
+@app.post("/api/conviction/mode")
+async def set_conviction_mode(request: Request, _=Depends(rate_limit_moderate)):
+    """Set signal mode (strict/balanced/aggressive)."""
+    import json
+    
+    body = await request.body()
+    try:
+        data = json.loads(body) if body else {}
+    except:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    
+    mode = data.get("mode", "strict").lower()
+    
+    if mode not in ["strict", "balanced", "aggressive"]:
+        raise HTTPException(status_code=400, detail="Mode must be strict, balanced, or aggressive")
+    
+    settings.SIGNAL_MODE = mode
+    
+    # Update signal engine if available
+    orch = require_orch()
+    if hasattr(orch, 'signal_engine') and orch.signal_engine:
+        orch.signal_engine.signal_mode = mode
+        logger.info(f"🎯 Signal mode updated to: {mode.upper()}")
+    
+    return {
+        "success": True,
+        "mode": mode,
+        "threshold": {
+            "strict": 85,
+            "balanced": 75,
+            "aggressive": 65
+        }.get(mode, 85),
+        "message": f"Signal mode set to {mode.upper()}"
+    }
+
+
+@app.get("/api/conviction/breakdown/{signal_id}")
+async def get_conviction_breakdown(signal_id: str, request: Request, _=Depends(rate_limit_lenient)):
+    """Get detailed conviction breakdown for a signal."""
+    orch = require_orch()
+    
+    try:
+        # Get signal from database
+        signal = await orch.db.get_signal_by_id(signal_id)
+        
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        
+        # Return conviction breakdown if available
+        if signal.conviction_breakdown:
+            return {
+                "signal_id": signal_id,
+                "symbol": signal.symbol,
+                "conviction_score": signal.conviction_score,
+                "conviction_tier": signal.conviction_tier,
+                "breakdown": signal.conviction_breakdown
+            }
+        else:
+            return {
+                "signal_id": signal_id,
+                "symbol": signal.symbol,
+                "conviction_score": None,
+                "conviction_tier": None,
+                "breakdown": None,
+                "message": "Conviction data not available for this signal"
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching conviction breakdown: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/conviction/stats")
+async def get_conviction_stats(request: Request, _=Depends(rate_limit_lenient)):
+    """Get conviction engine statistics."""
+    orch = require_orch()
+    
+    try:
+        # Get recent signals with conviction data
+        from datetime import datetime, timedelta
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = today_start - timedelta(days=7)
+        
+        recent_signals = await orch.db.get_signals_by_date(week_start, datetime.utcnow())
+        
+        # Calculate stats
+        total_signals = len(recent_signals)
+        with_conviction = [s for s in recent_signals if s.conviction_score is not None]
+        
+        tier_counts = {"ELITE": 0, "VIP": 0, "WATCHLIST": 0, "REJECTED": 0}
+        avg_scores = {
+            "conviction": 0,
+            "market_structure": 0,
+            "liquidity": 0,
+            "volume": 0,
+            "sentiment": 0,
+            "news": 0
+        }
+        
+        if with_conviction:
+            for signal in with_conviction:
+                if signal.conviction_tier:
+                    tier_counts[signal.conviction_tier] = tier_counts.get(signal.conviction_tier, 0) + 1
+                
+                if signal.conviction_breakdown:
+                    breakdown = signal.conviction_breakdown
+                    avg_scores["conviction"] += breakdown.get("conviction_score", 0)
+                    avg_scores["market_structure"] += breakdown.get("market_structure_score", 0)
+                    avg_scores["liquidity"] += breakdown.get("liquidity_score", 0)
+                    avg_scores["volume"] += breakdown.get("volume_score", 0)
+                    avg_scores["sentiment"] += breakdown.get("sentiment_score", 0)
+                    avg_scores["news"] += breakdown.get("news_score", 0)
+            
+            # Calculate averages
+            count = len(with_conviction)
+            for key in avg_scores:
+                avg_scores[key] = round(avg_scores[key] / count, 1)
+        
+        return {
+            "total_signals_7d": total_signals,
+            "signals_with_conviction": len(with_conviction),
+            "tier_distribution": tier_counts,
+            "average_scores": avg_scores,
+            "current_mode": settings.SIGNAL_MODE
+        }
+    
+    except Exception as e:
+        logger.error(f"Error fetching conviction stats: {e}")
+        return {
+            "total_signals_7d": 0,
+            "signals_with_conviction": 0,
+            "tier_distribution": {"ELITE": 0, "VIP": 0, "WATCHLIST": 0, "REJECTED": 0},
+            "average_scores": {},
+            "current_mode": settings.SIGNAL_MODE,
+            "error": str(e)
+        }
 
 
 async def start_dashboard(orch, port: int = 8080):

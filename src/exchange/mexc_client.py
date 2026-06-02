@@ -39,8 +39,10 @@ class MEXCClient:
 
     def _sign(self, query_string: str) -> str:
         """Create HMAC-SHA256 signature."""
+        # Handle both string and bytes API secret
+        secret = self.api_secret if isinstance(self.api_secret, bytes) else self.api_secret.encode("utf-8")
         return hmac.new(
-            self.api_secret,
+            secret,
             query_string.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
@@ -72,7 +74,8 @@ class MEXCClient:
             
             # Use server-adjusted timestamp and add recvWindow for tolerance
             timestamp = int(datetime.utcnow().timestamp() * 1000) + self._server_time_offset
-            query += f"&timestamp={timestamp}&recvWindow=10000"
+            ts_recv = f"timestamp={timestamp}&recvWindow=10000"
+            query = f"{query}&{ts_recv}" if query else ts_recv
             signature = self._sign(query)
             query += f"&signature={signature}"
         
@@ -147,10 +150,11 @@ class MEXCClient:
         return orders
 
     async def get_my_trades(self, symbol: Optional[str] = None, limit: int = 50) -> List[Dict]:
-        """Fetch recent filled trades / order history."""
-        params = {"limit": limit}
-        if symbol:
-            params["symbol"] = symbol
+        """Fetch recent filled trades / order history. MEXC requires symbol for this endpoint."""
+        if not symbol:
+            logger.debug("MEXC myTrades requires a symbol — skipping (no symbol provided)")
+            return []
+        params = {"limit": limit, "symbol": symbol}
         data = await self._request("GET", "/api/v3/myTrades", params=params, signed=True)
         if not data:
             return []

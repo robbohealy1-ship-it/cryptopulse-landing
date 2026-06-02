@@ -59,7 +59,10 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     MIN_CONFIDENCE_SCORE: int = 85
     MAX_SIGNALS_PER_DAY: int = 5
-    MIN_DAILY_VOLUME_USD: float = 10000000
+    MIN_DAILY_VOLUME_USD: float = 5000000  # Lowered from $10M to $5M for more pairs
+    
+    # NEW: Signal Mode (strict/balanced/aggressive)
+    SIGNAL_MODE: str = "strict"  # strict=85+, balanced=75+, aggressive=65+
     
     # VIP-exclusive signals (higher quality)
     VIP_MIN_CONFIDENCE: int = 90
@@ -108,11 +111,26 @@ class Settings(BaseSettings):
     
     # Custom affiliate URL (overrides everything above when AFFILIATE_EXCHANGE=custom)
     # Paste ANY link you want here - Coinbase, Kraken, Luno, a blog, anything
-    AFFILIATE_CUSTOM_URL: Optional[str] = None  # e.g. "https://kraken.com/?ref=XYZ"
+    AFFILIATE_CUSTOM_URL: Optional[str] = "https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP"  # e.g. "https://kraken.com/?ref=XYZ"
+    
+    # MEXC Referral Code (will be appended to MEXC signup link)
+    MEXC_REFERRAL_CODE: Optional[str] = None  # e.g. "mexc-1AbCdEf"
+    
+    # HYROTrader (Prop Firm) Referral URL
+    # Get your link at: https://hyrotrader.com/affiliates
+    HYROTRADER_REFERRAL_URL: Optional[str] = None  # e.g. "https://hyrotrader.com?ref=YOURCODE"
     
     # Trust Wallet address for portfolio tracking (shown in alpha plays)
     # DeBank profile link will be generated automatically
     TRUST_WALLET_ADDRESS: Optional[str] = None  # e.g. "0x1234..."
+    
+    # Show portfolio link in alpha play Telegram messages
+    # FALSE = hide portfolio section (recommended until you have real track record)
+    # TRUE = show wallet links at bottom of alpha messages
+    SHOW_PORTFOLIO_IN_ALPHA: bool = False
+    
+    # Public portfolio page settings
+    PUBLIC_PORTFOLIO_ENABLED: bool = False  # Enable /public-portfolio shareable link
     
     # Marketing automation settings
     MARKETING_POSTS_PER_DAY: int = 4  # Posts per day to free channel
@@ -136,6 +154,14 @@ class Settings(BaseSettings):
     DISCORD_WEBHOOK_URL: Optional[str] = None        # Main signals channel
     DISCORD_VIP_WEBHOOK_URL: Optional[str] = None    # VIP lounge channel
     DISCORD_ALPHA_WEBHOOK_URL: Optional[str] = None  # Alpha plays channel
+    
+    # Discord Marketing Webhooks (comma-separated URLs for automated marketing)
+    # Example: "https://discord.com/api/webhooks/xxx/yyy,https://discord.com/api/webhooks/aaa/bbb"
+    DISCORD_WEBHOOK_URLS: Optional[str] = None
+    
+    # Telegram Group Cross-Posting (comma-separated group IDs or @usernames)
+    # Example: "-1001234567890,-1009876543210,@cryptogroup1,@cryptogroup2"
+    TELEGRAM_CROSS_POST_GROUPS: Optional[str] = None
     
     # Generic webhook for IFTTT/Zapier/custom integrations
     MARKETING_WEBHOOK_URL: Optional[str] = None

@@ -68,6 +68,7 @@ class VIPBot:
         self.app.add_handler(CommandHandler("vip", self.vip_command))
         self.app.add_handler(CommandHandler("price", self.price_command))
         self.app.add_handler(CommandHandler("help", self.help_command))
+        self.app.add_handler(CommandHandler("guide", self.guide_command))
         self.app.add_handler(CommandHandler("status", self.status_command))
         self.app.add_handler(CommandHandler("cancel", self.cancel_command))
         self.app.add_handler(CommandHandler("alert", self.alert_command))
@@ -286,6 +287,7 @@ class VIPBot:
             "/vip - Start VIP payment\n"
             "/price - See pricing plans\n"
             "/status - Check your subscription\n"
+            "/guide - How to trade our signals\n"
             "/alert - Set price alert\n"
             "/myalerts - List your alerts\n"
             "/removealert - Remove an alert\n"
@@ -294,6 +296,104 @@ class VIPBot:
             "Questions? Contact support.",
             parse_mode='HTML'
         )
+    
+    async def guide_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Send comprehensive trading guide"""
+        await self._send_trading_guide(update.message.chat_id)
+    
+    async def _send_trading_guide(self, chat_id: int):
+        """Send the full VIP trading guide via DM."""
+        hyperliquid_url = settings.AFFILIATE_CUSTOM_URL
+        mexc_ref = getattr(settings, 'MEXC_REFERRAL_CODE', None)
+        hyro_url = getattr(settings, 'HYROTRADER_REFERRAL_URL', None)
+        
+        # Build exchange links
+        hyperliquid_line = ""
+        if hyperliquid_url:
+            hyperliquid_line = f'🔥 <a href="{hyperliquid_url}">Trade on Hyperliquid</a>\n'
+        
+        mexc_line = ""
+        if mexc_ref:
+            mexc_ref_stripped = mexc_ref.strip()
+            if mexc_ref_stripped.startswith('http'):
+                mexc_url = mexc_ref_stripped
+            elif mexc_ref_stripped.startswith('/r/'):
+                mexc_url = f"https://promote.mexc.com{mexc_ref_stripped}"
+            elif '/' in mexc_ref_stripped:
+                mexc_url = f"https://promote.mexc.com{mexc_ref_stripped}"
+            else:
+                mexc_url = f"https://www.mexc.com/register?inviteCode={mexc_ref_stripped}"
+            mexc_line = f'💎 <a href="{mexc_url}">Trade on MEXC</a>\n'
+        
+        hyro_line = ""
+        if hyro_url:
+            hyro_line = f'🚀 <a href="{hyro_url}">Trade using prop — HYROTrader</a>\n'
+        
+        guide = (
+            "📚 <b>CRYPTO PULSE — COMPLETE TRADING GUIDE</b>\n\n"
+            "<b>1️⃣ SET UP YOUR EXCHANGE</b>\n"
+            "Before your first signal, create an account:\n\n"
+            f"{hyperliquid_line}"
+            f"{mexc_line}"
+            f"{hyro_line}"
+            "<i>Low fees · Deep liquidity · Support the channel</i>\n\n"
+            "<b>2️⃣ UNDERSTANDING SIGNALS</b>\n"
+            "Every signal contains:\n"
+            "• 📊 Direction: LONG (price goes up) or SHORT (price goes down)\n"
+            "• 💰 Entry: Where to enter the trade\n"
+            "• 🛑 Stop Loss: Where to exit if wrong (max 2% risk)\n"
+            "• 🎯 Take Profits: TP1, TP2, TP3 — scale out as each hits\n"
+            "• ⏳ Limit vs Market: Limit = wait for price; Market = enter now\n\n"
+            "<b>3️⃣ PLACING A TRADE STEP-BY-STEP</b>\n"
+            "<b>For LIMIT orders:</b>\n"
+            "1. Search the pair on your exchange\n"
+            "2. Select LIMIT order\n"
+            "3. Set entry price from the signal\n"
+            "4. Set quantity (see Position Sizing below)\n"
+            "5. Set Stop Loss at the signal price\n"
+            "6. Set TP1, TP2, TP3 if your exchange supports multiple TPs\n"
+            "7. Submit and wait for price to reach your entry\n\n"
+            "<b>For MARKET orders:</b>\n"
+            "1. Search the pair on your exchange\n"
+            "2. Select MARKET order\n"
+            "3. Enter quantity\n"
+            "4. Set Stop Loss IMMEDIATELY after fill\n"
+            "5. Set TP1, TP2, TP3\n\n"
+            "<b>4️⃣ POSITION SIZING (CRITICAL)</b>\n"
+            "Never risk more than 2% of your total account on one trade.\n\n"
+            "Example with $1,000 account:\n"
+            "• Max risk per trade = $20 (2%)\n"
+            "• If SL is 5% away from entry, position size = $400\n"
+            "• If SL is 10% away, position size = $200\n\n"
+            "Formula: Position Size = (Account × 0.02) ÷ (Entry − SL)%\n\n"
+            "<b>5️⃣ TRADE MANAGEMENT</b>\n"
+            "• When TP1 hits → we alert you to move SL to breakeven\n"
+            "• When TP2 hits → you may close 50% of position\n"
+            "• When TP3 hits → full close, bank profits\n"
+            "• If SL hits → accept the loss, move to next setup\n\n"
+            "<b>6️⃣ WHAT TO EXPECT</b>\n"
+            "• 1-3 signals per day (quality over quantity)\n"
+            "• Instant delivery in VIP channel\n"
+            "• Live alerts on TP/SL hits and breakeven moves\n"
+            "• Weekly performance report every Monday\n\n"
+            "<b>7️⃣ FIRST TRADE CHECKLIST</b>\n"
+            "✅ Exchange account funded\n"
+            "✅ Test with $10-50 on your first 2-3 signals\n"
+            "✅ Set SL before you set TPs\n"
+            "✅ Never FOMO — if you miss entry, wait for next signal\n"
+            "✅ Follow the 2% rule religiously\n\n"
+            "Questions? DM @CryptoPulseVIPAccessBot"
+        )
+        try:
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=guide,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            logger.info(f"Trading guide sent to {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to send trading guide to {chat_id}: {e}")
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Check subscription status"""
@@ -986,12 +1086,14 @@ class VIPBot:
                 f"{extra}\n"
                 f"📚 <b>Getting Started:</b>\n"
                 f"• Join the channel above\n"
-                f"• Introduce yourself\n"
+                f"• Check your DMs for the full trading guide\n"
                 f"• Watch for your first signal!\n\n"
                 f"Questions? DM @CryptoPulseVIPAccessBot",
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
+            # Auto-send trading guide to new member
+            await self._send_trading_guide(user.id)
         else:
             await update.message.reply_text(
                 f"✅ <b>{tier_label} Payment Received!</b>\n\n"
