@@ -29,6 +29,37 @@ logger = get_logger(__name__)
 
 app = FastAPI(title="CryptoPulse Admin", version="2.0")
 
+# ==================== Session Auth ====================
+_sessions: Dict[str, datetime] = {}
+
+def _generate_session() -> str:
+    return secrets.token_urlsafe(32)
+
+def _set_auth_cookie(response: Response, token: str):
+    response.set_cookie(key="cp_session", value=token, httponly=True, max_age=86400*7, samesite="lax")
+
+async def _get_session(request: Request) -> bool:
+    token = request.cookies.get("cp_session")
+    if token and token in _sessions:
+        if _sessions[token] > datetime.utcnow():
+            return True
+        else:
+            _sessions.pop(token, None)
+    return False
+
+def _check_basic_auth(request: Request) -> bool:
+    if not settings.ADMIN_DASHBOARD_PASSWORD:
+        return True
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Basic "):
+        return False
+    try:
+        creds = __import__('base64').b64decode(auth[6:]).decode("utf-8")
+        username, password = creds.split(":", 1)
+        return secrets.compare_digest(username, "admin") and secrets.compare_digest(password, settings.ADMIN_DASHBOARD_PASSWORD)
+    except Exception:
+        return False
+
 # ==================== Rate Limiting ====================
 _request_log: Dict[str, List[datetime]] = {}
 
@@ -96,37 +127,35 @@ async def verify_admin_auth(credentials: HTTPBasicCredentials = Depends(security
 
 @app.middleware("http")
 async def dashboard_auth_middleware(request: Request, call_next):
-    """Protect API routes with Basic auth when ADMIN_DASHBOARD_PASSWORD is configured."""
-    # Skip auth for static files and HTML pages
-    skip_paths = {"/", "/login", "/marketing", "/portfolio", "/public-portfolio"}
-    # Also skip auth for public API routes
-    if request.url.path in skip_paths or not request.url.path.startswith("/api/") or request.url.path.startswith("/api/public/"):
+    """Protect all routes with session or Basic auth when ADMIN_DASHBOARD_PASSWORD is configured."""
+    path = request.url.path
+    
+    # Always public routes
+    public_paths = {"/login", "/api/login", "/api/public/portfolio", "/health", "/favicon.ico"}
+    if path in public_paths or path.startswith("/api/public/"):
         return await call_next(request)
     
     # Skip auth if not configured (backwards compatible)
     if not settings.ADMIN_DASHBOARD_PASSWORD:
         return await call_next(request)
     
-    # Check Basic auth header
-    auth = request.headers.get("Authorization")
-    if not auth or not auth.startswith("Basic "):
+    # Check session cookie first
+    if await _get_session(request):
+        return await call_next(request)
+    
+    # Check Basic auth for API routes
+    if path.startswith("/api/") and _check_basic_auth(request):
+        return await call_next(request)
+    
+    # Not authenticated — redirect to login for HTML, 401 for API
+    if path.startswith("/api/"):
         return JSONResponse(
             status_code=401,
             content={"detail": "Authentication required"},
             headers={"WWW-Authenticate": "Basic"}
         )
     
-    import base64
-    try:
-        creds = base64.b64decode(auth[6:]).decode("utf-8")
-        username, password = creds.split(":", 1)
-    except Exception:
-        return JSONResponse(status_code=401, content={"detail": "Invalid auth format"})
-    
-    if not secrets.compare_digest(username, "admin") or not secrets.compare_digest(password, settings.ADMIN_DASHBOARD_PASSWORD):
-        return JSONResponse(status_code=401, content={"detail": "Invalid credentials"})
-    
-    return await call_next(request)
+    return FileResponse(os.path.join(_STATIC_DIR, "login.html"))
 
 
 # Global reference to the orchestrator (set at startup)
@@ -191,6 +220,12 @@ class FillLimitOrder(BaseModel):
     fill_price: float
 
 
+class LoginRequest(BaseModel):
+    """Model for dashboard login"""
+    username: str
+    password: str
+
+
 # ==================== Helper ====================
 
 def require_orch():
@@ -200,6 +235,30 @@ def require_orch():
 
 
 # ==================== API Endpoints ====================
+
+@app.get("/login")
+async def login_page():
+    """Serve the login page"""
+    return FileResponse(os.path.join(_STATIC_DIR, "login.html"))
+
+
+@app.post("/api/login")
+async def api_login(request: LoginRequest, response: Response):
+    """Authenticate and set session cookie"""
+    if not settings.ADMIN_DASHBOARD_PASSWORD:
+        return JSONResponse(status_code=403, content={"detail": "Login not configured"})
+    
+    username_ok = secrets.compare_digest(request.username, "admin")
+    password_ok = secrets.compare_digest(request.password, settings.ADMIN_DASHBOARD_PASSWORD)
+    
+    if not (username_ok and password_ok):
+        return JSONResponse(status_code=401, content={"detail": "Invalid credentials"})
+    
+    token = _generate_session()
+    _sessions[token] = datetime.utcnow() + timedelta(days=7)
+    _set_auth_cookie(response, token)
+    return {"success": True}
+
 
 @app.get("/marketing")
 async def marketing_dashboard():
