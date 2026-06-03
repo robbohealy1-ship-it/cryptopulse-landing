@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # LLM / AI Content Generation (optional)
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: Optional[str] = "gpt-4o-mini"
-    AI_DAILY_SUMMARY_ENABLED: bool = False
+    AI_DAILY_SUMMARY_ENABLED: bool = True  # Enable for professional, unique automated messages
     AI_EDUCATION_ENABLED: bool = False
     
     # Fundamental Data Sources (all optional)
