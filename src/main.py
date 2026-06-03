@@ -581,20 +581,9 @@ class CryptoPulseOrchestrator:
             logger.error(f"Error in daily scan: {e}")
     
     async def _publish_teasers(self, timeframe: str):
-        """Publish warm-up teasers (60-84% confidence) to free channel after a scan."""
-        try:
-            teasers = self.signal_engine.teaser_candidates
-            if not teasers:
-                return
-            for signal in teasers:
-                key = (signal.symbol, timeframe)
-                if key in self.signal_engine._sent_teasers:
-                    continue
-                await self.channel_publisher.publish_teaser_to_free(signal)
-                self.signal_engine._sent_teasers.add(key)
-            self.signal_engine.teaser_candidates = []
-        except Exception as e:
-            logger.error(f"Error publishing teasers: {e}")
+        """Disabled: warm-up signals are no longer sent to free channel."""
+        # Warm-up signals disabled per user request - only send real signals (82%+) to free channel
+        pass
     
     async def scan_15m(self):
         logger.info("🔍 Scanning 15m timeframe (institutional, liquidity + session)...")
@@ -1230,7 +1219,9 @@ class CryptoPulseOrchestrator:
                                 f"Entry: ${signal.actual_entry:.8f}\n"
                                 f"SL: ${signal.stop_loss:.8f}\n"
                                 f"TP1: ${signal.take_profit_1:.8f}\n\n"
-                                f"📊 Now tracking TP/SL automatically"
+                                f"📊 Now tracking TP/SL automatically\n\n"
+                                f"🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)\n"
+                                f"💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)"
                             )
                             await self.channel_publisher.bot.send_message(
                                 chat_id=self.channel_publisher.vip_channel_id,
@@ -1377,6 +1368,9 @@ class CryptoPulseOrchestrator:
 📅 {datetime.utcnow().strftime('%B %d, %Y')}
 
 {reports.get('vip', 'No signals closed today.')}
+
+🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)
+💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)
 """
             
             await self.channel_publisher.bot.send_message(

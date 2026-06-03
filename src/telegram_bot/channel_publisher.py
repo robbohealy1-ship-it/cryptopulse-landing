@@ -190,47 +190,12 @@ class ChannelPublisher:
         return False
 
     def _get_referral_cta(self) -> str:
-        """Return referral links for Hyperliquid, MEXC, and HYROTrader at the bottom of signals."""
-        hyperliquid_url = settings.AFFILIATE_CUSTOM_URL
-        mexc_ref = getattr(settings, 'MEXC_REFERRAL_CODE', None)
-        hyro_url = getattr(settings, 'HYROTRADER_REFERRAL_URL', None)
-        
-        cta = ""
-        
-        # Hyperliquid referral link — skip if it's a placeholder URL
-        if hyperliquid_url and not self._is_placeholder_url(hyperliquid_url):
-            cta += f"\n\n<a href=\"{hyperliquid_url}\"><b>🔥 Trade on Hyperliquid</b></a>"
-        elif hyperliquid_url and self._is_placeholder_url(hyperliquid_url):
-            logger.warning(f"⚠️ Skipping Hyperliquid referral link — placeholder detected in {hyperliquid_url}")
-        
-        # MEXC referral link — handle full URLs, paths, or plain codes
-        if mexc_ref:
-            mexc_url = None
-            mexc_ref_stripped = mexc_ref.strip()
-            
-            if mexc_ref_stripped.startswith('http'):
-                # It's already a full URL — use it directly
-                mexc_url = mexc_ref_stripped
-            elif mexc_ref_stripped.startswith('/r/'):
-                # It's a path like /r/CODE — prepend promote.mexc.com
-                mexc_url = f"https://promote.mexc.com{mexc_ref_stripped}"
-            elif '/' in mexc_ref_stripped:
-                # It contains a slash but doesn't start with /r/ — might be a full path
-                mexc_url = f"https://promote.mexc.com{mexc_ref_stripped}"
-            else:
-                # Plain referral code
-                mexc_url = f"https://www.mexc.com/register?inviteCode={mexc_ref_stripped}"
-            
-            if mexc_url:
-                cta += f"\n<a href=\"{mexc_url}\"><b>💎 Trade on MEXC</b></a>"
-        
-        # HYROTrader (Prop Firm) referral link
-        if hyro_url:
-            cta += f"\n<a href=\"{hyro_url}\"><b>🚀 Trade using prop — HYROTrader</b></a>"
-        
-        if cta:
-            cta += "\n<i>Low fees · Deep liquidity · Support the channel</i>"
-        
+        """Return referral links for Hyperliquid and MEXC at the bottom of all signals."""
+        # Always include both referral links
+        cta = (
+            "\n\n🔥 <a href=\"https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP\"><b>Trade on Hyperliquid</b></a>\n"
+            "💎 <a href=\"https://promote.mexc.com/r/RMWIMN3p5q\"><b>Trade on MEXC</b></a>"
+        )
         return cta
     
     _current_symbol: str = ""
