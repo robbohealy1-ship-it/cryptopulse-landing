@@ -1510,34 +1510,69 @@ class CryptoPulseOrchestrator:
                 vip_outlook = f"🌅 <b>AI MORNING OUTLOOK</b>\n<b>{now.strftime('%A, %d %B %Y')}</b>\n\n{ai_summary}"
                 logger.info("✅ Posted AI-generated morning outlook")
             else:
+                # Generate more specific outlook based on actual market conditions
+                btc_price = btc_trend.get('current_price', 0)
+                btc_24h = btc_trend.get('change_24h', 0)
+                fear_value = fear.get('value', 50)
+                funding_pct = funding.get('funding_rate', 0) * 100
+                
+                # Determine specific market context
+                if fear_value < 20:
+                    sentiment_note = "Extreme fear - watch for capitulation bounces or continued selloff"
+                elif fear_value < 40:
+                    sentiment_note = "Fear territory - potential reversal zones, be patient for confirmation"
+                elif fear_value > 75:
+                    sentiment_note = "Greed spike - watch for distribution and short setups"
+                else:
+                    sentiment_note = "Neutral sentiment - clean trends, clear structure"
+                
+                if abs(funding_pct) > 0.01:
+                    funding_note = f"⚠️ Elevated funding ({funding_pct:.4f}%) - potential squeeze incoming"
+                else:
+                    funding_note = f"Funding neutral ({funding_pct:.4f}%) - balanced positioning"
+                
+                if btc_24h > 3:
+                    momentum_note = "Strong upside momentum - look for LONG continuations on pullbacks"
+                elif btc_24h < -3:
+                    momentum_note = "Heavy downside pressure - SHORT bounces into resistance"
+                else:
+                    momentum_note = "Range-bound price action - wait for breakout confirmation"
+                
                 vip_outlook = f"""🌅 <b>MORNING MARKET OUTLOOK</b>
 <b>{now.strftime('%A, %d %B %Y')}</b>
 
 <b>📊 Market Sentiment:</b>
 Fear & Greed: <b>{fear.get('classification', 'Neutral')}</b> ({fear.get('value', 'N/A')}/100)
-Global Market Cap: <b>${global_data.get('total_market_cap', 'N/A')}T</b>
+BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
 BTC Dominance: <b>{global_data.get('btc_dominance', 'N/A')}%</b>
-BTC 7d Trend: <b>{btc_trend.get('trend_7d', 'N/A')}</b>
 
-<b>💰 Funding & Bias:</b>
-BTC Funding Rate: <b>{funding.get('funding_rate', 0)*100:.4f}%</b> ({funding.get('bias', 'neutral')})
-{funding.get('is_extreme', False) and '⚠️ Extreme funding — watch for squeeze' or ''}
+<b>💰 Funding & Positioning:</b>
+{funding_note}
 
 <b>📰 Key Headlines:</b>
 {headlines or 'Markets quiet overnight. No major news.'}
 
-<b>🎯 Today's Outlook:</b>
-✅ Scanning 15m, 1h, 4h, Daily timeframes
-✅ London-NY overlap: highest conviction windows
-✅ Max 3 signals today — quality over quantity
-✅ All signals 85%+ confidence, full trade management
+<b>🎯 Today's Strategy:</b>
+{sentiment_note}
+{momentum_note}
 
-<b>What to Watch:</b>
-🔍 BTC structure at higher timeframe POC
-🔍 ETH/BTC ratio for alt strength
-🔍 Funding extremes for reversal setups
+<b>⏰ Trading Windows:</b>
+• 08:00-12:00 UTC: London session - institutional flow
+• 13:00-17:00 UTC: NY open - highest volume
+• 17:00-20:00 UTC: Overlap - best setups
 
-Good luck today! 🎯"""
+<b>📋 Scan Schedule:</b>
+• 15m: Quick scalps (London/NY overlap only)
+• 1h: Intraday swings (structure breaks)
+• 4h: Swing setups (multi-day holds)
+• Daily: Position trades (3-7 day targets)
+
+Max 3 signals today. 85%+ confidence required. Full TP/SL management on all trades.
+
+Good luck! 🎯
+
+🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)
+💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)"""
 
             # VIP channel gets the full report
             await self.channel_publisher.bot.send_message(
@@ -1728,26 +1763,61 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
                 outlook = f"🌙 <b>AI EVENING RECAP</b>\n📅 {datetime.utcnow().strftime('%A, %B %d, %Y')}\n\n{ai_recap}"
                 logger.info("✅ Posted AI-generated evening recap")
             else:
-                # Build tomorrow's market outlook
+                # Build tomorrow's specific market outlook
+                funding_pct = funding_rate * 100
+                
+                # Generate specific tomorrow expectations
+                if fear_value < 25:
+                    tomorrow_sentiment = "Fear dominates - expect volatile moves. Wait for climax volume before entries."
+                elif fear_value > 70:
+                    tomorrow_sentiment = "Greed levels high - distribution likely. Watch for rejection at key levels."
+                else:
+                    tomorrow_sentiment = "Balanced sentiment - follow clean structure and volume confirmation."
+                
+                if abs(funding_pct) > 0.01:
+                    tomorrow_funding = f"Funding at {funding_pct:.4f}% - squeeze risk elevated. Tight stops recommended."
+                else:
+                    tomorrow_funding = f"Funding neutral at {funding_pct:.4f}% - normal position sizing."
+                
+                if btc_24h > 2:
+                    tomorrow_bias = "Bullish momentum continues - LONG pullbacks to support. Avoid chasing pumps."
+                elif btc_24h < -2:
+                    tomorrow_bias = "Bearish pressure remains - SHORT bounces into resistance. Patient entries only."
+                else:
+                    tomorrow_bias = "Range-bound tomorrow - wait for breakout or breakdown confirmation before trading."
+                
                 outlook = f"""🌙 <b>EVENING MARKET OUTLOOK</b>
 📅 {datetime.utcnow().strftime('%A, %B %d, %Y')}
 
-<b>📊 Market Sentiment:</b>
+<b>📊 Current Market State:</b>
 Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
 BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
 BTC Dominance: <b>{btc_dominance:.1f}%</b>
-Funding Rate: <b>{funding_rate*100:.4f}%</b>
+Funding Rate: <b>{funding_pct:.4f}%</b>
 {active_trades_text}{alpha_plays_text}{closed_trades_text}{performance_text}
 
-<b>🔮 Tomorrow's Focus:</b>
+<b>🔮 Tomorrow's Game Plan:</b>
 • {key_levels}
 • {session}
 • {volatility}
 
-<b>⚡ What to Expect:</b>
-{bias}
+<b>⚡ What to Expect Tomorrow:</b>
+{tomorrow_sentiment}
+{tomorrow_bias}
+{tomorrow_funding}
 
-💎 Stay alert for high-confidence setups!
+<b>📋 Focus Areas:</b>
+• Pre-market: Monitor Asia session for early direction
+• London Open (08:00 UTC): First major move likely here
+• NY Session (13:00 UTC): Confirm or reverse London bias
+• Overlap (17:00 UTC): Highest probability setups
+
+Max 3 signals. 85%+ confidence only. All trades managed to TP or SL.
+
+💎 Stay disciplined!
+
+🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)
+💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)
 """
             
             # VIP gets full outlook
