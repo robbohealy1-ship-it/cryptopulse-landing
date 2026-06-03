@@ -1354,7 +1354,7 @@ class CryptoPulseOrchestrator:
             return None
     
     async def send_daily_report(self):
-        """Send PERFORMANCE REVIEW at 23:55 (different from 20:00 market outlook)"""
+        """Send AI-generated PERFORMANCE REVIEW at 23:55 (different from 20:00 market outlook)"""
         try:
             # Daily report = TODAY'S PERFORMANCE, not tomorrow's outlook
             reports = await self.reporting.generate_daily_report()
@@ -1363,8 +1363,48 @@ class CryptoPulseOrchestrator:
             if not self.dashboard_only:
                 await self.admin_bot.send_notification(reports['admin'])
             
-            # VIP gets performance summary (signals closed today)
-            vip_performance = f"""📊 <b>DAILY PERFORMANCE</b>
+            # Try AI generation first for VIP
+            ai_performance = None
+            if hasattr(self, 'ai_generator') and self.ai_generator:
+                logger.info("🤖 Daily performance: attempting AI generation...")
+                
+                # Get closed signals for today
+                closed_signals = await self.db.get_closed_signals(days=1)
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                today_closed = [s for s in closed_signals if getattr(s, 'closed_at', None) and getattr(s, 'closed_at') >= today_start]
+                
+                wins = len([s for s in today_closed if s.pnl_percent and s.pnl_percent > 0])
+                losses = len([s for s in today_closed if s.pnl_percent and s.pnl_percent <= 0])
+                total_pnl = sum(s.pnl_percent for s in today_closed if s.pnl_percent)
+                win_rate = (wins / len(today_closed) * 100) if today_closed else 0
+                avg_conf = sum(s.confidence for s in today_closed) / len(today_closed) if today_closed else 0
+                
+                performance_data = {
+                    'total_signals': len(today_closed),
+                    'closed_count': len(today_closed),
+                    'wins': wins,
+                    'losses': losses,
+                    'win_rate': win_rate,
+                    'total_pnl': total_pnl,
+                    'avg_confidence': avg_conf,
+                    'closed_trades': [
+                        {
+                            'symbol': s.symbol,
+                            'pnl_percent': s.pnl_percent,
+                            'result': 'TP Hit' if s.pnl_percent > 0 else 'SL Hit'
+                        }
+                        for s in today_closed
+                    ]
+                }
+                
+                ai_performance = await self.ai_generator.generate_daily_performance(performance_data)
+            
+            if ai_performance:
+                vip_performance = f"📊 <b>DAILY PERFORMANCE</b>\n📅 {datetime.utcnow().strftime('%B %d, %Y')}\n\n{ai_performance}"
+                logger.info("✅ Posted AI-generated daily performance")
+            else:
+                # Fallback to template
+                vip_performance = f"""📊 <b>DAILY PERFORMANCE</b>
 📅 {datetime.utcnow().strftime('%B %d, %Y')}
 
 {reports.get('vip', 'No signals closed today.')}
@@ -1379,7 +1419,7 @@ class CryptoPulseOrchestrator:
                 parse_mode='HTML'
             )
             
-            logger.info("Daily performance report sent (focus: today's results)")
+            logger.info("Daily performance report sent")
             
         except Exception as e:
             logger.error(f"Error sending daily report: {e}")

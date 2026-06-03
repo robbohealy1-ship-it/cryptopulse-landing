@@ -72,9 +72,13 @@ class AIContentGenerator:
             return None
 
         system = (
-            "You are a professional crypto trading analyst writing a concise daily market summary "
-            "for VIP subscribers. Use Telegram HTML formatting (<b>bold</b>, emojis). "
-            "Max 400 words. Be insightful but not verbose. Include 1-2 actionable takeaways."
+            "You are a professional crypto trading analyst writing a morning market outlook for VIP subscribers. "
+            "Be specific and actionable - analyze the actual data provided and give clear trading bias. "
+            "Use Telegram HTML formatting (<b>bold</b>, emojis). Max 400 words. "
+            "Include specific price levels, session times, and what to watch. "
+            "IMPORTANT: Always end with these two lines on separate lines:\n"
+            "🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)\n"
+            "💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)"
         )
 
         # SAFE: handle None values that would crash string formatting
@@ -107,9 +111,13 @@ class AIContentGenerator:
             return None
 
         system = (
-            "You are a professional crypto trading analyst writing an evening recap "
-            "for VIP subscribers. Highlight what moved today, lessons from closed trades, "
-            "and what to watch tomorrow. Use Telegram HTML formatting. Max 350 words."
+            "You are a professional crypto trading analyst writing an evening market outlook for VIP subscribers. "
+            "Analyze today's performance and provide specific expectations for tomorrow. "
+            "Focus on actionable insights - what levels to watch, what bias to have, what sessions to focus on. "
+            "Use Telegram HTML formatting. Max 400 words. "
+            "IMPORTANT: Always end with these two lines on separate lines:\n"
+            "🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)\n"
+            "💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)"
         )
 
         # SAFE: handle None values that would crash string formatting
@@ -134,6 +142,50 @@ class AIContentGenerator:
             logger.info("✅ AI evening recap generated successfully")
         else:
             logger.warning("⚠️ AI evening recap returned None (API error or disabled)")
+        return result
+
+    async def generate_daily_performance(self, performance_data: Dict[str, Any]) -> Optional[str]:
+        """Generate AI-powered daily performance report."""
+        if not settings.AI_DAILY_SUMMARY_ENABLED:
+            return None
+
+        system = (
+            "You are a professional crypto trading analyst writing a daily performance summary for VIP subscribers. "
+            "Analyze the signals closed today and provide insights on what worked and what didn't. "
+            "Be honest about losses - they're part of trading. Highlight key lessons. "
+            "Use Telegram HTML formatting. Max 300 words. "
+            "IMPORTANT: Always end with these two lines on separate lines:\n"
+            "🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)\n"
+            "💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)"
+        )
+
+        lines = [
+            f"Date: {datetime.utcnow().strftime('%B %d, %Y')}",
+            f"Total Signals Today: {performance_data.get('total_signals', 0)}",
+            f"Signals Closed: {performance_data.get('closed_count', 0)}",
+            f"Wins: {performance_data.get('wins', 0)}",
+            f"Losses: {performance_data.get('losses', 0)}",
+            f"Win Rate: {performance_data.get('win_rate', 0):.1f}%",
+            f"Total P&L: {performance_data.get('total_pnl', 0):+.2f}%",
+            f"Average Confidence: {performance_data.get('avg_confidence', 0):.1f}%",
+        ]
+        
+        if performance_data.get('closed_trades'):
+            lines.append("\nTrades closed today:")
+            for trade in performance_data.get('closed_trades', [])[:5]:
+                symbol = trade.get('symbol', '?')
+                pnl = trade.get('pnl_percent', 0)
+                result = trade.get('result', 'closed')
+                lines.append(f"- {symbol}: {pnl:+.2f}% ({result})")
+
+        user = "\n".join(lines)
+        user += "\n\nWrite a professional daily performance summary in Telegram HTML with clear sections."
+        
+        result = await self._call_llm(system, user, max_tokens=500)
+        if result:
+            logger.info("✅ AI daily performance generated successfully")
+        else:
+            logger.warning("⚠️ AI daily performance returned None (API error or disabled)")
         return result
 
     # ───────────────────────────────────────────────
