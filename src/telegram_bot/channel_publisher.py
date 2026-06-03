@@ -480,7 +480,7 @@ Join VIP for premium signals!
         try:
             cta = self._get_referral_cta()
             
-            if signal.free_channel_message_id:
+            if signal.confidence < 85 and signal.free_channel_message_id:
                 free_text = f"📢 <b>UPDATE - {signal.symbol}</b>\n\n{update_text}"
                 free_text += cta
                 await self.bot.send_message(
@@ -532,8 +532,9 @@ Join VIP for premium signals!
                 parse_mode='HTML'
             )
         
-        # Free channel only gets TP1 with marketing
-        if tp_level == 1 and signal.free_channel_message_id:
+        # Free channel only gets TP1 with marketing — ONLY for free signals (<85% conf)
+        # VIP signals: trade lifecycle stays in VIP channel only
+        if tp_level == 1 and signal.confidence < 85 and signal.free_channel_message_id:
             tp_val = getattr(signal, f'take_profit_{tp_level}', None)
             tp_str = f"${tp_val:.4f}" if tp_val is not None else "N/A"
             free_text = f"🎉 <b>{signal.symbol} TP1 HIT!</b>\n\n"

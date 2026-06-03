@@ -93,7 +93,8 @@ class PerformanceTracker:
             'tp3_hit': getattr(signal, 'tp3_hit', False),
             'stop_moved_to_breakeven': getattr(signal, 'stop_moved_to_breakeven', False),
             'partial_exits': [],
-            'entry_time': datetime.utcnow()
+            'entry_time': datetime.utcnow(),
+            'dirty': True  # Mark new signals as dirty so first save happens
         }
         
         logger.info(f"🎯 Performance tracking started for {signal.symbol} {signal.direction.value} at ${entry:.4f}")
@@ -185,29 +186,6 @@ class PerformanceTracker:
             # Clean up extremes tracking
             self.pending_limit_extremes.pop(signal_id, None)
             
-            # Notify VIP channel
-            if self.channel_publisher:
-                try:
-                    dir_emoji = "🟢 LONG" if signal.direction.value == "LONG" else "🔴 SHORT"
-                    msg = (
-                        f"🎯 <b>LIMIT ORDER FILLED</b>\n\n"
-                        f"{signal.symbol} {dir_emoji}\n"
-                        f"Entry: ${signal.actual_entry:.8f}\n"
-                        f"SL: ${signal.stop_loss:.8f}\n"
-                        f"TP1: ${signal.take_profit_1:.8f}\n\n"
-                        f"📊 Now tracking TP/SL automatically"
-                    )
-                    if hasattr(self.channel_publisher, '_get_referral_cta'):
-                        msg += self.channel_publisher._get_referral_cta()
-                    await self.channel_publisher.bot.send_message(
-                        chat_id=self.channel_publisher.vip_channel_id,
-                        text=msg,
-                        parse_mode='HTML'
-                    )
-                    logger.info(f"📤 Limit fill notification sent to VIP for {signal.symbol}")
-                except Exception as e:
-                    logger.warning(f"Could not send limit fill VIP notification: {e}")
-            
             # Save updated signal to DB
             if self.db:
                 try:
@@ -287,10 +265,14 @@ class PerformanceTracker:
             
             await self._check_signal(signal_id)
         
-        # Save updated signals to DB
-        signals = [data['signal'] for data in self.active_signals.values()]
-        if signals:
-            await self.db.save_signals_batch(signals)
+        # Save updated signals to DB — ONLY signals that had state changes
+        dirty_signals = [data['signal'] for data in self.active_signals.values() if data.get('dirty', False)]
+        if dirty_signals:
+            await self.db.save_signals_batch(dirty_signals)
+            # Reset dirty flags after successful save
+            for data in self.active_signals.values():
+                data['dirty'] = False
+            logger.info(f"💾 Saved {len(dirty_signals)} dirty signals to DB")
         
         active_count = len(self.active_signals)
         pending_count = len(self.pending_limit_orders)
@@ -327,8 +309,12 @@ class PerformanceTracker:
             tp3 = signal.take_profit_3
             
             # Update tracked price extremes for this signal
-            signal_data['highest_price'] = max(highest_price, current_price)
-            signal_data['lowest_price'] = min(lowest_price, current_price)
+            new_high = max(highest_price, current_price)
+            new_low = min(lowest_price, current_price)
+            if new_high != highest_price or new_low != lowest_price:
+                signal_data['dirty'] = True
+            signal_data['highest_price'] = new_high
+            signal_data['lowest_price'] = new_low
             
             # Track MDD / MAE / MFE on the signal object
             if entry and entry != 0:
@@ -350,9 +336,16 @@ class PerformanceTracker:
                     else:
                         mdd_pct = mae_pct
                 
-                signal.max_favorable_excursion = max(signal.max_favorable_excursion or mfe_pct, mfe_pct)
-                signal.max_adverse_excursion = min(signal.max_adverse_excursion or mae_pct, mae_pct)
-                signal.max_drawdown_percent = min(signal.max_drawdown_percent or mdd_pct, mdd_pct)
+                old_mfe = signal.max_favorable_excursion
+                old_mae = signal.max_adverse_excursion
+                old_mdd = signal.max_drawdown_percent
+                signal.max_favorable_excursion = max(old_mfe or mfe_pct, mfe_pct)
+                signal.max_adverse_excursion = min(old_mae or mae_pct, mae_pct)
+                signal.max_drawdown_percent = min(old_mdd or mdd_pct, mdd_pct)
+                if (signal.max_favorable_excursion != old_mfe or
+                    signal.max_adverse_excursion != old_mae or
+                    signal.max_drawdown_percent != old_mdd):
+                    signal_data['dirty'] = True
             
             safe_entry = entry if entry and entry != 0 else 1.0  # avoid div by zero
             
@@ -409,6 +402,7 @@ class PerformanceTracker:
                 
                 # Mark TP as hit
                 signal_data[f'tp{hit_tp}_hit'] = True
+                signal_data['dirty'] = True
                 if self.db:
                     try:
                         await self.db.mark_tp_hit(signal.id, hit_tp)
@@ -430,6 +424,7 @@ class PerformanceTracker:
                 if hit_tp == 1 and not stop_moved_to_breakeven:
                     signal_data['stop_moved_to_breakeven'] = True
                     signal.stop_moved_to_breakeven = True
+                    signal_data['dirty'] = True
                     if self.db:
                         try:
                             await self.db.update_stop_loss(signal.id, signal.entry_price)

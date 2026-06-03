@@ -1157,6 +1157,14 @@ class CryptoPulseOrchestrator:
                     # CRITICAL FIX: If actual_entry is already set, the limit was filled earlier
                     # (e.g., before a restart when in-memory extremes were lost). Activate immediately.
                     if getattr(signal, 'actual_entry', None) is not None:
+                        # DEFENSIVE: if signal already has completion flags, don't re-activate
+                        # (stale DB state where actual_entry was set but signal actually closed)
+                        if getattr(signal, 'actual_exit', None) is not None or getattr(signal, 'closed_at', None) is not None:
+                            logger.warning(f"🛡️ {signal.symbol} has actual_entry but also actual_exit/closed_at — stale data, skipping re-activation")
+                            continue
+                        if getattr(signal, 'stop_hit', False) or getattr(signal, 'tp3_hit', False):
+                            logger.warning(f"🛡️ {signal.symbol} has actual_entry but also stop_hit/tp3_hit — stale data, skipping re-activation")
+                            continue
                         signal.status = SignalStatus.ACTIVE
                         await self.db.update_signal_status(signal_id=signal.id, status=SignalStatus.ACTIVE)
                         logger.info(f"🎯 Limit order for {signal.symbol} already filled (actual_entry={signal.actual_entry}), activating")
