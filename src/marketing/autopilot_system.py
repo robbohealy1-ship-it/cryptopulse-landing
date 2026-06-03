@@ -400,8 +400,10 @@ class PerformanceTracker:
                     pnl = ((safe_entry - tp_price) / safe_entry) * 100
                 logger.info(f"🎯 {signal.symbol} hit TP{hit_tp} at ${tp_price:.6f}! P&L: {pnl:+.2f}%")
                 
-                # Mark TP as hit
+                # Mark TP as hit — on BOTH in-memory dict AND signal object
+                # (signal object is what gets saved to DB via _signal_to_dict)
                 signal_data[f'tp{hit_tp}_hit'] = True
+                setattr(signal, f'tp{hit_tp}_hit', True)
                 signal_data['dirty'] = True
                 if self.db:
                     try:

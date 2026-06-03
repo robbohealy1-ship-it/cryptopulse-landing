@@ -2396,6 +2396,16 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                 return
             
             # TP1 / TP2: send hit update to correct channel based on confidence
+            # DEFENSIVE: verify DB state before sending — prevents duplicates after restarts
+            try:
+                db_signal = await self.db.get_signal_by_id(signal.id)
+                db_tp_hit = getattr(db_signal, f'tp{tp_level}_hit', False) if db_signal else False
+                if db_tp_hit:
+                    logger.warning(f"🛡️ Skipping TP{tp_level} notification for {signal.symbol}: already marked hit in DB")
+                    return
+            except Exception:
+                pass  # Don't block notification if DB check fails
+
             logger.info(f"📨 Channel handler: TP{tp_level} hit for {signal.symbol} — calling send_tp_hit")
             
             # If signal was sent to free channel (< 85% confidence), send TP updates there too
