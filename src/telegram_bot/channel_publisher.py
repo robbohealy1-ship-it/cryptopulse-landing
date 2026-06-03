@@ -591,44 +591,60 @@ Join VIP for premium signals!
         
         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
         
-        # VIP gets concise result
-        vip_text = (
+        # Full details message
+        full_text = (
             f"{'✅' if pnl > 0 else '❌'} <b>TRADE CLOSED</b> | {signal.symbol} {signal.direction.value}\n"
             f"Result: {result}\n"
             f"Entry: ${signal.actual_entry or signal.entry_price:.4f} → Exit: ${signal.actual_exit or signal.entry_price:.4f}\n"
             f"P&L: {pnl_emoji} {pnl:+.2f}%\n"
             f"Closed: {datetime.utcnow().strftime('%H:%M UTC')}"
         )
-        vip_text += self._get_referral_cta()
+        full_text += self._get_referral_cta()
         
-        # Free gets teaser
-        free_text = (
+        # Teaser message for free channel
+        teaser_text = (
             f"{'✅' if pnl > 0 else '❌'} <b>TRADE CLOSED</b> | {signal.symbol}\n"
             f"P&L: {pnl_emoji} {pnl:+.2f}%\n\n"
             f"Want full signals? DM @{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPBot'}"
         )
-        free_text += self._get_referral_cta()
+        teaser_text += self._get_referral_cta()
         
-        try:
-            if self.vip_channel_id:
-                await self.bot.send_message(
-                    chat_id=self.vip_channel_id,
-                    text=vip_text,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                logger.info(f"Trade closed sent to VIP: {signal.symbol} ({pnl:+.2f}%)")
-        except Exception as e:
-            logger.error(f"Error sending trade close to VIP: {e}")
-        
-        try:
-            if self.free_channel_id:
-                await self.bot.send_message(
-                    chat_id=self.free_channel_id,
-                    text=free_text,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                logger.info(f"Trade closed sent to Free: {signal.symbol} ({pnl:+.2f}%)")
-        except Exception as e:
-            logger.error(f"Error sending trade close to Free: {e}")
+        # Route based on signal confidence
+        if signal.confidence < 85:
+            # Free channel signal - send full details to free channel only
+            try:
+                if self.free_channel_id:
+                    await self.bot.send_message(
+                        chat_id=self.free_channel_id,
+                        text=full_text,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                    logger.info(f"Trade closed sent to FREE (full): {signal.symbol} ({pnl:+.2f}%, conf: {signal.confidence:.1f}%)")
+            except Exception as e:
+                logger.error(f"Error sending trade close to Free: {e}")
+        else:
+            # VIP signal - send full to VIP, teaser to free
+            try:
+                if self.vip_channel_id:
+                    await self.bot.send_message(
+                        chat_id=self.vip_channel_id,
+                        text=full_text,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                    logger.info(f"Trade closed sent to VIP: {signal.symbol} ({pnl:+.2f}%)")
+            except Exception as e:
+                logger.error(f"Error sending trade close to VIP: {e}")
+            
+            try:
+                if self.free_channel_id:
+                    await self.bot.send_message(
+                        chat_id=self.free_channel_id,
+                        text=teaser_text,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                    logger.info(f"Trade closed teaser sent to Free: {signal.symbol} ({pnl:+.2f}%)")
+            except Exception as e:
+                logger.error(f"Error sending trade close teaser to Free: {e}")

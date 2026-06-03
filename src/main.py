@@ -1209,7 +1209,7 @@ class CryptoPulseOrchestrator:
                     self._pending_limit_extremes.pop(sid, None)
                     logger.info(f"🎯 Limit order filled for {signal.symbol} at ${signal.actual_entry:.4f} ({fill_reason})")
                     
-                    # Notify VIP channel
+                    # Notify correct channel based on signal confidence
                     if self.channel_publisher:
                         try:
                             dir_emoji = "🟢 LONG" if signal.direction.value == "LONG" else "🔴 SHORT"
@@ -1223,13 +1223,22 @@ class CryptoPulseOrchestrator:
                                 f"🔥 Trade on Hyperliquid (https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP)\n"
                                 f"💎 Trade on MEXC (https://promote.mexc.com/r/RMWIMN3p5q)"
                             )
+                            
+                            # Send to FREE channel if confidence < 85% (free signal), else VIP
+                            if signal.confidence < 85:
+                                channel_id = self.channel_publisher.free_channel_id
+                                logger.info(f"📤 Sending limit fill to FREE channel (confidence: {signal.confidence:.1f}%)")
+                            else:
+                                channel_id = self.channel_publisher.vip_channel_id
+                                logger.info(f"📤 Sending limit fill to VIP channel (confidence: {signal.confidence:.1f}%)")
+                            
                             await self.channel_publisher.bot.send_message(
-                                chat_id=self.channel_publisher.vip_channel_id,
+                                chat_id=channel_id,
                                 text=msg,
                                 parse_mode='HTML'
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error(f"Error sending limit fill notification: {e}")
                     
                     # Hand off to autopilot for TP/SL tracking
                     if self.autopilot:
@@ -2366,14 +2375,21 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                 logger.info(f"✅ TP3 close notification sent for {signal.symbol}")
                 return
             
-            # TP1 / TP2: send hit update
+            # TP1 / TP2: send hit update to correct channel based on confidence
             logger.info(f"📨 Channel handler: TP{tp_level} hit for {signal.symbol} — calling send_tp_hit")
-            await self.channel_publisher.send_tp_hit(signal, tp_level)
-            logger.info(f"✅ TP{tp_level} hit notification sent for {signal.symbol}")
             
-            # Free channel teasers for TP2
-            if tp_level == 2:
+            # If signal was sent to free channel (< 85% confidence), send TP updates there too
+            if signal.confidence < 85:
+                logger.info(f"📤 Sending TP{tp_level} update to FREE channel (confidence: {signal.confidence:.1f}%)")
                 await self.channel_publisher.send_tp_hit_free(signal, tp_level)
+            else:
+                # VIP signal - send to VIP channel
+                await self.channel_publisher.send_tp_hit(signal, tp_level)
+                logger.info(f"✅ TP{tp_level} hit notification sent to VIP for {signal.symbol}")
+                
+                # Also send TP2 teaser to free channel for marketing
+                if tp_level == 2:
+                    await self.channel_publisher.send_tp_hit_free(signal, tp_level)
             
             # Breakeven SL move after TP1
             if tp_level == 1:
