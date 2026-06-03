@@ -709,6 +709,28 @@ class SupabaseClient:
             logger.info(f"Signal {signal_id} result updated: {status.value} P&L={pnl_percent:+.2f}%")
             return True
         except Exception as e:
+            error_str = str(e)
+            # Handle missing columns by stripping them and retrying
+            if "Could not find" in error_str and "column" in error_str:
+                # Extract column name from error like: "Could not find the 'duration_minutes' column"
+                import re
+                col_match = re.search(r"'([^']+)'\s+column", error_str)
+                if col_match:
+                    missing_col = col_match.group(1)
+                    if missing_col in data:
+                        logger.warning(f"DB column '{missing_col}' not found — removing from update data and retrying")
+                        data.pop(missing_col)
+                        try:
+                            self.client.table('signals').update(data).eq('id', signal_id).execute()
+                            logger.info(f"Signal {signal_id} result updated after stripping missing column")
+                            return True
+                        except Exception as e2:
+                            logger.error(f"Retry failed after stripping {missing_col}: {e2}")
+                    else:
+                        # Column not in our data but in some other context - log and continue
+                        logger.warning(f"DB reports missing column '{missing_col}' but it's not in our update data")
+                else:
+                    logger.warning(f"Could not parse missing column from error: {error_str}")
             logger.error(f"Error updating signal result: {e}")
             return False
     

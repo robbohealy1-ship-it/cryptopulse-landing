@@ -1133,6 +1133,18 @@ class CryptoPulseOrchestrator:
             active_signals = await self.db.get_active_signals()
             
             for signal in active_signals:
+                # GUARD: Skip signals that were already closed but have stale DB status
+                # (can happen if update_signal_result failed due to missing DB columns)
+                if getattr(signal, 'actual_exit', None) is not None:
+                    logger.warning(f"🛡️ Skipping re-track for {signal.symbol}: already has actual_exit (stale DB status)")
+                    continue
+                if getattr(signal, 'closed_at', None) is not None:
+                    logger.warning(f"🛡️ Skipping re-track for {signal.symbol}: already has closed_at (stale DB status)")
+                    continue
+                if getattr(signal, 'stop_hit', False) or getattr(signal, 'tp3_hit', False):
+                    logger.warning(f"🛡️ Skipping re-track for {signal.symbol}: already has stop_hit/tp3_hit flag (stale DB status)")
+                    continue
+                
                 current_price = await self._get_current_price(signal.symbol)
                 if not current_price:
                     continue
