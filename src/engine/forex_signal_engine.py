@@ -1,0 +1,286 @@
+"""
+Forex Signal Engine - mirrors crypto signal engine but for Forex markets
+Generates trading signals for major Forex pairs, commodities (XAUUSD), and indices (NAS100)
+"""
+import asyncio
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict
+import uuid
+from collections import deque
+
+from src.exchange.forex_client import ForexClient
+from src.analysis.technical_analyzer import TechnicalAnalyzer
+from src.analysis.institutional_analyzer import InstitutionalAnalyzer
+from src.analysis.timeframe_strategies import TimeframeStrategyFactory
+from src.analysis.enhanced_context_engine import EnhancedContextEngine as ContextEngine
+from src.engine.signal_ranker import SignalRanker
+from src.models.signal import (
+    TradingSignal, SignalDirection, SetupType, SignalStatus, MarketType
+)
+from src.config import settings
+from src.utils.logger import get_logger
+from src.utils.signal_validation_pipeline import SignalValidationPipeline
+from src.conviction.conviction_engine import ConvictionEngine
+
+logger = get_logger(__name__)
+
+# Correlated Forex pairs — avoid double exposure
+FOREX_CORRELATION_GROUPS = {
+    'EUR/USD': ['GBP/USD', 'AUD/USD'],  # USD-based pairs move together
+    'GBP/USD': ['EUR/USD', 'AUD/USD'],
+    'AUD/USD': ['EUR/USD', 'NZD/USD'],
+    'NZD/USD': ['AUD/USD'],
+    'XAU/USD': ['XAG/USD'],  # Gold and Silver correlate
+    'NAS100': ['SPX500', 'US30'],  # US indices correlate
+}
+
+
+class ForexSignalEngine:
+    """
+    Forex signal generation engine - same logic as crypto but for Forex markets
+    """
+    
+    def __init__(self, db=None):
+        self.forex_client = ForexClient()
+        self.technical_analyzer = TechnicalAnalyzer()
+        self.institutional_analyzer = InstitutionalAnalyzer()
+        self.context_engine = ContextEngine()
+        self.strategy_factory = TimeframeStrategyFactory()
+        self.signal_ranker = SignalRanker()
+        self.conviction_engine = ConvictionEngine()
+        self.db = db
+        self.validation_pipeline = SignalValidationPipeline(db=db)
+        
+        self.signals_today = []
+        self.last_reset = datetime.utcnow().date()
+        
+        self.min_confidence = settings.MIN_CONFIDENCE_SCORE
+        self.max_signals_per_day = 3  # Same as crypto: 3 signals/day
+        self.min_risk_reward = settings.MIN_RISK_REWARD
+        
+        # Signal mode
+        self.signal_mode = getattr(settings, 'SIGNAL_MODE', 'strict')
+        
+        # Dynamic threshold adjustment
+        self._signal_history = deque(maxlen=50)
+        self._setup_performance = {}
+        self._base_threshold = settings.MIN_CONFIDENCE_SCORE
+        self._threshold_adjustment = 0.0
+        
+        # Teaser signals for free channel
+        self.teaser_threshold = 60.0
+        self.teaser_candidates = []
+        self._sent_teasers = set()
+        
+    async def initialize(self):
+        """Initialize Forex client and load today's signals"""
+        logger.info("🌍 Initializing Forex signal engine...")
+        await self.forex_client.initialize()
+        
+        # Reload today's Forex signals from DB
+        if self.db:
+            try:
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                db_signals = await self.db.get_signals_by_date(today_start, datetime.utcnow())
+                loaded = 0
+                for sig in db_signals:
+                    # Only load Forex signals
+                    if getattr(sig, 'market_type', MarketType.CRYPTO) == MarketType.FOREX:
+                        if sig.status.value in ['pending', 'approved', 'active']:
+                            self.signals_today.append(sig)
+                            loaded += 1
+                logger.info(f"📊 Loaded {loaded} Forex signals from today")
+            except Exception as e:
+                logger.warning(f"Could not load today's Forex signals: {e}")
+        
+        logger.info(f"✅ Forex signal engine initialized ({len(self.forex_client.FOREX_SYMBOLS)} pairs)")
+    
+    async def close(self):
+        """Close Forex client"""
+        await self.forex_client.close()
+    
+    async def scan_and_generate(self) -> List[TradingSignal]:
+        """
+        Scan Forex markets and generate trading signals
+        Same flow as crypto engine but for Forex pairs
+        """
+        # Reset daily counter
+        today = datetime.utcnow().date()
+        if today != self.last_reset:
+            self.signals_today = []
+            self.last_reset = today
+            logger.info("🔄 Daily Forex signal counter reset")
+        
+        # Check if we've hit daily limit
+        approved_today = len([s for s in self.signals_today if s.status.value == 'approved'])
+        if approved_today >= self.max_signals_per_day:
+            logger.info(f"✋ Daily Forex signal limit reached ({approved_today}/{self.max_signals_per_day})")
+            return []
+        
+        logger.info("🔍 Scanning Forex markets for opportunities...")
+        
+        all_candidates = []
+        symbols = await self.forex_client.get_all_symbols()
+        
+        # Analyze each Forex pair
+        for symbol in symbols:
+            try:
+                # Get timeframe-specific signals
+                for timeframe in ['15m', '1h', '4h']:
+                    signal = await self.analyze_pair(symbol, timeframe)
+                    if signal:
+                        all_candidates.append(signal)
+                        logger.info(f"📊 Forex candidate: {symbol} {timeframe} (confidence: {signal.confidence:.1f}%)")
+            except Exception as e:
+                logger.error(f"Error analyzing Forex pair {symbol}: {e}")
+        
+        if not all_candidates:
+            logger.info("No Forex signals found this scan")
+            return []
+        
+        # Rank and select best signals
+        ranked = self.signal_ranker.rank_signals(all_candidates)
+        slots_available = self.max_signals_per_day - approved_today
+        selected = ranked[:slots_available]
+        
+        # Filter out correlated pairs
+        final_signals = self._filter_correlated_pairs(selected)
+        
+        # Validate and save
+        validated_signals = []
+        for signal in final_signals:
+            signal.market_type = MarketType.FOREX  # Mark as Forex
+            signal.id = str(uuid.uuid4())
+            signal.status = SignalStatus.APPROVED  # Auto-approve like crypto
+            signal.approved_at = datetime.utcnow()
+            
+            # Validate
+            is_valid, validation_result = await self.validation_pipeline.validate(signal)
+            if is_valid:
+                signal.grade = validation_result['grade']
+                signal.validation_score = validation_result['validation_score']
+                signal.validation_breakdown = validation_result['breakdown']
+                
+                # Save to DB
+                if self.db:
+                    try:
+                        await self.db.save_signal(signal)
+                        logger.info(f"💾 Forex signal saved: {signal.symbol} {signal.timeframe}")
+                    except Exception as e:
+                        logger.error(f"Failed to save Forex signal: {e}")
+                
+                validated_signals.append(signal)
+                self.signals_today.append(signal)
+        
+        logger.info(f"✅ Generated {len(validated_signals)} Forex signals")
+        return validated_signals
+    
+    async def analyze_pair(self, symbol: str, timeframe: str) -> Optional[TradingSignal]:
+        """
+        Analyze a Forex pair on a specific timeframe
+        Same logic as crypto analysis
+        """
+        try:
+            # Get historical data
+            klines = await self.forex_client.get_historical_klines(symbol, timeframe, limit=200)
+            if len(klines) < 100:
+                return None
+            
+            current_price = await self.forex_client.get_price(symbol)
+            if not current_price:
+                return None
+            
+            # Technical analysis
+            tech_analysis = await self.technical_analyzer.analyze(klines, symbol, timeframe)
+            if not tech_analysis:
+                return None
+            
+            # Institutional analysis
+            inst_analysis = await self.institutional_analyzer.analyze(klines, symbol, timeframe)
+            
+            # Context analysis (news, sentiment)
+            volume_24h = await self.forex_client.get_24h_volume(symbol)
+            context = await self.context_engine.analyze(symbol, current_price, volume_24h)
+            
+            # Get timeframe strategy
+            strategy = self.strategy_factory.get_strategy(timeframe)
+            if not strategy:
+                return None
+            
+            # Generate signal candidate
+            candidate = await strategy.generate_signal(
+                symbol=symbol,
+                timeframe=timeframe,
+                current_price=current_price,
+                technical=tech_analysis,
+                institutional=inst_analysis,
+                context=context
+            )
+            
+            if not candidate:
+                return None
+            
+            # Calculate conviction score
+            conviction_score = await self.conviction_engine.calculate_conviction(
+                signal=candidate,
+                technical=tech_analysis,
+                institutional=inst_analysis,
+                context=context
+            )
+            
+            # Apply confidence thresholds based on signal mode
+            min_conviction = 70 if self.signal_mode == 'aggressive' else 75 if self.signal_mode == 'balanced' else 80
+            adjusted_min_conf = self._base_threshold + self._threshold_adjustment
+            
+            if conviction_score < min_conviction or candidate.confidence < adjusted_min_conf:
+                return None
+            
+            # Create full signal
+            signal = TradingSignal(
+                symbol=symbol,
+                direction=candidate.direction,
+                setup_type=candidate.setup_type,
+                timeframe=timeframe,
+                market_type=MarketType.FOREX,
+                entry_price=candidate.entry_price,
+                stop_loss=candidate.stop_loss,
+                take_profit_1=candidate.take_profit_1,
+                take_profit_2=candidate.take_profit_2,
+                take_profit_3=candidate.take_profit_3,
+                technical_score=candidate.technical_score,
+                context_score=candidate.context_score,
+                confidence=candidate.confidence,
+                conviction_score=conviction_score,
+                reasoning=candidate.reasoning,
+                risk_reward=candidate.risk_reward,
+                atr=tech_analysis.get('atr', 0.0),
+                volume_24h=volume_24h,
+                market_context=context.get('market_context', ''),
+                news_context=context.get('news_context', '')
+            )
+            
+            return signal
+            
+        except Exception as e:
+            logger.error(f"Error analyzing Forex pair {symbol} {timeframe}: {e}")
+            return None
+    
+    def _filter_correlated_pairs(self, signals: List[TradingSignal]) -> List[TradingSignal]:
+        """Filter out correlated Forex pairs to avoid double exposure"""
+        if not signals:
+            return []
+        
+        filtered = [signals[0]]  # Always take the best signal
+        
+        for signal in signals[1:]:
+            is_correlated = False
+            for existing in filtered:
+                if signal.symbol in FOREX_CORRELATION_GROUPS.get(existing.symbol, []):
+                    is_correlated = True
+                    logger.info(f"⚠️ Skipping {signal.symbol} — correlated with {existing.symbol}")
+                    break
+            
+            if not is_correlated:
+                filtered.append(signal)
+        
+        return filtered

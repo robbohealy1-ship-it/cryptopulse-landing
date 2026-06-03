@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     BINANCE_API_KEY: Optional[str] = None
     BINANCE_API_SECRET: Optional[str] = None
     
+    # Forex Data APIs (free tier)
+    ALPHA_VANTAGE_API_KEY: Optional[str] = "demo"  # Get free key at alphavantage.co
+    TWELVE_DATA_API_KEY: Optional[str] = "demo"    # Get free key at twelvedata.com
+    
     NEWS_API_KEY: Optional[str] = None
     
     # LLM / AI Content Generation (optional)

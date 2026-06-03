@@ -28,6 +28,11 @@ class SignalDirection(str, Enum):
     SHORT = "SHORT"
 
 
+class MarketType(str, Enum):
+    CRYPTO = "crypto"
+    FOREX = "forex"
+
+
 class SetupType(str, Enum):
     LIQUIDITY_SWEEP = "liquidity_sweep"
     BREAKOUT_RETEST = "breakout_retest"
@@ -73,6 +78,7 @@ class TradingSignal(BaseModel):
     direction: SignalDirection
     setup_type: SetupType
     timeframe: str
+    market_type: MarketType = MarketType.CRYPTO  # crypto or forex
     
     entry_price: float
     stop_loss: float

@@ -175,6 +175,14 @@ class ChannelPublisher:
         
         return url
     
+    def _get_market_icon(self, signal: TradingSignal) -> str:
+        """Get market-specific icon for visual distinction"""
+        from src.models.signal import MarketType
+        market_type = getattr(signal, 'market_type', MarketType.CRYPTO)
+        if market_type == MarketType.FOREX:
+            return "🌍"  # Globe for Forex
+        return "₿"  # Bitcoin symbol for Crypto
+    
     def _is_placeholder_url(self, url: str) -> bool:
         """Detect unreplaced placeholder URLs that should not be sent."""
         if not url:
@@ -336,11 +344,13 @@ Join VIP to get:
     
     def _format_signal_for_channel(self, signal: TradingSignal, vip_only: bool = False) -> str:
         direction_emoji = "🟢" if signal.direction.value == "LONG" else "🔴"
+        market_icon = self._get_market_icon(signal)
         
         if vip_only:
             # Check if this is VIP-exclusive (90%+ confidence)
             is_exclusive = signal.confidence >= 90
-            exclusive_header = "🌟 VIP EXCLUSIVE 🌟\n⭐ ELITE SIGNAL ⭐\n\n" if is_exclusive else ""
+            exclusive_header = f"🌟 VIP EXCLUSIVE 🌟\n⭐ ELITE SIGNAL {market_icon} ⭐\n\n" if is_exclusive else f"{market_icon} "
+
             
             link = self._get_exchange_link(signal.symbol)
             ticker = signal.symbol.replace('/', '')
