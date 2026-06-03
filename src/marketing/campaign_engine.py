@@ -53,6 +53,9 @@ class CampaignEngine:
         # Campaign stats
         self.campaigns_sent = 0
         self.last_campaigns = {}  # campaign_type -> datetime
+        
+        # Deduplication: prevent duplicate campaign messages
+        self._sent_campaigns: set = set()
 
         # Templates
         self._load_templates()
@@ -173,13 +176,27 @@ class CampaignEngine:
     async def signal_result_campaign(self, signal: TradingSignal, result: dict, pnl: float = None):
         """
         When a signal hits TP or SL, run result marketing:
-        - FOMO post to free channel (if TP hit)
-        - Transparent SL report (if SL hit)
+        - FOMO post to free channel (if TP hit on VIP signal)
+        - Transparent SL report (if SL hit on VIP signal)
+        
+        SKIPPED for free signals (<85% confidence) — channel_publisher already handles all notifications.
         """
+        # Skip free signals — channel_publisher already sends all trade lifecycle notifications
+        if signal.confidence < 85:
+            logger.info(f"📤 Campaign skipped for {signal.symbol} — free signal, channel_publisher handles notifications")
+            return
+        
         # Defensive: only send result campaigns if signal was actually published to VIP
         if not getattr(signal, 'vip_channel_posted', False):
             logger.warning(f"Signal {signal.symbol} result campaign skipped — VIP publish not confirmed")
             return
+        
+        # Deduplication check
+        dedup_key = f"{signal.id}:{result.get('tp_hit', 'SL')}"
+        if dedup_key in self._sent_campaigns:
+            logger.debug(f"🛡️ Campaign dedup: {signal.symbol} result already sent")
+            return
+        self._sent_campaigns.add(dedup_key)
 
         hit_tp = result.get('tp_hit')
         hit_sl = result.get('sl_hit')
@@ -196,6 +213,13 @@ class CampaignEngine:
 
     async def _fomo_tp_campaign(self, signal: TradingSignal, tp_level: int, pnl: float):
         """FOMO campaign when TP is hit — drives VIP signups"""
+        # Deduplication check
+        dedup_key = f"{signal.id}:tp{tp_level}_campaign"
+        if dedup_key in self._sent_campaigns:
+            logger.debug(f"🛡️ FOMO campaign dedup: {signal.symbol} TP{tp_level} already sent")
+            return
+        self._sent_campaigns.add(dedup_key)
+        
         emoji = "🚀" if pnl > 15 else "🔥" if pnl > 8 else "✅"
 
         # 1. Free channel FOMO post
@@ -207,8 +231,10 @@ class CampaignEngine:
                 f"⏱ Timeframe: {signal.timeframe}\n\n"
                 f"While free channel watched the teaser...\n"
                 f"VIP members executed the full plan.\n\n"
-                f"💎 <a href='{self.landing_url}'>Join VIP for the next one</a>\n"
-                f"📩 DM @CryptoPulseVIPAccessBot"
+                f"💎 <a href='https://t.me/CryptoPulseVIPAccessBot'>Join VIP for the next one</a>\n"
+                f"📩 DM @CryptoPulseVIPAccessBot\n\n"
+                f"🔥 <a href='https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP'>Trade on Hyperliquid</a>\n"
+                f"💎 <a href='https://promote.mexc.com/r/RMWIMN3p5q'>Trade on MEXC</a>"
             )
             try:
                 await self.channel_publisher.bot.send_message(
@@ -252,9 +278,16 @@ class CampaignEngine:
                 logger.warning(f"Twitter FOMO failed: {e}")
 
     async def _transparent_sl_campaign(self, signal: TradingSignal, pnl: float):
-        """Transparent SL hit — builds trust by showing losses too"""
+        """Transparent SL hit — builds trust by showing losses too. Only for VIP signals."""
         if not self.channel_publisher or not self.free_channel:
             return
+        
+        # Deduplication check
+        dedup_key = f"{signal.id}:sl_campaign"
+        if dedup_key in self._sent_campaigns:
+            logger.debug(f"🛡️ SL campaign dedup: {signal.symbol} already sent")
+            return
+        self._sent_campaigns.add(dedup_key)
 
         text = (
             f"🛑 <b>SL Hit: {signal.symbol}</b>\n\n"
@@ -263,7 +296,9 @@ class CampaignEngine:
             f"Losses happen. That's trading.\n"
             f"Our system manages risk so one loss doesn't wipe you out.\n\n"
             f"📊 Full transparency — wins AND losses reported.\n\n"
-            f"💎 <a href='{self.landing_url}'>See our track record</a>"
+            f"💎 <a href='https://t.me/CryptoPulseVIPAccessBot'>See our track record</a>\n\n"
+            f"🔥 <a href='https://app.hyperliquid.xyz/join/HYPERLIQUIDCODECP'>Trade on Hyperliquid</a>\n"
+            f"💎 <a href='https://promote.mexc.com/r/RMWIMN3p5q'>Trade on MEXC</a>"
         )
         try:
             await self.channel_publisher.bot.send_message(
