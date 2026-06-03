@@ -753,7 +753,23 @@ class SupabaseClient:
         
         def _parse_dt(key):
             val = data.get(key)
-            return datetime.fromisoformat(val) if val else None
+            if not val:
+                return None
+            try:
+                # Handle timestamps with varying microsecond precision
+                if isinstance(val, str):
+                    # Remove timezone info and standardize format
+                    val = val.replace('+00:00', '').replace('Z', '')
+                    # Handle fractional seconds with any precision
+                    if '.' in val:
+                        parts = val.split('.')
+                        # Pad or truncate to 6 digits
+                        microseconds = parts[1][:6].ljust(6, '0')
+                        val = f"{parts[0]}.{microseconds}"
+                return datetime.fromisoformat(val)
+            except Exception as e:
+                logger.warning(f"Could not parse datetime for key '{key}': {val} - {e}")
+                return None
         
         def _safe(val, default):
             return val if val is not None else default
