@@ -44,6 +44,32 @@ class ForexClient:
         """Initialize HTTP session"""
         if not self.session:
             self.session = aiohttp.ClientSession()
+        
+        # Validate API key by testing a simple request
+        test_url = f"https://api.twelvedata.com/time_series?symbol=EUR/USD&interval=1h&outputsize=1&apikey={self.twelve_data_key}"
+        try:
+            async with self.session.get(test_url) as resp:
+                response_text = await resp.text()
+                if resp.status == 401:
+                    logger.error(f"❌ Twelve Data API key is INVALID or UNAUTHORIZED")
+                    logger.error(f"   Current key starts with: {self.twelve_data_key[:10]}...")
+                    logger.error(f"   API Response: {response_text}")
+                    logger.error(f"   Get a free key at: https://twelvedata.com/pricing")
+                elif resp.status == 200:
+                    try:
+                        data = await resp.json()
+                        if 'status' in data and data['status'] == 'error':
+                            logger.error(f"❌ Twelve Data API error: {data.get('message', 'Unknown')}")
+                            logger.error(f"   Full response: {data}")
+                        else:
+                            logger.info(f"✅ Twelve Data API key validated successfully")
+                    except:
+                        logger.error(f"❌ Twelve Data API returned invalid JSON: {response_text}")
+                else:
+                    logger.warning(f"⚠️ Twelve Data API returned status {resp.status}: {response_text}")
+        except Exception as e:
+            logger.error(f"❌ Failed to validate Twelve Data API key: {e}")
+        
         logger.info(f"✅ Forex client initialized with {len(self.FOREX_SYMBOLS)} symbols")
     
     async def close(self):
