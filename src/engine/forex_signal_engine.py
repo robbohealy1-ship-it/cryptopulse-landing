@@ -222,8 +222,11 @@ class ForexSignalEngine:
             if not tech_analysis or tech_analysis.total_score < 50:
                 return None
             
-            # Institutional analysis
-            inst_analysis = self.institutional_analyzer.analyze_institutional_flow(df)
+            # Institutional analysis (calculate score for entry quality)
+            direction = SignalDirection.LONG if tech_analysis.trend['direction'] == 'bullish' else SignalDirection.SHORT
+            entry = df['close'].iloc[-1]
+            stop_loss = self.technical_analyzer.calculate_stop_loss(df, direction, entry)
+            inst_analysis = self.institutional_analyzer.calculate_institutional_score(df, direction, entry, stop_loss, timeframe)
             
             # Context analysis (news, sentiment)
             volume_24h = await self.forex_client.get_24h_volume(symbol)

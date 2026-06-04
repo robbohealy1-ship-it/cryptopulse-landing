@@ -35,13 +35,23 @@ class ForexClient:
         self._cache = {}  # Simple price cache
         self._cache_ttl = 60  # 60 seconds
         self._last_request_time = None  # For rate limiting
-        self._min_request_interval = 2.0  # 2 seconds between requests (30 req/min, safe for Twelve Data free tier)
+        self._min_request_interval = 3.0  # 3 seconds between requests (20 req/min, safe for Twelve Data free tier)
         
         # Log API key status (masked for security)
         av_status = "✅ SET" if self.alpha_vantage_key and self.alpha_vantage_key != 'demo' else "❌ DEMO/MISSING"
         td_status = "✅ SET" if self.twelve_data_key and self.twelve_data_key != 'demo' else "❌ DEMO/MISSING"
         logger.info(f"Forex API Keys - Alpha Vantage: {av_status}, Twelve Data: {td_status}")
         
+    async def _apply_rate_limit(self):
+        """Wait between API requests to avoid rate limits"""
+        if self._last_request_time:
+            elapsed = (datetime.utcnow() - self._last_request_time).total_seconds()
+            if elapsed < self._min_request_interval:
+                wait_time = self._min_request_interval - elapsed
+                logger.debug(f"Rate limiting: waiting {wait_time:.1f}s")
+                await asyncio.sleep(wait_time)
+        self._last_request_time = datetime.utcnow()
+    
     async def initialize(self):
         """Initialize HTTP session"""
         if not self.session:
@@ -109,6 +119,9 @@ class ForexClient:
             cached_time, cached_price = self._cache[cache_key]
             if (datetime.utcnow() - cached_time).total_seconds() < self._cache_ttl:
                 return cached_price
+        
+        # Apply rate limiting
+        await self._apply_rate_limit()
         
         try:
             # Use Alpha Vantage for Forex pairs and commodities
@@ -191,12 +204,8 @@ class ForexClient:
             if not self.session:
                 await self.initialize()
             
-            # Rate limiting: wait between requests to avoid 429 errors
-            if self._last_request_time:
-                elapsed = (datetime.utcnow() - self._last_request_time).total_seconds()
-                if elapsed < self._min_request_interval:
-                    await asyncio.sleep(self._min_request_interval - elapsed)
-            self._last_request_time = datetime.utcnow()
+            # Apply rate limiting
+            await self._apply_rate_limit()
             
             # Map interval to API format
             interval_map = {
