@@ -1724,20 +1724,28 @@ Good luck! 🎯
                     current_price = await self._get_current_price(sig.symbol)
                     
                     if current_price:
-                        entry = sig.actual_entry or sig.entry_price or 0
-                        if entry and entry > 0:
-                            pnl = ((current_price - entry) / entry) * 100
-                        else:
+                        # Check if limit order is still pending fill
+                        if sig.is_limit_order and not sig.actual_entry:
+                            # Limit order not yet filled — show pending, no P&L
                             pnl = 0
-                        if sig.direction.value == "SHORT":
-                            pnl = -pnl
+                            pnl_emoji = "⚪"
+                            entry_str = f"Limit: ${sig.entry_price:.4f} (Pending fill)"
+                        else:
+                            # Order filled — calculate real P&L
+                            entry = sig.actual_entry or sig.entry_price or 0
+                            if entry and entry > 0:
+                                pnl = ((current_price - entry) / entry) * 100
+                            else:
+                                pnl = 0
+                            if sig.direction.value == "SHORT":
+                                pnl = -pnl
+                            pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                            entry_str = f"${entry:.4f}" if entry else "N/A"
                         
-                        pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
                         tp1_status = "✅" if getattr(sig, 'tp1_hit', False) else "⏳"
                         tp2_status = "✅" if getattr(sig, 'tp2_hit', False) else "⏳"
                         tp3_status = "✅" if getattr(sig, 'tp3_hit', False) else "⏳"
                         
-                        entry_str = f"${entry:.4f}" if entry else "N/A"
                         active_trades_text += f"""
 {sig.symbol} {sig.direction.value}
 Entry: {entry_str} | Current: ${current_price:.4f}

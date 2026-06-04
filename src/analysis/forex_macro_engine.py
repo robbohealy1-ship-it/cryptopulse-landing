@@ -181,37 +181,64 @@ class ForexMacroEngine:
         }
     
     async def _get_dxy(self, forex_client) -> Dict:
-        """Fetch DXY (US Dollar Index) from Twelve Data"""
+        """Fetch DXY (US Dollar Index) from Twelve Data
+        
+        Tries multiple symbols: DX-Y.NYB, DXY, DX
+        Falls back to neutral if API doesn't support indices (free tier limitation)
+        """
         if self._dxy_cache and self._dxy_cache_time:
             elapsed = (datetime.utcnow() - self._dxy_cache_time).total_seconds()
             if elapsed < self._dxy_cache_ttl:
                 return self._dxy_cache
         
-        try:
-            # DXY symbol for Twelve Data
-            klines = await forex_client.get_historical_klines('DXY', '1h', limit=20)
-            if len(klines) >= 5:
-                df = pd.DataFrame(klines)
-                if 'close' in df.columns and len(df) >= 2:
-                    current = float(df['close'].iloc[-1])
-                    prev = float(df['close'].iloc[-5])
-                    
-                    if current > prev * 1.002:
-                        trend = 'bullish'
-                    elif current < prev * 0.998:
-                        trend = 'bearish'
-                    else:
-                        trend = 'neutral'
-                    
-                    result = {'value': current, 'trend': trend}
-                    self._dxy_cache = result
-                    self._dxy_cache_time = datetime.utcnow()
-                    logger.info(f"DXY: {current:.2f} ({trend})")
-                    return result
-        except Exception as e:
-            logger.warning(f"DXY fetch failed: {e}")
+        # Track if we've already warned about DXY unavailability (suppress spam)
+        if getattr(self, '_dxy_unavailable_warned', False):
+            # Return cached neutral with extended TTL to avoid API spam
+            result = {'value': 100.0, 'trend': 'neutral'}
+            self._dxy_cache = result
+            self._dxy_cache_time = datetime.utcnow()
+            return result
         
-        return {'value': 100.0, 'trend': 'neutral'}
+        dxy_symbols = ['DX-Y.NYB', 'DXY', 'DX']
+        
+        for sym in dxy_symbols:
+            try:
+                klines = await forex_client.get_historical_klines(sym, '1h', limit=20)
+                if len(klines) >= 5:
+                    df = pd.DataFrame(klines)
+                    if 'close' in df.columns and len(df) >= 2:
+                        current = float(df['close'].iloc[-1])
+                        prev = float(df['close'].iloc[-5])
+                        
+                        if current > prev * 1.002:
+                            trend = 'bullish'
+                        elif current < prev * 0.998:
+                            trend = 'bearish'
+                        else:
+                            trend = 'neutral'
+                        
+                        result = {'value': current, 'trend': trend}
+                        self._dxy_cache = result
+                        self._dxy_cache_time = datetime.utcnow()
+                        logger.info(f"DXY ({sym}): {current:.2f} ({trend})")
+                        return result
+            except Exception as e:
+                err_str = str(e)
+                if '404' in err_str or 'Not Found' in err_str:
+                    continue  # Try next symbol
+                if '429' in err_str:
+                    break  # Rate limited, don't keep trying
+                # Other errors, log once and continue
+                logger.debug(f"DXY ({sym}) fetch failed: {e}")
+                continue
+        
+        # All symbols failed — DXY not available on this API tier
+        self._dxy_unavailable_warned = True
+        result = {'value': 100.0, 'trend': 'neutral'}
+        self._dxy_cache = result
+        self._dxy_cache_time = datetime.utcnow()
+        logger.warning("DXY not available on Twelve Data free tier — using neutral baseline for macro analysis")
+        return result
     
     async def _calculate_risk_appetite(self, forex_client) -> str:
         """
