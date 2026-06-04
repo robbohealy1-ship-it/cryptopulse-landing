@@ -22,10 +22,10 @@ class ForexClient:
         # Commodities
         'XAU/USD',  # Gold
         # 'XAG/USD',  # Silver - Not supported by Twelve Data (404 error)
-        # Indices (via Twelve Data)
-        'NAS100',   # NASDAQ 100
-        'US30',     # Dow Jones
-        'SPX500',   # S&P 500
+        # Indices - NOT supported by Twelve Data free tier (404 errors)
+        # 'NAS100',   # NASDAQ 100
+        # 'US30',     # Dow Jones
+        # 'SPX500',   # S&P 500
     ]
     
     def __init__(self):
