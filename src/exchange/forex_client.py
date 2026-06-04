@@ -124,12 +124,21 @@ class ForexClient:
         await self._apply_rate_limit()
         
         try:
-            # Use Twelve Data for ALL prices (single API, better rate limit management)
+            # Use Twelve Data as PRIMARY (better Forex data)
             price = await self._get_price_twelve_data(symbol)
-            
             if price:
                 self._cache[cache_key] = (datetime.utcnow(), price)
-            return price
+                return price
+            
+            # FALLBACK: Use Alpha Vantage if Twelve Data fails
+            logger.warning(f"🔄 Twelve Data failed for {symbol}, trying Alpha Vantage fallback...")
+            price = await self._get_price_alpha_vantage(symbol)
+            if price:
+                self._cache[cache_key] = (datetime.utcnow(), price)
+                return price
+            
+            logger.error(f"❌ Both APIs failed to fetch price for {symbol}")
+            return None
         except Exception as e:
             logger.error(f"Error fetching price for {symbol}: {e}")
             return None
