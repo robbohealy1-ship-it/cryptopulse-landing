@@ -310,10 +310,10 @@ class CryptoPulseOrchestrator:
             replace_existing=True
         )
         
-        # 🌍 FOREX: Every 2 hours — Forex pairs, commodities, indices
+        # 🌍 FOREX: Every 1 hour — Forex pairs, commodities, indices
         self.scheduler.add_job(
             self.scan_forex,
-            CronTrigger(hour='*/2', minute='10'),
+            CronTrigger(hour='*/1', minute='10'),
             id='scan_forex',
             name='Scan Forex markets',
             replace_existing=True

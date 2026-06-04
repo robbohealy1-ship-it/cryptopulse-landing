@@ -253,11 +253,15 @@ tr:hover { background: #0f172a; }
     <div class="section">
       <h2>Quick Scan</h2>
       <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Trigger an instant market scan on any timeframe.</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
         <button class="btn" onclick="triggerJob('scan_15m')">⚡ 15m Scan</button>
         <button class="btn" onclick="triggerJob('scan_1h')">📊 1h Scan</button>
         <button class="btn" onclick="triggerJob('scan_4h')">🎯 4h Scan</button>
         <button class="btn" onclick="triggerJob('scan_1d')">📈 Daily Scan</button>
+      </div>
+      <p style="color:#64748b;font-size:13px;margin-bottom:8px;">🌍 Forex Markets:</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn" onclick="triggerJob('scan_forex')" style="background:rgba(251,146,60,0.2);border:1px solid #fb923c;color:#fb923c;">🌍 Scan Forex</button>
       </div>
     </div>
   </div>
