@@ -12,6 +12,7 @@ from src.config import settings
 from src.models.signal import ContextScore
 from src.utils.logger import get_logger
 from src.analysis.whale_monitor import WhaleMonitor
+from src.analysis.forex_macro_engine import ForexMacroEngine
 
 logger = get_logger(__name__)
 
@@ -33,6 +34,9 @@ class EnhancedContextEngine:
         
         # Whale monitor (free tier via Binance public API)
         self.whale_monitor = WhaleMonitor()
+        
+        # Forex macro engine (DXY, risk appetite, session analysis)
+        self.forex_macro = ForexMacroEngine()
         
         # Cache management
         self.cache_duration = timedelta(minutes=15)
@@ -544,12 +548,13 @@ class EnhancedContextEngine:
     
     # ==================== MAIN INTERFACE ====================
     
-    async def analyze_context(self, symbol: str, direction: str = None) -> ContextScore:
+    async def analyze_context(self, symbol: str, direction: str = None, forex_client=None) -> ContextScore:
         """Comprehensive context analysis for a trading symbol
         
         Args:
             symbol: Trading pair (e.g., BTC/USDT or EUR/USD)
             direction: Signal direction ('LONG' or 'SHORT') - used to check if news aligns with trade
+            forex_client: Optional ForexClient for DXY/risk appetite data (Forex symbols only)
         """
         
         # Detect Forex symbols (contain "/" like EUR/USD, XAU/USD)
@@ -562,33 +567,56 @@ class EnhancedContextEngine:
         # Combine all news
         all_articles = newsapi_articles + crypto_articles
         
-        # For Forex: skip crypto-specific metrics, use news-only analysis
+        # For Forex: use dedicated macro engine (DXY, risk appetite, session)
         if is_forex:
-            # Analyze sentiment from news only
+            # Get news sentiment
             sentiment = self.analyze_sentiment(all_articles, direction)
             news_score = sentiment['score']
             
-            # For Forex, use neutral macro (no Fear & Greed, no BTC trend)
+            # Get macro analysis (DXY, risk appetite, session)
+            if forex_client:
+                try:
+                    macro_data = await self.forex_macro.analyze_macro(forex_client, symbol, direction)
+                    macro_score = macro_data['macro_score']
+                    sentiment_score = macro_data['sentiment_score']
+                    total_score = (
+                        macro_score * 0.35 +
+                        news_score * 0.45 +
+                        sentiment_score * 0.20
+                    )
+                    
+                    for warning in macro_data.get('warnings', []):
+                        logger.info(f"🌍 {symbol}: {warning}")
+                    
+                    logger.info(
+                        f"🌍 Context analysis for {symbol} ({direction}): "
+                        f"DXY={macro_data['dxy_reading']:.2f}({macro_data['dxy_trend']}), "
+                        f"Risk={macro_data['risk_appetite']}, Session={macro_data['session']}, "
+                        f"News={news_score:.0f}, Macro={macro_score:.0f}, Sentiment={sentiment_score:.0f}, Total={total_score:.0f}"
+                    )
+                    
+                    return ContextScore(
+                        macro_score=macro_score,
+                        news_score=news_score,
+                        sentiment_score=sentiment_score,
+                        total_score=total_score
+                    )
+                except Exception as e:
+                    logger.warning(f"Forex macro analysis failed for {symbol}: {e}, falling back to news-only")
+            
+            # Fallback: news-only analysis if macro engine fails or no forex_client
             macro_score = 50
-            
-            # Sentiment based purely on news alignment with direction
             if sentiment.get('news_aligns_direction', False):
-                sentiment_score = 80  # News supports the trade
+                sentiment_score = 80
             elif sentiment.get('high_impact_negative_count', 0) > sentiment.get('high_impact_positive_count', 0):
-                sentiment_score = 30  # News contradicts
+                sentiment_score = 30
             else:
-                sentiment_score = 60  # Neutral/mixed
+                sentiment_score = 60
             
-            # Weights for Forex: Macro 20%, News 50%, Sentiment 30%
-            # (News is more reliable for Forex than crypto metrics)
-            total_score = (
-                macro_score * 0.20 +
-                news_score * 0.50 +
-                sentiment_score * 0.30
-            )
+            total_score = macro_score * 0.20 + news_score * 0.50 + sentiment_score * 0.30
             
             logger.info(
-                f"Context analysis for {symbol} ({direction or 'no direction'}): "
+                f"Context analysis for {symbol} ({direction}): "
                 f"News={news_score:.0f}, Macro={macro_score:.0f} (neutral), "
                 f"Sentiment={sentiment_score:.0f}, Total={total_score:.0f}"
             )

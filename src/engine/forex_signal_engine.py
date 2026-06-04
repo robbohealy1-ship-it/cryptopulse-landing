@@ -233,9 +233,9 @@ class ForexSignalEngine:
             stop_loss = self.technical_analyzer.calculate_stop_loss(df, direction, entry)
             inst_analysis = self.institutional_analyzer.calculate_institutional_score(df, direction, entry, stop_loss, timeframe)
             
-            # Context analysis (news, sentiment) - Forex uses context engine but with basic fallback
+            # Context analysis (news, sentiment, DXY, risk appetite)
             try:
-                context = await self.context_engine.analyze_context(symbol, direction.value)
+                context = await self.context_engine.analyze_context(symbol, direction.value, forex_client=self.forex_client)
             except Exception as ctx_err:
                 logger.warning(f"Context analysis failed for {symbol}: {ctx_err}, using neutral context")
                 from src.models.signal import ContextScore
