@@ -34,6 +34,7 @@ class SupabaseClient:
                 'direction': signal.direction.value if hasattr(signal.direction, 'value') else str(signal.direction),
                 'setup_type': signal.setup_type.value if hasattr(signal.setup_type, 'value') else str(signal.setup_type),
                 'timeframe': signal.timeframe,
+                'market_type': signal.market_type.value if hasattr(signal, 'market_type') and hasattr(signal.market_type, 'value') else 'crypto',
                 'entry_price': signal.entry_price,
                 'stop_loss': signal.stop_loss,
                 'take_profit': signal.take_profit_1,     # legacy column name
@@ -771,7 +772,7 @@ class SupabaseClient:
             return []
     
     def _dict_to_signal(self, data: Dict) -> TradingSignal:
-        from src.models.signal import TechnicalScore, ContextScore, SignalDirection, SetupType
+        from src.models.signal import TechnicalScore, ContextScore, SignalDirection, SetupType, MarketType
         
         def _parse_dt(key):
             val = data.get(key)
@@ -817,12 +818,20 @@ class SupabaseClient:
             conf = _safe(data.get('confidence'), 50.0)
             context_score = ContextScore(macro_score=conf, news_score=conf, sentiment_score=conf, total_score=conf)
         
+        # Parse market_type, default to CRYPTO for backward compatibility
+        market_type_str = data.get('market_type', 'crypto')
+        try:
+            market_type = MarketType(market_type_str)
+        except ValueError:
+            market_type = MarketType.CRYPTO
+        
         return TradingSignal(
             id=_safe(data.get('id'), str(uuid.uuid4())),
             symbol=_safe(data.get('symbol'), 'UNKNOWN'),
             direction=SignalDirection(_safe(data.get('direction'), 'LONG')),
             setup_type=SetupType(_safe(data.get('setup_type'), 'support_resistance')),
             timeframe=_safe(data.get('timeframe'), '1h'),
+            market_type=market_type,
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit_1=take_profit_1,

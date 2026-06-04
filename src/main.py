@@ -5,6 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime, timedelta, timezone
 from src.engine.signal_engine import SignalEngine
+from src.engine.forex_signal_engine import ForexSignalEngine
 from src.telegram_bot.admin_bot import AdminBot
 from src.telegram_bot.vip_bot import VIPBot
 from src.telegram_bot.channel_publisher import ChannelPublisher
@@ -44,6 +45,7 @@ class CryptoPulseOrchestrator:
         self.db = SupabaseClient()
         
         self.signal_engine = SignalEngine(db=self.db)
+        self.forex_signal_engine = ForexSignalEngine(db=self.db)  # Forex signal generation
         self.admin_bot = AdminBot(
             signal_callback=self.on_signal_approved,
             rejection_callback=self.on_signal_rejected,
@@ -104,6 +106,7 @@ class CryptoPulseOrchestrator:
                 raise ValueError("Environment validation failed. Please check your .env file.")
             
             await self.signal_engine.initialize()
+            await self.forex_signal_engine.initialize()  # Initialize Forex engine
             if not dashboard_only:
                 await self.admin_bot.initialize()
             else:
@@ -304,6 +307,15 @@ class CryptoPulseOrchestrator:
             CronTrigger(hour=0, minute=5),
             id='scan_daily',
             name='Scan daily timeframe',
+            replace_existing=True
+        )
+        
+        # 🌍 FOREX: Every 2 hours — Forex pairs, commodities, indices
+        self.scheduler.add_job(
+            self.scan_forex,
+            CronTrigger(hour='*/2', minute='10'),
+            id='scan_forex',
+            name='Scan Forex markets',
             replace_existing=True
         )
         
@@ -608,6 +620,21 @@ class CryptoPulseOrchestrator:
             await self._publish_teasers('1h')
         except Exception as e:
             logger.error(f"Error in 1h scan: {e}")
+    
+    async def scan_forex(self):
+        """Scan Forex markets and generate signals (runs every 2 hours)"""
+        logger.info("🌍 Scanning Forex markets (EUR/USD, XAUUSD, NAS100, etc.)...")
+        try:
+            forex_signals = await self.forex_signal_engine.scan_and_generate()
+            if forex_signals:
+                logger.info(f"✅ Forex scan generated {len(forex_signals)} signal(s)")
+                # Publish Forex signals to channels (same flow as crypto)
+                for signal in forex_signals:
+                    await self.on_signal_approved(signal)
+            else:
+                logger.info("No Forex signals generated this scan")
+        except Exception as e:
+            logger.error(f"Error in Forex scan: {e}")
     
     # ==================== ALPHA/DEGEN PLAYS ====================
     
