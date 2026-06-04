@@ -35,7 +35,7 @@ class ForexClient:
         self._cache = {}  # Simple price cache
         self._cache_ttl = 60  # 60 seconds
         self._last_request_time = None  # For rate limiting
-        self._min_request_interval = 0.5  # 500ms between requests (max 2 req/sec, well under 8 req/min limit)
+        self._min_request_interval = 1.0  # 1 second between requests (max 1 req/sec = 60 req/min, well under limit)
         
         # Log API key status (masked for security)
         av_status = "✅ SET" if self.alpha_vantage_key and self.alpha_vantage_key != 'demo' else "❌ DEMO/MISSING"

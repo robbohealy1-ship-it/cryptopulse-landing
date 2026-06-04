@@ -191,13 +191,17 @@ class ForexSignalEngine:
             if not current_price:
                 return None
             
+            # Convert klines to DataFrame for analysis
+            import pandas as pd
+            df = pd.DataFrame(klines)
+            
             # Technical analysis
-            tech_analysis = await self.technical_analyzer.analyze(klines, symbol, timeframe)
-            if not tech_analysis:
+            tech_analysis = self.technical_analyzer.calculate_technical_score(df)
+            if not tech_analysis or tech_analysis.total_score < 50:
                 return None
             
             # Institutional analysis
-            inst_analysis = await self.institutional_analyzer.analyze(klines, symbol, timeframe)
+            inst_analysis = self.institutional_analyzer.analyze_institutional_flow(df)
             
             # Context analysis (news, sentiment)
             volume_24h = await self.forex_client.get_24h_volume(symbol)
