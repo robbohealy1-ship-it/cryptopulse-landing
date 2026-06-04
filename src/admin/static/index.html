@@ -89,6 +89,8 @@ tr:hover { background: #0f172a; }
 .badge.pending { background: rgba(251,191,36,0.15); color: #fbbf24; }
 .badge.closed { background: rgba(148,163,184,0.15); color: #94a3b8; }
 .badge.approved { background: rgba(34,197,94,0.15); color: #22c55e; }
+.badge.forex { background: rgba(251,146,60,0.15); color: #fb923c; border: 1px solid rgba(251,146,60,0.3); }
+.badge.crypto { background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.3); }
 
 .actions { display: flex; gap: 8px; }
 
@@ -541,11 +543,11 @@ tr:hover { background: #0f172a; }
       <table>
         <thead>
           <tr>
-            <th>Time</th><th>Symbol</th><th>Dir</th><th>TF</th><th>Conf</th><th>R/R</th><th>Entry</th><th>SL</th><th>TP1</th><th>Status</th><th>P&L</th>
+            <th>Time</th><th>Symbol</th><th>Market</th><th>Dir</th><th>TF</th><th>Conf</th><th>R/R</th><th>Entry</th><th>SL</th><th>TP1</th><th>Status</th><th>P&L</th>
           </tr>
         </thead>
         <tbody id="historyTable">
-          <tr><td colspan="11" class="empty-state">Loading...</td></tr>
+          <tr><td colspan="12" class="empty-state">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -853,10 +855,13 @@ function renderPending(signals) {
     el.innerHTML = '<div class="empty-state">No signals pending approval.</div>';
     return;
   }
-  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Conf</th><th>R/R</th><th>Entry</th><th>SL</th><th>TP1</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Market</th><th>Dir</th><th>TF</th><th>Conf</th><th>R/R</th><th>Entry</th><th>SL</th><th>TP1</th><th>Actions</th></tr></thead><tbody>';
   for (const s of signals) {
+    const marketType = s.market_type || 'crypto';
+    const marketIcon = marketType === 'forex' ? '🌍' : '₿';
     html += `<tr>
       <td><b>${s.symbol}</b></td>
+      <td><span class="badge ${marketType}">${marketIcon} ${marketType.toUpperCase()}</span></td>
       <td><span class="badge ${s.direction.toLowerCase()}">${s.direction}</span></td>
       <td>${s.timeframe}</td>
       <td>${s.confidence.toFixed(1)}%</td>
@@ -921,6 +926,9 @@ function renderActiveSignals(signals) {
     else if (s.tp2_hit) tpProgress = 66;
     else if (s.tp1_hit) tpProgress = 33;
     
+    const marketType = s.market_type || 'crypto';
+    const marketIcon = marketType === 'forex' ? '🌍' : '₿';
+    
     html += `
     <div class="card" style="position:relative;">
       ${fillStatus}
@@ -928,6 +936,7 @@ function renderActiveSignals(signals) {
         <div>
           <h3 style="font-size:18px;color:#f8fafc;margin-bottom:4px;">${s.symbol}</h3>
           <div style="display:flex;gap:6px;align-items:center;">
+            <span class="badge ${marketType}">${marketIcon} ${marketType.toUpperCase()}</span>
             <span class="badge ${s.direction.toLowerCase()}">${s.direction}</span>
             <span style="font-size:11px;color:${entryColor};">${entryType}</span>
             <span style="font-size:11px;color:#64748b;">${s.timeframe}</span>
@@ -1046,7 +1055,7 @@ async function loadHistory() {
   const data = await fetchJSON('/api/signals/history?' + params.toString());
   const tbody = document.getElementById('historyTable');
   if (!data.signals || data.signals.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No signals found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No signals found.</td></tr>';
     return;
   }
   tbody.innerHTML = data.signals.map(s => {
@@ -1054,9 +1063,12 @@ async function loadHistory() {
     const dir = s.direction || '?';
     const pnl = s.pnl_percent != null ? (s.pnl_percent > 0 ? '+' : '') + s.pnl_percent.toFixed(1) + '%' : '--';
     const pnlClass = s.pnl_percent != null ? (s.pnl_percent >= 0 ? 'up' : 'down') : '';
+    const marketType = s.market_type || 'crypto';
+    const marketIcon = marketType === 'forex' ? '🌍' : '₿';
     return `<tr>
       <td>${time}</td>
       <td><b>${s.symbol}</b></td>
+      <td><span class="badge ${marketType}">${marketIcon}</span></td>
       <td><span class="badge ${dir.toLowerCase()}">${dir}</span></td>
       <td>${s.timeframe || '--'}</td>
       <td>${s.confidence ? s.confidence.toFixed(0) + '%' : '--'}</td>
