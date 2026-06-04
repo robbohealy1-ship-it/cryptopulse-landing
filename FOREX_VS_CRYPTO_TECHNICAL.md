@@ -23,17 +23,33 @@ Both Forex and Crypto signals use the **EXACT SAME** institutional trading metho
 
 ### **2. Technical Analysis Components**
 
-Both markets use the **same analysis engine**:
+Both markets use the **same core analyzers** (shared foundation):
 
 ```python
-# IDENTICAL for both markets:
-- Order Block Detection (institutional zones)
-- Liquidity Sweep Analysis (stop hunts)
-- Fair Value Gap Identification (imbalances)
-- Market Structure Analysis (BOS/CHoCH)
-- Multi-Timeframe Confluence (15m, 1h, 4h, daily)
-- Volume Profile Analysis
-- Session-Based Weighting
+# SHARED FOUNDATION (universal price action concepts):
+- Order Block Detection (institutional zones) ✅
+- Liquidity Sweep Analysis (stop hunts) ✅
+- Fair Value Gap Identification (imbalances) ✅
+- Market Structure Analysis (BOS/CHoCH) ✅
+- Multi-Timeframe Confluence (15m, 1h, 4h, daily) ✅
+- Volume Profile Analysis ✅
+```
+
+**BUT** each market has **bespoke adjustments**:
+
+```python
+# FOREX-SPECIFIC ADJUSTMENTS:
+- Session Weighting (London > NY > Asia) 🌍
+- News Blackout (NFP, FOMC, CPI avoidance) 🌍
+- Tighter Stop Loss (60% of crypto SL distance) 🌍
+- Smaller Take Profits (70% of crypto TP distance) 🌍
+- Spread Penalties (wide spread = lower confidence) 🌍
+
+# CRYPTO-SPECIFIC ADJUSTMENTS:
+- BTC Correlation (alts follow BTC) ₿
+- Exchange-Specific Volume ₿
+- Crypto News (ETF, regulations, hacks) ₿
+- 24/7 Market (no session preference) ₿
 ```
 
 ### **3. Signal Workflow**
