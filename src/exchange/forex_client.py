@@ -247,9 +247,25 @@ class ForexClient:
                     else:
                         logger.error(f"Forex API response missing 'values' for {symbol}: {data}")
                         return []
+                elif resp.status == 429:
+                    # Rate limited - retry with exponential backoff
+                    retry_count = getattr(self, '_429_retry_count', 0)
+                    if retry_count < 3:
+                        wait_time = 10 * (2 ** retry_count)  # 10s, 20s, 40s
+                        logger.warning(f"🌍 Rate limited (429) for {symbol}, waiting {wait_time}s before retry {retry_count+1}/3...")
+                        self._429_retry_count = retry_count + 1
+                        await asyncio.sleep(wait_time)
+                        return await self.get_historical_klines(symbol, interval, limit)
+                    else:
+                        logger.error(f"🌍 Rate limited (429) for {symbol}, max retries exceeded")
+                        self._429_retry_count = 0
+                        return []
                 else:
                     logger.error(f"Forex API HTTP {resp.status} for {symbol}")
                     return []
+            
+            # Reset retry counter on success
+            self._429_retry_count = 0
             
             logger.warning(f"Could not fetch historical data for {symbol}")
             return []
