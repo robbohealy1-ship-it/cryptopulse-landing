@@ -34,6 +34,8 @@ class ForexClient:
         self.session: Optional[aiohttp.ClientSession] = None
         self._cache = {}  # Simple price cache
         self._cache_ttl = 60  # 60 seconds
+        self._last_request_time = None  # For rate limiting
+        self._min_request_interval = 0.5  # 500ms between requests (max 2 req/sec, well under 8 req/min limit)
         
         # Log API key status (masked for security)
         av_status = "✅ SET" if self.alpha_vantage_key and self.alpha_vantage_key != 'demo' else "❌ DEMO/MISSING"
@@ -79,8 +81,26 @@ class ForexClient:
             self.session = None
     
     def _normalize_symbol(self, symbol: str) -> str:
-        """Convert symbol to API format (EUR/USD -> EURUSD)"""
-        return symbol.replace('/', '')
+        """
+        Convert symbol to Twelve Data API format
+        EUR/USD -> EUR/USD (keep slash for Forex pairs)
+        XAU/USD -> XAU/USD (keep slash for commodities)
+        NAS100 -> NDX (Twelve Data uses NDX for NASDAQ 100)
+        US30 -> DJI (Twelve Data uses DJI for Dow Jones)
+        SPX500 -> SPX (Twelve Data uses SPX for S&P 500)
+        """
+        # Indices need special mapping
+        index_map = {
+            'NAS100': 'NDX',
+            'US30': 'DJI',
+            'SPX500': 'SPX'
+        }
+        
+        if symbol in index_map:
+            return index_map[symbol]
+        
+        # Forex pairs and commodities keep the slash
+        return symbol
     
     async def get_price(self, symbol: str) -> Optional[float]:
         """Get current price for a Forex symbol"""
@@ -170,6 +190,13 @@ class ForexClient:
         try:
             if not self.session:
                 await self.initialize()
+            
+            # Rate limiting: wait between requests to avoid 429 errors
+            if self._last_request_time:
+                elapsed = (datetime.utcnow() - self._last_request_time).total_seconds()
+                if elapsed < self._min_request_interval:
+                    await asyncio.sleep(self._min_request_interval - elapsed)
+            self._last_request_time = datetime.utcnow()
             
             # Map interval to API format
             interval_map = {
