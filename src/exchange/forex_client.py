@@ -21,7 +21,7 @@ class ForexClient:
         'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CAD', 'NZD/USD',
         # Commodities
         'XAU/USD',  # Gold
-        'XAG/USD',  # Silver
+        # 'XAG/USD',  # Silver - Not supported by Twelve Data (404 error)
         # Indices (via Twelve Data)
         'NAS100',   # NASDAQ 100
         'US30',     # Dow Jones
