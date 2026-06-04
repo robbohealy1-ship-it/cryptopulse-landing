@@ -73,6 +73,11 @@ class ForexSignalEngine:
         self.teaser_candidates = []
         self._sent_teasers = set()
         
+        # Scan lock to prevent concurrent scans (rate limit protection)
+        self._scan_lock = asyncio.Lock()
+        self._last_scan_time = None
+        self._min_scan_interval = 30  # Minimum 30 seconds between scans
+        
     async def initialize(self):
         """Initialize Forex client and load today's signals"""
         logger.info("🌍 Initializing Forex signal engine...")
@@ -105,54 +110,68 @@ class ForexSignalEngine:
         Scan Forex markets and generate trading signals
         Same flow as crypto engine but for Forex pairs
         """
-        # Reset daily counter
-        today = datetime.utcnow().date()
-        if today != self.last_reset:
-            self.signals_today = []
-            self.last_reset = today
-            logger.info("🔄 Daily Forex signal counter reset")
-        
-        # Check if we've hit daily limit
-        approved_today = len([s for s in self.signals_today if s.status.value == 'approved'])
-        if approved_today >= self.max_signals_per_day:
-            logger.info(f"✋ Daily Forex signal limit reached ({approved_today}/{self.max_signals_per_day})")
+        # Prevent concurrent scans (protects API rate limits)
+        if self._scan_lock.locked():
+            logger.warning("🌍 Forex scan already in progress, skipping concurrent request")
             return []
         
-        logger.info("🔍 Scanning Forex markets for opportunities...")
-        
-        all_candidates = []
-        symbols = await self.forex_client.get_all_symbols()
-        
-        # Analyze each Forex pair
-        for symbol in symbols:
-            try:
-                # Get timeframe-specific signals
-                for timeframe in ['15m', '1h', '4h']:
-                    signal = await self.analyze_pair(symbol, timeframe)
-                    if signal:
-                        all_candidates.append(signal)
-                        logger.info(f"📊 Forex candidate: {symbol} {timeframe} (confidence: {signal.confidence:.1f}%)")
-            except Exception as e:
-                logger.error(f"Error analyzing Forex pair {symbol}: {e}")
-        
-        if not all_candidates:
-            logger.info("No Forex signals found this scan")
-            return []
-        
-        # Rank and select best signals
-        ranked = self.signal_ranker.rank_signals(all_candidates)
-        slots_available = self.max_signals_per_day - approved_today
-        selected = ranked[:slots_available]
-        
-        # Filter out correlated pairs
-        final_signals = self._filter_correlated_pairs(selected)
-        
-        # Validate and save
-        validated_signals = []
-        for signal in final_signals:
-            signal.market_type = MarketType.FOREX  # Mark as Forex
-            signal.id = str(uuid.uuid4())
-            signal.status = SignalStatus.APPROVED  # Auto-approve like crypto
+        async with self._scan_lock:
+            # Check minimum interval between scans
+            if self._last_scan_time:
+                elapsed = (datetime.utcnow() - self._last_scan_time).total_seconds()
+                if elapsed < self._min_scan_interval:
+                    logger.warning(f"🌍 Forex scan too recent ({elapsed:.0f}s ago), minimum interval is {self._min_scan_interval}s")
+                    return []
+            self._last_scan_time = datetime.utcnow()
+            
+            # Reset daily counter
+            today = datetime.utcnow().date()
+            if today != self.last_reset:
+                self.signals_today = []
+                self.last_reset = today
+                logger.info("🔄 Daily Forex signal counter reset")
+            
+            # Check if we've hit daily limit
+            approved_today = len([s for s in self.signals_today if s.status.value == 'approved'])
+            if approved_today >= self.max_signals_per_day:
+                logger.info(f"✋ Daily Forex signal limit reached ({approved_today}/{self.max_signals_per_day})")
+                return []
+            
+            logger.info("🔍 Scanning Forex markets for opportunities...")
+            
+            all_candidates = []
+            symbols = await self.forex_client.get_all_symbols()
+            
+            # Analyze each Forex pair
+            for symbol in symbols:
+                try:
+                    # Get timeframe-specific signals
+                    for timeframe in ['15m', '1h', '4h']:
+                        signal = await self.analyze_pair(symbol, timeframe)
+                        if signal:
+                            all_candidates.append(signal)
+                            logger.info(f"📊 Forex candidate: {symbol} {timeframe} (confidence: {signal.confidence:.1f}%)")
+                except Exception as e:
+                    logger.error(f"Error analyzing Forex pair {symbol}: {e}")
+            
+            if not all_candidates:
+                logger.info("No Forex signals found this scan")
+                return []
+            
+            # Rank and select best signals
+            ranked = self.signal_ranker.rank_signals(all_candidates)
+            slots_available = self.max_signals_per_day - approved_today
+            selected = ranked[:slots_available]
+            
+            # Filter out correlated pairs
+            final_signals = self._filter_correlated_pairs(selected)
+            
+            # Validate and save
+            validated_signals = []
+            for signal in final_signals:
+                signal.market_type = MarketType.FOREX  # Mark as Forex
+                signal.id = str(uuid.uuid4())
+                signal.status = SignalStatus.APPROVED  # Auto-approve like crypto
             signal.approved_at = datetime.utcnow()
             
             # Validate
@@ -172,9 +191,9 @@ class ForexSignalEngine:
                 
                 validated_signals.append(signal)
                 self.signals_today.append(signal)
-        
-        logger.info(f"✅ Generated {len(validated_signals)} Forex signals")
-        return validated_signals
+            
+            logger.info(f"✅ Generated {len(validated_signals)} Forex signals")
+            return validated_signals
     
     async def analyze_pair(self, symbol: str, timeframe: str) -> Optional[TradingSignal]:
         """
@@ -194,6 +213,9 @@ class ForexSignalEngine:
             # Convert klines to DataFrame for analysis
             import pandas as pd
             df = pd.DataFrame(klines)
+            
+            # Add technical indicators first (required before scoring)
+            df = self.technical_analyzer.add_indicators(df)
             
             # Technical analysis
             tech_analysis = self.technical_analyzer.calculate_technical_score(df)
