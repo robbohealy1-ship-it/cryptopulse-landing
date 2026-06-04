@@ -1890,6 +1890,9 @@ async def trigger_scheduled_job(job: ScheduleJob,
         elif job.job_type == "scan_1d" or job.job_type == "scan_daily":
             await orch.scan_daily()
             return {"success": True, "job": "scan_daily"}
+        elif job.job_type == "scan_forex":
+            await orch.scan_forex()
+            return {"success": True, "job": "scan_forex"}
         else:
             raise HTTPException(status_code=400, detail="Unknown job type")
     except Exception as e:
