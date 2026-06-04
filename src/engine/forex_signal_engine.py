@@ -13,6 +13,7 @@ from src.analysis.technical_analyzer import TechnicalAnalyzer
 from src.analysis.institutional_analyzer import InstitutionalAnalyzer
 from src.analysis.timeframe_strategies import TimeframeStrategyFactory
 from src.analysis.enhanced_context_engine import EnhancedContextEngine as ContextEngine
+from src.analysis.forex_adjustments import ForexMarketAdjustments
 from src.engine.signal_ranker import SignalRanker
 from src.models.signal import (
     TradingSignal, SignalDirection, SetupType, SignalStatus, MarketType
@@ -227,6 +228,41 @@ class ForexSignalEngine:
                 institutional=inst_analysis,
                 context=context
             )
+            
+            # 🌍 FOREX-SPECIFIC ADJUSTMENTS
+            
+            # 1. Check for news blackout periods (NFP, FOMC, etc.)
+            blackout_check = ForexMarketAdjustments.check_news_blackout(symbol)
+            if blackout_check['is_blackout']:
+                logger.warning(f"🌍 {symbol}: News blackout - {blackout_check['reason']}")
+                return None
+            
+            # 2. Apply session-based confidence boost/penalty
+            original_confidence = candidate.confidence
+            candidate.confidence = ForexMarketAdjustments.apply_session_boost(
+                candidate.confidence, symbol
+            )
+            if candidate.confidence != original_confidence:
+                logger.info(f"🌍 {symbol}: Session adjustment {original_confidence:.1f}% -> {candidate.confidence:.1f}%")
+            
+            # 3. Adjust stop loss for Forex volatility (tighter than crypto)
+            sl_distance = abs(candidate.entry_price - candidate.stop_loss) / candidate.entry_price
+            adjusted_sl_distance = ForexMarketAdjustments.adjust_stop_loss(sl_distance, symbol)
+            if candidate.direction == SignalDirection.LONG:
+                candidate.stop_loss = candidate.entry_price * (1 - adjusted_sl_distance)
+            else:
+                candidate.stop_loss = candidate.entry_price * (1 + adjusted_sl_distance)
+            
+            # 4. Adjust take profit targets for Forex volatility (smaller than crypto)
+            for tp_level in ['take_profit_1', 'take_profit_2', 'take_profit_3']:
+                tp_value = getattr(candidate, tp_level, None)
+                if tp_value:
+                    tp_distance = abs(tp_value - candidate.entry_price) / candidate.entry_price
+                    adjusted_tp_distance = ForexMarketAdjustments.adjust_take_profit(tp_distance, symbol)
+                    if candidate.direction == SignalDirection.LONG:
+                        setattr(candidate, tp_level, candidate.entry_price * (1 + adjusted_tp_distance))
+                    else:
+                        setattr(candidate, tp_level, candidate.entry_price * (1 - adjusted_tp_distance))
             
             # Apply confidence thresholds based on signal mode
             min_conviction = 70 if self.signal_mode == 'aggressive' else 75 if self.signal_mode == 'balanced' else 80
