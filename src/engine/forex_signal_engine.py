@@ -16,7 +16,8 @@ from src.analysis.enhanced_context_engine import EnhancedContextEngine as Contex
 from src.analysis.forex_adjustments import ForexMarketAdjustments
 from src.engine.signal_ranker import SignalRanker
 from src.models.signal import (
-    TradingSignal, SignalDirection, SetupType, SignalStatus, MarketType
+    TradingSignal, SignalDirection, SetupType, SignalStatus, MarketType,
+    TechnicalScore, ContextScore
 )
 from src.config import settings
 from src.utils.logger import get_logger
@@ -247,20 +248,109 @@ class ForexSignalEngine:
             if not strategy:
                 return None
             
-            # Generate signal candidate
-            candidate = await strategy.generate_signal(
-                symbol=symbol,
-                timeframe=timeframe,
-                current_price=current_price,
-                technical=tech_analysis,
-                institutional=inst_analysis,
-                context=context
-            )
+            # 1. Session check
+            if strategy.session_required:
+                session_ok, session_msg = strategy.is_valid_session(df)
+                if not session_ok:
+                    logger.debug(f"⏰ {symbol} {timeframe}: {session_msg}")
+                    return None
             
-            if not candidate:
+            # 2. Volatility check
+            vol_ok, vol_msg = strategy.analyze_volatility(df)
+            if not vol_ok:
+                logger.debug(f"📊 {symbol} {timeframe}: {vol_msg}")
                 return None
             
+            # 3. Find setup using strategy
+            setup = strategy.find_setup(df, direction)
+            if not setup:
+                return None
+            
+            # 4. Calculate entry/SL/TP using strategy
+            entry_price, stop_loss, tp1, tp2, tp3 = strategy.calculate_entry_sl_tp(
+                df, setup, direction
+            )
+            
+            # 5. Calculate risk:reward
+            risk_reward = abs(tp1 - entry_price) / abs(entry_price - stop_loss)
+            if risk_reward < strategy.min_risk_reward:
+                logger.debug(f"📊 {symbol} {timeframe}: R:R {risk_reward:.1f} < {strategy.min_risk_reward}")
+                return None
+            
+            # 🌍 FOREX-SPECIFIC ADJUSTMENTS
+            
+            # Check for news blackout periods (NFP, FOMC, etc.)
+            blackout_check = ForexMarketAdjustments.check_news_blackout(symbol)
+            if blackout_check['is_blackout']:
+                logger.warning(f"🌍 {symbol}: News blackout - {blackout_check['reason']}")
+                return None
+            
+            # Apply session-based confidence boost/penalty
+            confidence = inst_analysis.total_score
+            original_confidence = confidence
+            confidence = ForexMarketAdjustments.apply_session_boost(confidence, symbol)
+            if confidence != original_confidence:
+                logger.info(f"🌍 {symbol}: Session adjustment {original_confidence:.1f}% -> {confidence:.1f}%")
+            
+            # Adjust stop loss for Forex volatility (tighter than crypto)
+            sl_distance = abs(entry_price - stop_loss) / entry_price
+            adjusted_sl_distance = ForexMarketAdjustments.adjust_stop_loss(sl_distance, symbol)
+            if direction == SignalDirection.LONG:
+                stop_loss = entry_price * (1 - adjusted_sl_distance)
+            else:
+                stop_loss = entry_price * (1 + adjusted_sl_distance)
+            
+            # Adjust take profit targets for Forex volatility (smaller than crypto)
+            def adjust_tp(tp_value):
+                if not tp_value:
+                    return tp_value
+                tp_distance = abs(tp_value - entry_price) / entry_price
+                adjusted_tp_distance = ForexMarketAdjustments.adjust_take_profit(tp_distance, symbol)
+                if direction == SignalDirection.LONG:
+                    return entry_price * (1 + adjusted_tp_distance)
+                else:
+                    return entry_price * (1 - adjusted_tp_distance)
+            
+            tp1 = adjust_tp(tp1)
+            tp2 = adjust_tp(tp2)
+            tp3 = adjust_tp(tp3)
+            
+            # Recalculate R:R after adjustments
+            risk_reward = abs(tp1 - entry_price) / abs(entry_price - stop_loss)
+            
             # Calculate conviction score
+            # Build a temporary candidate for conviction engine
+            from dataclasses import dataclass
+            @dataclass
+            class SignalCandidate:
+                direction: SignalDirection
+                setup_type: SetupType
+                entry_price: float
+                stop_loss: float
+                take_profit_1: float
+                take_profit_2: float
+                take_profit_3: float
+                confidence: float
+                technical_score: float
+                context_score: float
+                risk_reward: float
+                reasoning: str
+            
+            candidate = SignalCandidate(
+                direction=direction,
+                setup_type=SetupType(setup.get('setup_type', 'breakout')),
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
+                take_profit_3=tp3,
+                confidence=confidence,
+                technical_score=tech_analysis.total_score,
+                context_score=context.total_score,
+                risk_reward=risk_reward,
+                reasoning=setup.get('reasoning', f"{timeframe} {setup.get('setup_type', 'breakout')} setup")
+            )
+            
             conviction_score = await self.conviction_engine.calculate_conviction(
                 signal=candidate,
                 technical=tech_analysis,
@@ -268,70 +358,58 @@ class ForexSignalEngine:
                 context=context
             )
             
-            # 🌍 FOREX-SPECIFIC ADJUSTMENTS
-            
-            # 1. Check for news blackout periods (NFP, FOMC, etc.)
-            blackout_check = ForexMarketAdjustments.check_news_blackout(symbol)
-            if blackout_check['is_blackout']:
-                logger.warning(f"🌍 {symbol}: News blackout - {blackout_check['reason']}")
-                return None
-            
-            # 2. Apply session-based confidence boost/penalty
-            original_confidence = candidate.confidence
-            candidate.confidence = ForexMarketAdjustments.apply_session_boost(
-                candidate.confidence, symbol
-            )
-            if candidate.confidence != original_confidence:
-                logger.info(f"🌍 {symbol}: Session adjustment {original_confidence:.1f}% -> {candidate.confidence:.1f}%")
-            
-            # 3. Adjust stop loss for Forex volatility (tighter than crypto)
-            sl_distance = abs(candidate.entry_price - candidate.stop_loss) / candidate.entry_price
-            adjusted_sl_distance = ForexMarketAdjustments.adjust_stop_loss(sl_distance, symbol)
-            if candidate.direction == SignalDirection.LONG:
-                candidate.stop_loss = candidate.entry_price * (1 - adjusted_sl_distance)
-            else:
-                candidate.stop_loss = candidate.entry_price * (1 + adjusted_sl_distance)
-            
-            # 4. Adjust take profit targets for Forex volatility (smaller than crypto)
-            for tp_level in ['take_profit_1', 'take_profit_2', 'take_profit_3']:
-                tp_value = getattr(candidate, tp_level, None)
-                if tp_value:
-                    tp_distance = abs(tp_value - candidate.entry_price) / candidate.entry_price
-                    adjusted_tp_distance = ForexMarketAdjustments.adjust_take_profit(tp_distance, symbol)
-                    if candidate.direction == SignalDirection.LONG:
-                        setattr(candidate, tp_level, candidate.entry_price * (1 + adjusted_tp_distance))
-                    else:
-                        setattr(candidate, tp_level, candidate.entry_price * (1 - adjusted_tp_distance))
-            
             # Apply confidence thresholds based on signal mode
             min_conviction = 70 if self.signal_mode == 'aggressive' else 75 if self.signal_mode == 'balanced' else 80
             adjusted_min_conf = self._base_threshold + self._threshold_adjustment
             
-            if conviction_score < min_conviction or candidate.confidence < adjusted_min_conf:
+            if conviction_score < min_conviction or confidence < adjusted_min_conf:
                 return None
+            
+            # Build TechnicalScore object if needed
+            if isinstance(tech_analysis, dict):
+                tech_score_obj = TechnicalScore(
+                    trend_score=tech_analysis.get('trend_score', 50),
+                    volume_score=tech_analysis.get('volume_score', 50),
+                    momentum_score=tech_analysis.get('momentum_score', 50),
+                    structure_score=tech_analysis.get('structure_score', 50),
+                    total_score=tech_analysis.get('total_score', 50)
+                )
+            else:
+                tech_score_obj = tech_analysis
+            
+            # Build ContextScore object if needed
+            if isinstance(context, dict):
+                context_score_obj = ContextScore(
+                    macro_score=context.get('macro_score', 50),
+                    news_score=context.get('news_score', 50),
+                    sentiment_score=context.get('sentiment_score', 50),
+                    total_score=context.get('total_score', 50)
+                )
+            else:
+                context_score_obj = context
             
             # Create full signal
             signal = TradingSignal(
                 symbol=symbol,
-                direction=candidate.direction,
-                setup_type=candidate.setup_type,
+                direction=direction,
+                setup_type=SetupType(setup.get('setup_type', 'breakout')),
                 timeframe=timeframe,
                 market_type=MarketType.FOREX,
-                entry_price=candidate.entry_price,
-                stop_loss=candidate.stop_loss,
-                take_profit_1=candidate.take_profit_1,
-                take_profit_2=candidate.take_profit_2,
-                take_profit_3=candidate.take_profit_3,
-                technical_score=candidate.technical_score,
-                context_score=candidate.context_score,
-                confidence=candidate.confidence,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
+                take_profit_3=tp3,
+                technical_score=tech_score_obj,
+                context_score=context_score_obj,
+                confidence=confidence,
                 conviction_score=conviction_score,
                 reasoning=candidate.reasoning,
-                risk_reward=candidate.risk_reward,
-                atr=tech_analysis.get('atr', 0.0),
+                risk_reward=risk_reward,
+                atr=getattr(tech_analysis, 'atr', 0.0) if hasattr(tech_analysis, 'atr') else 0.0,
                 volume_24h=volume_24h,
-                market_context=context.get('market_context', ''),
-                news_context=context.get('news_context', '')
+                market_context=getattr(context, 'market_context', '') if hasattr(context, 'market_context') else '',
+                news_context=getattr(context, 'news_context', '') if hasattr(context, 'news_context') else ''
             )
             
             return signal

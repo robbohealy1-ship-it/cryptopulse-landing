@@ -548,16 +548,59 @@ class EnhancedContextEngine:
         """Comprehensive context analysis for a trading symbol
         
         Args:
-            symbol: Trading pair (e.g., BTC/USDT)
+            symbol: Trading pair (e.g., BTC/USDT or EUR/USD)
             direction: Signal direction ('LONG' or 'SHORT') - used to check if news aligns with trade
         """
         
+        # Detect Forex symbols (contain "/" like EUR/USD, XAU/USD)
+        is_forex = '/' in symbol
+        
         # Fetch all data sources
         newsapi_articles = await self.fetch_newsapi_news()
-        crypto_articles = await self.fetch_cryptonews()
+        crypto_articles = await self.fetch_cryptonews() if not is_forex else []
         
         # Combine all news
         all_articles = newsapi_articles + crypto_articles
+        
+        # For Forex: skip crypto-specific metrics, use news-only analysis
+        if is_forex:
+            # Analyze sentiment from news only
+            sentiment = self.analyze_sentiment(all_articles, direction)
+            news_score = sentiment['score']
+            
+            # For Forex, use neutral macro (no Fear & Greed, no BTC trend)
+            macro_score = 50
+            
+            # Sentiment based purely on news alignment with direction
+            if sentiment.get('news_aligns_direction', False):
+                sentiment_score = 80  # News supports the trade
+            elif sentiment.get('high_impact_negative_count', 0) > sentiment.get('high_impact_positive_count', 0):
+                sentiment_score = 30  # News contradicts
+            else:
+                sentiment_score = 60  # Neutral/mixed
+            
+            # Weights for Forex: Macro 20%, News 50%, Sentiment 30%
+            # (News is more reliable for Forex than crypto metrics)
+            total_score = (
+                macro_score * 0.20 +
+                news_score * 0.50 +
+                sentiment_score * 0.30
+            )
+            
+            logger.info(
+                f"Context analysis for {symbol} ({direction or 'no direction'}): "
+                f"News={news_score:.0f}, Macro={macro_score:.0f} (neutral), "
+                f"Sentiment={sentiment_score:.0f}, Total={total_score:.0f}"
+            )
+            
+            return ContextScore(
+                macro_score=macro_score,
+                news_score=news_score,
+                sentiment_score=sentiment_score,
+                total_score=total_score
+            )
+        
+        # ========== CRYPTO-SPECIFIC ANALYSIS BELOW ==========
         
         # Fetch market context
         fear_greed = await self.fetch_fear_greed_index()
