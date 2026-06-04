@@ -35,6 +35,11 @@ class ForexClient:
         self._cache = {}  # Simple price cache
         self._cache_ttl = 60  # 60 seconds
         
+        # Log API key status (masked for security)
+        av_status = "✅ SET" if self.alpha_vantage_key and self.alpha_vantage_key != 'demo' else "❌ DEMO/MISSING"
+        td_status = "✅ SET" if self.twelve_data_key and self.twelve_data_key != 'demo' else "❌ DEMO/MISSING"
+        logger.info(f"Forex API Keys - Alpha Vantage: {av_status}, Twelve Data: {td_status}")
+        
     async def initialize(self):
         """Initialize HTTP session"""
         if not self.session:
@@ -159,6 +164,12 @@ class ForexClient:
             async with self.session.get(url, params=params) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    
+                    # Check for API errors
+                    if 'status' in data and data['status'] == 'error':
+                        logger.error(f"Forex API error for {symbol}: {data.get('message', 'Unknown error')}")
+                        return []
+                    
                     if 'values' in data:
                         klines = []
                         for candle in data['values']:
@@ -171,6 +182,12 @@ class ForexClient:
                                 'volume': float(candle.get('volume', 0))
                             })
                         return list(reversed(klines))  # Oldest first
+                    else:
+                        logger.error(f"Forex API response missing 'values' for {symbol}: {data}")
+                        return []
+                else:
+                    logger.error(f"Forex API HTTP {resp.status} for {symbol}")
+                    return []
             
             logger.warning(f"Could not fetch historical data for {symbol}")
             return []
