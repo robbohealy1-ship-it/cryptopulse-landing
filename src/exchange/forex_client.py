@@ -124,15 +124,8 @@ class ForexClient:
         await self._apply_rate_limit()
         
         try:
-            # Use Alpha Vantage for Forex pairs and commodities
-            if symbol in ['EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CAD', 'NZD/USD', 'XAU/USD', 'XAG/USD']:
-                price = await self._get_price_alpha_vantage(symbol)
-            # Use Twelve Data for indices
-            elif symbol in ['NAS100', 'US30', 'SPX500']:
-                price = await self._get_price_twelve_data(symbol)
-            else:
-                logger.warning(f"Unknown Forex symbol: {symbol}")
-                return None
+            # Use Twelve Data for ALL prices (single API, better rate limit management)
+            price = await self._get_price_twelve_data(symbol)
             
             if price:
                 self._cache[cache_key] = (datetime.utcnow(), price)
@@ -172,14 +165,17 @@ class ForexClient:
             return None
     
     async def _get_price_twelve_data(self, symbol: str) -> Optional[float]:
-        """Fetch price from Twelve Data (indices)"""
+        """Fetch price from Twelve Data (all symbols)"""
         if not self.session:
             await self.initialize()
         
         try:
+            # Normalize symbol for Twelve Data API
+            api_symbol = self._normalize_symbol(symbol)
+            
             url = f"https://api.twelvedata.com/price"
             params = {
-                'symbol': symbol,
+                'symbol': api_symbol,
                 'apikey': self.twelve_data_key
             }
             
@@ -188,6 +184,10 @@ class ForexClient:
                     data = await resp.json()
                     if 'price' in data:
                         return float(data['price'])
+                elif resp.status == 429:
+                    logger.warning(f"🌍 Rate limited (429) getting price for {symbol}, will retry")
+                    await asyncio.sleep(5)
+                    return await self._get_price_twelve_data(symbol)
             
             logger.warning(f"Could not fetch price for {symbol} from Twelve Data")
             return None
