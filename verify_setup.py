@@ -1,6 +1,10 @@
 """
 Pre-start verification script for CryptoPulse Signals
 Run this before starting the bot to catch config issues
+
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
 """
 import os
 import sys
@@ -29,12 +33,12 @@ def check_env():
     if not admin_token or admin_token == 'your_bot_token_from_botfather':
         errors.append("❌ TELEGRAM_BOT_TOKEN not set or is placeholder")
     else:
-        print(f"✅ Admin bot token: {admin_token[:10]}...")
+        print("✅ Admin bot token: configured (masked for security)")
     
     if not vip_token or vip_token == 'your_vip_bot_token_here':
         warnings.append("⚠️ TELEGRAM_VIP_BOT_TOKEN not set - VIP bot will use admin token")
     else:
-        print(f"✅ VIP bot token: {vip_token[:10]}...")
+        print("✅ VIP bot token: configured (masked for security)")
     
     # Bot usernames
     admin_user = os.getenv('TELEGRAM_BOT_USERNAME', 'cryptopulse_admin_bot')
@@ -102,7 +106,7 @@ def check_wallets():
     
     for coin, address in wallets.items():
         if address and not address.startswith('your_'):
-            print(f"✅ {coin}: {address[:15]}...")
+            print(f"✅ {coin}: configured (masked for security)")
             active.append(coin)
         else:
             print(f"⚠️  {coin}: Not configured")
@@ -128,8 +132,8 @@ def check_supabase():
     if not key or 'your_' in key:
         return ["❌ SUPABASE_KEY not configured"], []
     
-    print(f"✅ Supabase URL: {url[:40]}...")
-    print(f"✅ Supabase Key: {key[:15]}...")
+    print("✅ Supabase URL: configured (masked for security)")
+    print("✅ Supabase Key: configured (masked for security)")
     return [], []
 
 def check_syntax():

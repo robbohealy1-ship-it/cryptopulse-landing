@@ -1,3 +1,9 @@
+"""
+CryptoPulse Signals — Admin Telegram Bot
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
+"""
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -300,10 +306,14 @@ class AdminBot:
             
             chart_path = await self.chart_generator.generate_chart(signal)
             
+            bot = self.bot
+            if not bot:
+                raise RuntimeError("Admin bot not initialized (no app.bot or _send_only_bot)")
+
             if chart_path:
                 # Send photo with approval message as caption
                 with open(chart_path, 'rb') as photo:
-                    await self.app.bot.send_photo(
+                    await bot.send_photo(
                         chat_id=self.admin_chat_id,
                         photo=photo,
                         caption=approval_message,
@@ -312,7 +322,7 @@ class AdminBot:
                     )
             else:
                 # No chart: send as text message
-                await self.app.bot.send_message(
+                await bot.send_message(
                     chat_id=self.admin_chat_id,
                     text=approval_message,
                     reply_markup=reply_markup,
@@ -742,7 +752,11 @@ class AdminBot:
     
     async def send_notification(self, message: str):
         try:
-            await self.app.bot.send_message(
+            bot = self.bot
+            if not bot:
+                logger.warning("Admin bot not initialized - skipping notification")
+                return
+            await bot.send_message(
                 chat_id=self.admin_chat_id,
                 text=message,
                 parse_mode='HTML'

@@ -1,3 +1,9 @@
+"""
+CryptoPulse Signals — Market Scanner
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
+"""
 import ccxt
 import asyncio
 from typing import List, Dict, Optional
@@ -39,46 +45,65 @@ class MarketScanner:
         await self.refresh_liquid_pairs()
         logger.info(f"Market scanner initialized with {len(self.liquid_pairs)} liquid pairs")
         
+    # Fallback list of major pairs when Binance API is unreachable
+    FALLBACK_PAIRS = [
+        'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT',
+        'ADA/USDT', 'DOGE/USDT', 'TRX/USDT', 'TON/USDT', 'LINK/USDT',
+        'MATIC/USDT', 'DOT/USDT', 'LTC/USDT', 'BCH/USDT', 'ETC/USDT',
+        'ATOM/USDT', 'NEAR/USDT', 'APT/USDT', 'FIL/USDT', 'UNI/USDT',
+        'AVAX/USDT', 'ICP/USDT', 'SHIB/USDT', 'PEPE/USDT', 'WIF/USDT',
+        'FET/USDT', 'RNDR/USDT', 'ARB/USDT', 'OP/USDT', 'SUI/USDT',
+        'SEI/USDT', 'TIA/USDT', 'PYTH/USDT', 'JUP/USDT', 'WLD/USDT',
+        'STX/USDT', 'IMX/USDT', 'GRT/USDT', 'FLOW/USDT', 'XTZ/USDT',
+        'ALGO/USDT', 'VET/USDT', 'THETA/USDT', 'EOS/USDT', 'XLM/USDT',
+        'ZEC/USDT', 'EGLD/USDT', 'SAND/USDT', 'MANA/USDT', 'AXS/USDT',
+        'AAVE/USDT', 'MKR/USDT', 'CRV/USDT', 'SNX/USDT', 'COMP/USDT',
+        'LDO/USDT', 'SSV/USDT', 'PENDLE/USDT', 'ENA/USDT', 'STRK/USDT',
+    ]
+
     async def refresh_liquid_pairs(self):
         try:
             logger.info("Refreshing liquid pairs list...")
             await asyncio.to_thread(self.exchange.load_markets)
-            
+
             markets = self.exchange.markets
             usdt_pairs = [
                 symbol for symbol in markets.keys()
                 if symbol.endswith('/USDT') and markets[symbol].get('spot', False)
             ]
-            
+
             leveraged_tokens = ['UP', 'DOWN', 'BULL', 'BEAR']
             filtered_pairs = [
                 pair for pair in usdt_pairs
                 if not any(token in pair for token in leveraged_tokens)
             ]
-            
+
             liquid_pairs = []
             for symbol in filtered_pairs:
                 try:
                     ticker = await asyncio.to_thread(self.exchange.fetch_ticker, symbol)
                     volume_usd = ticker.get('quoteVolume', 0)
-                    
+
                     if volume_usd >= self.min_volume_usd:
                         liquid_pairs.append(symbol)
-                        
+
                 except Exception as e:
                     logger.debug(f"Error fetching ticker for {symbol}: {e}")
                     continue
-                    
+
                 await asyncio.sleep(0.1)
-            
+
             self.liquid_pairs = sorted(liquid_pairs)
             self.last_refresh = datetime.utcnow()
-            
+
             logger.info(f"Found {len(self.liquid_pairs)} liquid pairs with volume > ${self.min_volume_usd:,.0f}")
-            
+
         except Exception as e:
             logger.error(f"Error refreshing liquid pairs: {e}")
-            raise
+            logger.warning("⚠️  Falling back to hardcoded major pairs (offline mode)")
+            self.liquid_pairs = self.FALLBACK_PAIRS.copy()
+            self.last_refresh = datetime.utcnow()
+            logger.info(f"Using {len(self.liquid_pairs)} fallback liquid pairs")
     
     async def should_refresh_pairs(self) -> bool:
         if not self.last_refresh:
@@ -114,6 +139,14 @@ class MarketScanner:
     
     async def fetch_ticker(self, symbol: str) -> Dict:
         try:
+            # DEFENSE: Known forex symbols are not on Binance — return empty so caller uses forex_client
+            # Only match exact forex pairs (3-letter/3-letter format) or XAU/USD. Crypto pairs like BTC/USDT pass through.
+            KNOWN_FOREX = {'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CAD', 'USD/CHF', 'NZD/USD', 'XAU/USD'}
+            is_forex = symbol in KNOWN_FOREX or symbol.startswith('XAU/')
+            if is_forex:
+                logger.debug(f"Market scanner skipping forex symbol {symbol} (use forex_client instead)")
+                return {}
+            
             # Check cache first
             cached = self._price_cache.get(symbol)
             if cached:

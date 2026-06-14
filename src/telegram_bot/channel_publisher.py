@@ -459,7 +459,7 @@ TP1: ${signal.take_profit_1:.8f}
 • Never risk more than 2% per trade
 • Move SL to breakeven after TP1
 
-💡 <b>New to trading?</b> <a href="https://t.me/{settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPAccessBot'}">DM @CryptoPulseVIPAccessBot</a> and type /guide
+💡 <b>New to trading?</b> DM <a href="https://t.me/{(settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPAccessBot').lstrip('@')}">@{(settings.TELEGRAM_VIP_BOT_USERNAME or 'CryptoPulseVIPAccessBot').lstrip('@')}</a> and type /guide
 
 <i>Signal ID: {(signal.id[:8] if signal.id else 'MANUAL')}</i>
 """
@@ -518,6 +518,14 @@ Join VIP for premium signals!
         if dedup_key in self._sent_notifications:
             logger.debug(f"🛡️ Deduplicating TP{tp_level} hit for {signal.symbol}")
             return
+
+        # Extra guard: if signal object already marks this TP as hit (e.g. loaded from DB after restart)
+        attr_name = f'tp{tp_level}_hit'
+        if getattr(signal, attr_name, False):
+            logger.debug(f"🛡️ Skipping TP{tp_level} hit for {signal.symbol}: already marked on signal object")
+            self._sent_notifications.add(dedup_key)
+            return
+
         self._sent_notifications.add(dedup_key)
         
         # VIP channel gets full update
@@ -533,14 +541,16 @@ Join VIP for premium signals!
         elif tp_level == 3:
             vip_text += "\n✅ Full position closed"
         
-        # Send to VIP
+        # Send to VIP (always send — signals loaded from DB may not have vip_channel_message_id)
         vip_text += self._get_referral_cta()
-        if signal.vip_channel_message_id:
+        try:
             await self.bot.send_message(
                 chat_id=self.vip_channel_id,
                 text=vip_text,
                 parse_mode='HTML'
             )
+        except Exception as e:
+            logger.error(f"❌ Failed to send TP{tp_level} hit to VIP for {signal.symbol}: {e}")
         
         # Free channel only gets TP1 with marketing — ONLY for free signals (<85% conf)
         # VIP signals: trade lifecycle stays in VIP channel only

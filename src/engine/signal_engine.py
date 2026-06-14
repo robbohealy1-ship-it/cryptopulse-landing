@@ -1,3 +1,9 @@
+"""
+CryptoPulse Signals — Signal Engine
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
+"""
 import asyncio
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
@@ -5,6 +11,7 @@ import uuid
 from collections import deque
 from src.scanner.market_scanner import MarketScanner
 from src.analysis.technical_analyzer import TechnicalAnalyzer
+from src.analysis.advanced_technical_analyzer import AdvancedTechnicalAnalyzer
 from src.analysis.institutional_analyzer import InstitutionalAnalyzer
 from src.analysis.timeframe_strategies import TimeframeStrategyFactory
 from src.analysis.enhanced_context_engine import EnhancedContextEngine as ContextEngine
@@ -39,6 +46,7 @@ class SignalEngine:
     def __init__(self, db=None):
         self.scanner = MarketScanner()
         self.technical_analyzer = TechnicalAnalyzer()
+        self.advanced_technical_analyzer = AdvancedTechnicalAnalyzer()  # NEW: Pine Script indicators
         self.institutional_analyzer = InstitutionalAnalyzer()
         self.context_engine = ContextEngine()
         self.strategy_factory = TimeframeStrategyFactory()
@@ -277,6 +285,9 @@ class SignalEngine:
                 df, direction, entry_price, stop_loss, timeframe, df_higher
             )
             
+            # 7.5. ADVANCED TECHNICAL ANALYSIS (Pine Script indicators)
+            advanced_analysis = self.advanced_technical_analyzer.analyze_comprehensive(df, symbol)
+            
             # 8. CONTEXT ANALYSIS (news, macro)
             context_score = await self.context_engine.analyze_context(symbol, direction.value)
             
@@ -294,6 +305,7 @@ class SignalEngine:
                 inst_score.session_score >= 60,
                 inst_score.multi_tf_score >= 70,
                 context_score.total_score >= 60,
+                advanced_analysis['technical_score'] >= 70,  # Advanced TA score
             ]
             strong_count = sum(strong_factors)
             
@@ -482,6 +494,17 @@ class SignalEngine:
                 atr=(df['high'].iloc[-20:] - df['low'].iloc[-20:]).mean(),
                 volume_24h=market_info.get('volume_24h', 0),
                 market_context=context_summary,
+                metadata={
+                    'advanced_technical_analysis': {
+                        'description': advanced_analysis['description'],
+                        'technical_score': advanced_analysis['technical_score'],
+                        'ema_trend': advanced_analysis['ema_analysis'].get('trend', 'unknown'),
+                        'market_structure': advanced_analysis['structure_analysis'].get('structure', 'unknown'),
+                        'pvsra_vector': advanced_analysis['pvsra_analysis'].get('vector_type', 'none'),
+                        'volume_strength': advanced_analysis['volume_analysis'].get('volume_strength', 'unknown'),
+                        'atr_levels': advanced_analysis['atr_levels']
+                    }
+                },
                 expires_at=datetime.utcnow() + timedelta(minutes=settings.SIGNAL_EXPIRY_MINUTES)
             )
             

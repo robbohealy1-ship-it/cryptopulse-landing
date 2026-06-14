@@ -134,7 +134,7 @@ class M15Strategy(BaseTimeframeStrategy):
         if len(df) >= 30:
             if direction == SignalDirection.LONG:
                 if structure['trend'] in ['uptrend', 'potential_reversal']:
-                    for i in range(-15, -3):
+                    for i in range(-7, -2):
                         if i < -len(df):
                             break
                         price_after = df['close'].iloc[-1]
@@ -152,7 +152,7 @@ class M15Strategy(BaseTimeframeStrategy):
                                 }
             else:  # SHORT
                 if structure['trend'] in ['downtrend', 'potential_reversal']:
-                    for i in range(-15, -3):
+                    for i in range(-7, -2):
                         if i < -len(df):
                             break
                         price_after = df['close'].iloc[-1]
@@ -218,7 +218,8 @@ class M15Strategy(BaseTimeframeStrategy):
                 entry = max(setup['entry_zone'][0], current * 0.998)
                 sl = setup['swept_level'] * 0.997
             elif setup_type == SetupType.ORDER_BLOCK:
-                entry = setup['ob_low']
+                # Cap entry at current price — never chase above current
+                entry = min(setup['ob_low'], current)
                 sl = entry * 0.985
             elif setup_type == SetupType.FAIR_VALUE_GAP:
                 entry = setup['fvg_bottom']
@@ -236,7 +237,8 @@ class M15Strategy(BaseTimeframeStrategy):
                 entry = min(setup['entry_zone'][1], current * 1.002)
                 sl = setup['swept_level'] * 1.003
             elif setup_type == SetupType.ORDER_BLOCK:
-                entry = setup['ob_high']
+                # Cap entry at current price — never chase below current
+                entry = max(setup['ob_high'], current)
                 sl = entry * 1.015
             elif setup_type == SetupType.FAIR_VALUE_GAP:
                 entry = setup['fvg_top']

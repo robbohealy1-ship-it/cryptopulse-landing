@@ -159,6 +159,9 @@ class TradingSignal(BaseModel):
     entry_slippage_percent: Optional[float] = None  # (actual - expected) / expected
     exit_slippage_percent: Optional[float] = None
     
+    # Partial close tracking
+    metadata: Optional[dict] = None  # Stores partial_closes[], remaining_position, etc.
+    
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True

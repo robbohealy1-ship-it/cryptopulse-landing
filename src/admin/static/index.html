@@ -182,6 +182,38 @@ tr:hover { background: #0f172a; }
 .login-box input:focus { outline: none; border-color: #38bdf8; }
 .login-box .btn { width: 100%; justify-content: center; padding: 12px; font-size: 15px; }
 .login-error { color: #ef4444; font-size: 13px; margin-top: 12px; display: none; }
+
+/* API Status Badge */
+.api-status {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 6px; font-size: 11px;
+  background: rgba(34,197,94,0.15); color: #22c55e;
+  border: 1px solid rgba(34,197,94,0.3);
+}
+.api-status.limited { background: rgba(251,191,36,0.15); color: #fbbf24; border-color: rgba(251,191,36,0.3); }
+.api-status.offline { background: rgba(239,68,68,0.15); color: #ef4444; border-color: rgba(239,68,68,0.3); }
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+  .container { padding: 12px; }
+  header { flex-direction: column; align-items: flex-start; gap: 12px; }
+  header h1 { font-size: 20px; }
+  header > div:last-child { width: 100%; justify-content: space-between; }
+  .grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .card .value { font-size: 24px; }
+  .compact-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .grid { grid-template-columns: 1fr; gap: 12px; }
+  .card .value { font-size: 28px; }
+  .form-row { grid-template-columns: 1fr; }
+  .actions { flex-direction: column; }
+  .actions .btn { width: 100%; font-size: 13px; padding: 10px; }
+  th, td { padding: 8px; font-size: 12px; }
+  .modal-content { width: 96%; padding: 16px; }
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab { white-space: nowrap; }
+}
 </style>
 </head>
 <body>
@@ -214,6 +246,27 @@ tr:hover { background: #0f172a; }
     </div>
   </div>
 </header>
+
+<!-- API Status Banner -->
+<div class="section" style="margin-bottom:16px;padding:12px;background:linear-gradient(135deg,#1e293b,#0f172a);">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span style="font-size:13px;color:#94a3b8;font-weight:600;">🌍 FOREX APIs:</span>
+      <span class="api-status" id="finnhubStatus">
+        <span style="font-size:10px;">●</span> Finnhub: Loading...
+      </span>
+      <span class="api-status limited" id="twelveDataStatus">
+        <span style="font-size:10px;">●</span> Twelve Data: Loading...
+      </span>
+      <span class="api-status limited" id="alphaVantageStatus">
+        <span style="font-size:10px;">●</span> Alpha Vantage: Loading...
+      </span>
+    </div>
+    <div style="font-size:11px;color:#64748b;">
+      <span id="lastForexScan">Last Forex scan: --</span>
+    </div>
+  </div>
+</div>
 
 <!-- Overview Cards -->
 <div class="grid" id="statsGrid">
@@ -275,25 +328,72 @@ tr:hover { background: #0f172a; }
   <div class="sub-panel" id="sig-create">
     <div class="section">
       <h2>Create Manual Signal</h2>
-      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Manually publish a signal directly to VIP + Free.</p>
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Manually create a signal with full control over all parameters.</p>
+      
+      <!-- Market & Order Type -->
       <div class="form-row">
-        <div class="form-group"><label>Symbol</label><input type="text" id="manSymbol" placeholder="BTC/USDT"></div>
-        <div class="form-group"><label>Direction</label><select id="manDir"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select></div>
+        <div class="form-group">
+          <label>Market Type</label>
+          <select id="manMarketType">
+            <option value="crypto">₿ Crypto (Binance)</option>
+            <option value="forex">🌍 Forex (Finnhub/Twelve Data)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Order Type</label>
+          <select id="manOrderType">
+            <option value="market">⚡ Market Order (execute now)</option>
+            <option value="limit">⏳ Limit Order (wait for entry)</option>
+          </select>
+        </div>
       </div>
+      
+      <!-- Symbol & Direction -->
+      <div class="form-row">
+        <div class="form-group"><label>Symbol</label><input type="text" id="manSymbol" placeholder="BTC/USDT or EUR/USD"></div>
+        <div class="form-group"><label>Direction</label><select id="manDir"><option value="LONG">📈 LONG</option><option value="SHORT">📉 SHORT</option></select></div>
+      </div>
+      
+      <!-- Timeframe & Confidence -->
       <div class="form-row">
         <div class="form-group"><label>Timeframe</label><select id="manTF"><option value="15m">15m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option></select></div>
-        <div class="form-group"><label>Confidence %</label><input type="number" id="manConf" value="90" min="80" max="100"></div>
+        <div class="form-group"><label>Confidence %</label><input type="number" id="manConf" value="90" min="80" max="100" step="0.1"></div>
+      </div>
+      
+      <!-- Entry & Stop Loss -->
+      <div class="form-row">
+        <div class="form-group"><label>Entry Price</label><input type="number" id="manEntry" placeholder="65000" step="any"></div>
+        <div class="form-group"><label>Stop Loss</label><input type="number" id="manSL" placeholder="64000" step="any"></div>
+      </div>
+      
+      <!-- Take Profits -->
+      <div class="form-row">
+        <div class="form-group"><label>TP1 (required)</label><input type="number" id="manTP1" placeholder="67000" step="any"></div>
+        <div class="form-group"><label>TP2 (optional)</label><input type="number" id="manTP2" placeholder="68000" step="any"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>Entry Price</label><input type="number" id="manEntry" placeholder="65000"></div>
-        <div class="form-group"><label>Stop Loss</label><input type="number" id="manSL" placeholder="64000"></div>
+        <div class="form-group"><label>TP3 (optional)</label><input type="number" id="manTP3" placeholder="70000" step="any"></div>
+        <div class="form-group"><label>Setup Type</label>
+          <select id="manSetup">
+            <option value="breakout_retest">Breakout Retest</option>
+            <option value="bos_retest">BOS Retest</option>
+            <option value="order_block">Order Block</option>
+            <option value="liquidity_sweep">Liquidity Sweep</option>
+            <option value="fair_value_gap">Fair Value Gap</option>
+            <option value="support_resistance">Support/Resistance</option>
+            <option value="pullback_continuation">Pullback Continuation</option>
+          </select>
+        </div>
       </div>
-      <div class="form-row">
-        <div class="form-group"><label>TP1</label><input type="number" id="manTP1" placeholder="67000"></div>
-        <div class="form-group"><label>TP2 (optional)</label><input type="number" id="manTP2" placeholder=""></div>
+      
+      <!-- Notes -->
+      <div class="form-group"><label>Notes / Reasoning</label><textarea id="manNotes" placeholder="Setup rationale, key levels, confluences..." rows="3"></textarea></div>
+      
+      <!-- Action Buttons -->
+      <div style="display:flex;gap:10px;margin-top:16px;">
+        <button class="btn success" onclick="createManualSignal()">✅ Publish Signal Now</button>
+        <button class="btn ghost" onclick="clearManualSignalForm()">🔄 Clear Form</button>
       </div>
-      <div class="form-group"><label>Notes</label><textarea id="manNotes" placeholder="Setup rationale..."></textarea></div>
-      <button class="btn success" onclick="createManualSignal()">Publish Signal Now</button>
     </div>
   </div>
   <div class="sub-panel" id="sig-performance">
@@ -851,6 +951,60 @@ async function loadStats() {
     const subs = await fetchJSON('/api/subscribers');
     document.getElementById('statSubs').textContent = subs.count;
   } catch (e) {}
+  loadForexApiStatus();
+}
+
+async function loadForexApiStatus() {
+  try {
+    const status = await fetchJSON('/api/forex/status');
+    
+    // Finnhub
+    const finnhubEl = document.getElementById('finnhubStatus');
+    if (status.finnhub.status === 'active') {
+      finnhubEl.className = 'api-status';
+      finnhubEl.innerHTML = '<span style="font-size:10px;">●</span> Finnhub: ✅ Active (60/min)';
+    } else if (status.finnhub.status === 'missing') {
+      finnhubEl.className = 'api-status offline';
+      finnhubEl.innerHTML = '<span style="font-size:10px;">●</span> Finnhub: ❌ Missing';
+    } else {
+      finnhubEl.className = 'api-status limited';
+      finnhubEl.innerHTML = '<span style="font-size:10px;">●</span> Finnhub: ⚠️ ' + status.finnhub.message;
+    }
+    
+    // Twelve Data
+    const twelveEl = document.getElementById('twelveDataStatus');
+    if (status.twelve_data.status === 'limited') {
+      twelveEl.className = 'api-status limited';
+      twelveEl.innerHTML = '<span style="font-size:10px;">●</span> Twelve Data: ⚠️ 800/day';
+    } else if (status.twelve_data.status === 'missing') {
+      twelveEl.className = 'api-status offline';
+      twelveEl.innerHTML = '<span style="font-size:10px;">●</span> Twelve Data: ❌ Missing';
+    } else {
+      twelveEl.className = 'api-status';
+      twelveEl.innerHTML = '<span style="font-size:10px;">●</span> Twelve Data: ' + status.twelve_data.message;
+    }
+    
+    // Alpha Vantage
+    const alphaEl = document.getElementById('alphaVantageStatus');
+    if (status.alpha_vantage.status === 'limited') {
+      alphaEl.className = 'api-status limited';
+      alphaEl.innerHTML = '<span style="font-size:10px;">●</span> Alpha Vantage: ⚠️ 25/day';
+    } else if (status.alpha_vantage.status === 'missing') {
+      alphaEl.className = 'api-status offline';
+      alphaEl.innerHTML = '<span style="font-size:10px;">●</span> Alpha Vantage: ❌ Missing';
+    } else {
+      alphaEl.className = 'api-status';
+      alphaEl.innerHTML = '<span style="font-size:10px;">●</span> Alpha Vantage: ' + status.alpha_vantage.message;
+    }
+    
+    // Last scan time
+    if (status.last_scan) {
+      const scanTime = new Date(status.last_scan);
+      document.getElementById('lastForexScan').textContent = 'Last update: ' + scanTime.toLocaleTimeString();
+    }
+  } catch (e) {
+    console.error('Failed to load Forex API status:', e);
+  }
 }
 
 function renderPending(signals) {
@@ -885,20 +1039,30 @@ function renderPending(signals) {
 
 async function loadActiveSignals() {
   try {
-    const data = await fetchJSON('/api/signals/active');
-    renderActiveSignals(data.signals);
+    const timestamp = Date.now();
+    const [sigData, mgmtData] = await Promise.all([
+      fetchJSON(`/api/signals/active?_=${timestamp}`),
+      fetchJSON(`/api/signals/active/management?_=${timestamp}`)
+    ]);
+    renderActiveSignals(sigData.signals, mgmtData.recommendations || []);
   } catch (e) {
     document.getElementById('activeSignals').innerHTML = '<div class="empty-state">Error loading active trades</div>';
   }
 }
 
-function renderActiveSignals(signals) {
+function renderActiveSignals(signals, recommendations) {
   const el = document.getElementById('activeSignals');
   if (!signals || signals.length === 0) {
     el.innerHTML = '<div class="empty-state">No active trades being tracked.<br><small style="color:#64748b;">Approved signals will appear here and persist across restarts.</small></div>';
     return;
   }
-  
+
+  // Build lookup for recommendations by signal_id
+  const recMap = {};
+  for (const r of recommendations) {
+    recMap[r.signal_id] = r;
+  }
+
   let html = '<div class="compact-grid">';
   for (const s of signals) {
     const pnlClass = s.pnl_percent >= 0 ? 'up' : 'down';
@@ -939,12 +1103,14 @@ function renderActiveSignals(signals) {
       <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:12px;">
         <div>
           <h3 style="font-size:18px;color:#f8fafc;margin-bottom:4px;">${s.symbol}</h3>
-          <div style="display:flex;gap:6px;align-items:center;">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
             <span class="badge ${marketType}">${marketIcon} ${marketType.toUpperCase()}</span>
             <span class="badge ${s.direction.toLowerCase()}">${s.direction}</span>
             <span style="font-size:11px;color:${entryColor};">${entryType}</span>
             <span style="font-size:11px;color:#64748b;">${s.timeframe}</span>
             <span style="font-size:11px;color:#64748b;">${s.setup_type || 'N/A'}</span>
+            ${s.metadata && s.metadata.remaining_position && s.metadata.remaining_position < 100 ? 
+              `<span class="badge" style="background:#f59e0b;color:#000;font-weight:600;">📊 ${s.metadata.remaining_position}% Position</span>` : ''}
           </div>
         </div>
         <div style="text-align:right;">
@@ -958,10 +1124,25 @@ function renderActiveSignals(signals) {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
           <div><span style="color:#94a3b8;">Entry:</span> <b>$${s.entry_price.toFixed(6)}</b></div>
           <div><span style="color:#94a3b8;">Current:</span> <b>$${s.current_price ? s.current_price.toFixed(6) : 'N/A'}</b></div>
-          <div><span style="color:#94a3b8;">SL:</span> <b>$${s.stop_loss ? s.stop_loss.toFixed(6) : 'N/A'}</b></div>
+          <div><span style="color:#94a3b8;">SL:</span> <b>$${s.stop_moved_to_breakeven ? s.entry_price.toFixed(6) : (s.stop_loss ? s.stop_loss.toFixed(6) : 'N/A')}</b></div>
           <div><span style="color:#64748b;font-size:10px;">${slMoved}</span></div>
         </div>
       </div>
+      
+      <!-- Advanced Technical Analysis -->
+      ${s.metadata && s.metadata.advanced_technical_analysis ? `
+      <div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-bottom:12px;font-size:11px;">
+        <div style="color:#38bdf8;font-weight:600;margin-bottom:6px;font-size:12px;">📊 Technical Analysis</div>
+        <div style="color:#94a3b8;margin-bottom:8px;line-height:1.4;">${s.metadata.advanced_technical_analysis.description}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:10px;">
+          <div><span style="color:#64748b;">EMA Trend:</span> <span style="color:#f8fafc;">${s.metadata.advanced_technical_analysis.ema_trend}</span></div>
+          <div><span style="color:#64748b;">Structure:</span> <span style="color:#f8fafc;">${s.metadata.advanced_technical_analysis.market_structure}</span></div>
+          <div><span style="color:#64748b;">PVSRA:</span> <span style="color:#f8fafc;">${s.metadata.advanced_technical_analysis.pvsra_vector.replace('_', ' ')}</span></div>
+          <div><span style="color:#64748b;">Volume:</span> <span style="color:#f8fafc;">${s.metadata.advanced_technical_analysis.volume_strength}</span></div>
+          <div><span style="color:#64748b;">TA Score:</span> <span style="color:#22c55e;font-weight:600;">${s.metadata.advanced_technical_analysis.technical_score}/100</span></div>
+        </div>
+      </div>
+      ` : ''}
       
       <!-- TP Progress -->
       <div style="margin-bottom:12px;">
@@ -994,7 +1175,7 @@ function renderActiveSignals(signals) {
         <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="editSignal('${s.id}')">✏️ Edit</button>
         <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="markTPModal('${s.id}', '${s.symbol}')">✅ Mark TP</button>
         <button class="btn ghost" style="flex:1;font-size:12px;padding:8px;" onclick="viewSignalAudit('${s.id}', '${s.symbol}')">📋 Audit</button>
-        <button class="btn danger" style="flex:1;font-size:12px;padding:8px;" onclick="closeSignalModal('${s.id}', '${s.symbol}', ${s.current_price || 0})">🔴 Close</button>
+        <button class="btn danger" style="flex:1;font-size:12px;padding:8px;" onclick="closeSignalModal('${s.id}', '${s.symbol}', ${s.current_price || 0}, ${s.entry_price || 0}, '${s.direction}')">🔴 Close</button>
       </div>
     </div>`;
   }
@@ -1207,21 +1388,41 @@ async function createManualSignal() {
     symbol: document.getElementById('manSymbol').value,
     direction: document.getElementById('manDir').value,
     timeframe: document.getElementById('manTF').value,
+    market_type: document.getElementById('manMarketType').value,
+    order_type: document.getElementById('manOrderType').value,
+    setup_type: document.getElementById('manSetup').value,
     entry_price: parseFloat(document.getElementById('manEntry').value),
     stop_loss: parseFloat(document.getElementById('manSL').value),
     take_profit_1: parseFloat(document.getElementById('manTP1').value),
     take_profit_2: parseFloat(document.getElementById('manTP2').value) || null,
+    take_profit_3: parseFloat(document.getElementById('manTP3').value) || null,
     confidence: parseFloat(document.getElementById('manConf').value),
     notes: document.getElementById('manNotes').value
   };
   if (!body.symbol || !body.entry_price || !body.stop_loss || !body.take_profit_1) {
-    return showToast('Fill required fields', 'error');
+    return showToast('Fill required fields (Symbol, Entry, SL, TP1)', 'error');
   }
-  await fetchJSON('/api/signals/create', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-  showToast('Signal published');
-  document.getElementById('manSymbol').value=''; document.getElementById('manEntry').value='';
-  document.getElementById('manSL').value=''; document.getElementById('manTP1').value='';
-  document.getElementById('manTP2').value=''; document.getElementById('manNotes').value='';
+  try {
+    await fetchJSON('/api/signals/create', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    showToast('✅ Signal published successfully!');
+    clearManualSignalForm();
+  } catch (e) {
+    showToast('❌ Failed to create signal: ' + (e.message || 'Unknown error'), 'error');
+  }
+}
+
+function clearManualSignalForm() {
+  document.getElementById('manSymbol').value = '';
+  document.getElementById('manEntry').value = '';
+  document.getElementById('manSL').value = '';
+  document.getElementById('manTP1').value = '';
+  document.getElementById('manTP2').value = '';
+  document.getElementById('manTP3').value = '';
+  document.getElementById('manNotes').value = '';
+  document.getElementById('manConf').value = '90';
+  document.getElementById('manMarketType').value = 'crypto';
+  document.getElementById('manOrderType').value = 'market';
+  document.getElementById('manSetup').value = 'breakout_retest';
 }
 
 async function loadPerformance() {
@@ -2074,37 +2275,113 @@ async function confirmFillSignal() {
   }
 }
 
-function closeSignalModal(signalId, symbol, currentPrice) {
+function closeSignalModal(signalId, symbol, currentPrice, entryPrice, direction) {
   document.getElementById('closeSignalId').value = signalId;
-  document.getElementById('closePrice').value = currentPrice.toFixed(6);
+  document.getElementById('closePrice').value = currentPrice ? currentPrice.toFixed(6) : '0';
+  document.getElementById('closeEntryPrice').value = entryPrice || 0;
+  document.getElementById('closeDirection').value = direction || 'LONG';
   document.getElementById('closeModalTitle').textContent = `Close Trade - ${symbol}`;
+  document.getElementById('closePercent').value = 100;
+  document.getElementById('closePercentDisplay').textContent = '100';
   document.getElementById('closeModal').classList.add('show');
+  updateClosePreview();
+}
+
+function updateClosePreview() {
+  const closePrice = parseFloat(document.getElementById('closePrice').value) || 0;
+  const entryPrice = parseFloat(document.getElementById('closeEntryPrice').value) || 0;
+  const direction = document.getElementById('closeDirection').value;
+  const closePercent = parseFloat(document.getElementById('closePercent').value) || 100;
+  
+  // Update display
+  document.getElementById('closePercentDisplay').textContent = closePercent.toFixed(0);
+  document.getElementById('previewClosing').textContent = `${closePercent.toFixed(0)}%`;
+  document.getElementById('previewRemaining').textContent = `${(100 - closePercent).toFixed(0)}%`;
+  
+  // Calculate P&L
+  if (entryPrice > 0 && closePrice > 0) {
+    let pnlFull = ((closePrice - entryPrice) / entryPrice) * 100;
+    if (direction === 'SHORT') pnlFull = -pnlFull;
+    
+    const pnlLocked = pnlFull * (closePercent / 100);
+    
+    const pnlClass = pnlFull >= 0 ? '#22c55e' : '#ef4444';
+    const lockedClass = pnlLocked >= 0 ? '#22c55e' : '#ef4444';
+    
+    document.getElementById('previewPnlFull').innerHTML = `<span style="color:${pnlClass}">${pnlFull >= 0 ? '+' : ''}${pnlFull.toFixed(2)}%</span>`;
+    document.getElementById('previewPnlLocked').innerHTML = `<span style="color:${lockedClass}">${pnlLocked >= 0 ? '+' : ''}${pnlLocked.toFixed(2)}%</span>`;
+  } else {
+    document.getElementById('previewPnlFull').textContent = '--';
+    document.getElementById('previewPnlLocked').textContent = '--';
+  }
+  
+  // Update button text and description
+  const btn = document.getElementById('confirmCloseBtn');
+  const desc = document.getElementById('closeDescription');
+  
+  if (closePercent >= 100) {
+    btn.innerHTML = '🔴 Close Full Position';
+    desc.textContent = 'This will close 100% of the position, calculate P&L, and send a notification to the VIP channel.';
+  } else {
+    btn.innerHTML = `📉 Close ${closePercent.toFixed(0)}% (Partial)`;
+    desc.textContent = `This will close ${closePercent.toFixed(0)}% of the position, lock in partial profits, and keep ${(100 - closePercent).toFixed(0)}% running.`;
+  }
 }
 
 async function confirmCloseSignal() {
   const signalId = document.getElementById('closeSignalId').value;
   const closePrice = parseFloat(document.getElementById('closePrice').value);
+  const closePercent = parseFloat(document.getElementById('closePercent').value);
   const reason = document.getElementById('closeReason').value;
   
   if (!signalId || !closePrice || !reason) {
     return showToast('Please fill all fields', 'error');
   }
   
-  if (!confirm('Are you sure you want to close this trade?')) return;
+  const isPartial = closePercent < 100;
+  const confirmMsg = isPartial 
+    ? `Close ${closePercent.toFixed(0)}% of position at $${closePrice.toFixed(6)}?`
+    : `Close full position at $${closePrice.toFixed(6)}?`;
+  
+  if (!confirm(confirmMsg)) return;
   
   try {
-    const result = await fetchJSON(`/api/signals/${signalId}/close`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ signal_id: signalId, close_price: closePrice, reason: reason })
-    });
-    
-    if (result.success) {
-      showToast(`Trade closed! P&L: ${result.pnl_percent >= 0 ? '+' : ''}${result.pnl_percent}%`);
-      closeModal('closeModal');
-      loadActiveSignals();
+    let result;
+    if (isPartial) {
+      // Partial close
+      result = await fetchJSON(`/api/signals/${signalId}/close-partial`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ 
+          signal_id: signalId, 
+          close_price: closePrice, 
+          close_percent: closePercent,
+          reason: reason 
+        })
+      });
+      
+      if (result.success) {
+        showToast(`Partial close: ${closePercent.toFixed(0)}% closed! Locked P&L: ${result.pnl_partial >= 0 ? '+' : ''}${result.pnl_partial}%`);
+        closeModal('closeModal');
+        loadActiveSignals();
+      } else {
+        showToast('Error: ' + result.message, 'error');
+      }
     } else {
-      showToast('Error: ' + result.message, 'error');
+      // Full close
+      result = await fetchJSON(`/api/signals/${signalId}/close`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ signal_id: signalId, close_price: closePrice, reason: reason })
+      });
+      
+      if (result.success) {
+        showToast(`Trade closed! P&L: ${result.pnl_percent >= 0 ? '+' : ''}${result.pnl_percent}%`);
+        closeModal('closeModal');
+        loadActiveSignals();
+      } else {
+        showToast('Error: ' + result.message, 'error');
+      }
     }
   } catch (e) {
     showToast('Error closing signal: ' + e.message, 'error');
@@ -2253,7 +2530,7 @@ function initDashboard() {
   </div>
 </div>
 
-<!-- Close Signal Modal -->
+<!-- Close Signal Modal (Enhanced with Partial Close) -->
 <div id="closeModal" class="modal">
   <div class="modal-content">
     <div class="modal-header">
@@ -2261,25 +2538,68 @@ function initDashboard() {
       <button class="close-btn" onclick="closeModal('closeModal')">×</button>
     </div>
     <input type="hidden" id="closeSignalId">
+    <input type="hidden" id="closeEntryPrice">
+    <input type="hidden" id="closeDirection">
+    
     <div class="form-group">
       <label>Close Price</label>
-      <input type="number" id="closePrice" step="0.000001" placeholder="0.000000">
+      <input type="number" id="closePrice" step="0.000001" placeholder="0.000000" oninput="updateClosePreview()">
     </div>
+    
+    <div class="form-group">
+      <label>Close Amount: <span id="closePercentDisplay">100</span>%</label>
+      <input type="range" id="closePercent" min="1" max="100" value="100" step="1" 
+             oninput="updateClosePreview()" 
+             style="width:100%;height:8px;border-radius:4px;background:linear-gradient(90deg,#38bdf8,#22c55e);cursor:pointer;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-top:4px;">
+        <span>Partial (25%)</span>
+        <span>Half (50%)</span>
+        <span>Most (75%)</span>
+        <span>Full (100%)</span>
+      </div>
+    </div>
+    
+    <!-- Live Preview -->
+    <div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:16px;">
+      <div style="font-size:13px;color:#94a3b8;margin-bottom:8px;"><b>Preview:</b></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+        <div>
+          <span style="color:#64748b;">Closing:</span>
+          <div style="color:#f8fafc;font-weight:600;font-size:16px;" id="previewClosing">100%</div>
+        </div>
+        <div>
+          <span style="color:#64748b;">Remaining:</span>
+          <div style="color:#f8fafc;font-weight:600;font-size:16px;" id="previewRemaining">0%</div>
+        </div>
+        <div>
+          <span style="color:#64748b;">P&L (Full):</span>
+          <div style="font-weight:600;font-size:16px;" id="previewPnlFull">--</div>
+        </div>
+        <div>
+          <span style="color:#64748b;">Locked Profit:</span>
+          <div style="font-weight:600;font-size:16px;" id="previewPnlLocked">--</div>
+        </div>
+      </div>
+    </div>
+    
     <div class="form-group">
       <label>Reason</label>
       <select id="closeReason">
         <option value="manual">Manual Close</option>
+        <option value="partial_close">Partial Close (Take Profits)</option>
         <option value="tp_hit">TP Hit (missed by bot)</option>
         <option value="sl_hit">SL Hit (missed by bot)</option>
         <option value="expired">Signal Expired</option>
       </select>
     </div>
+    
     <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">
-      This will close the trade, calculate P&L, and send a notification to the VIP channel.
+      <span id="closeDescription">This will close the trade, calculate P&L, and send a notification to the VIP channel.</span>
     </p>
+    
     <div style="display:flex;gap:8px;">
       <button class="btn ghost" onclick="closeModal('closeModal')">Cancel</button>
-      <button class="btn danger" onclick="confirmCloseSignal()">🔴 Close Trade</button>
+      <button class="btn danger" onclick="confirmCloseSignal()" id="confirmCloseBtn">🔴 Close Trade</button>
     </div>
   </div>
 </div>

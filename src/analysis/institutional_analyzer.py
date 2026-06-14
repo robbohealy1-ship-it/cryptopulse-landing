@@ -130,6 +130,9 @@ class InstitutionalAnalyzer:
         
         # POC = highest volume node
         total_volume = sum(l.volume for l in levels)
+        if total_volume == 0:
+            return []
+        
         poc = levels[0]
         poc.type = 'poc'
         

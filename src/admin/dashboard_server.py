@@ -1,6 +1,10 @@
 """
 CryptoPulse Admin Dashboard Server
 FastAPI backend for full operational control.
+
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
 """
 
 import asyncio
@@ -12,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Body, Depends
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from src.config import settings
 from src.utils.logger import get_logger
@@ -28,6 +33,34 @@ _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 logger = get_logger(__name__)
 
 app = FastAPI(title="CryptoPulse Admin", version="2.0")
+
+# ==================== CORS (Mobile Access) ====================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# ==================== Security Headers ====================
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self' *; "
+    )
+    return response
 
 # ==================== Session Auth ====================
 _sessions: Dict[str, datetime] = {}
@@ -209,6 +242,14 @@ class CloseSignal(BaseModel):
     reason: str  # "manual", "tp_hit", "sl_hit", "expired"
 
 
+class PartialCloseSignal(BaseModel):
+    """Model for partially closing a signal"""
+    signal_id: str
+    close_price: float
+    close_percent: float  # 0-100, percentage of position to close
+    reason: str = "partial_close"
+
+
 class MarkTPHit(BaseModel):
     """Model for manually marking TP as hit"""
     signal_id: str
@@ -383,7 +424,7 @@ async def daily_stats():
         return stats
     except Exception as e:
         logger.error(f"Dashboard daily stats error: {e}")
-        return {"error": str(e)}
+        return {"error": "Internal server error — check logs"}
 
 
 @app.get("/api/stats/weekly")
@@ -395,7 +436,55 @@ async def weekly_stats():
         return stats
     except Exception as e:
         logger.error(f"Dashboard weekly stats error: {e}")
-        return {"error": str(e)}
+        return {"error": "Internal server error — check logs"}
+
+
+@app.get("/api/forex/status")
+async def forex_api_status():
+    """Get Forex API status and health."""
+    orch = require_orch()
+    try:
+        forex_client = orch.forex_signal_engine.forex_client if hasattr(orch, 'forex_signal_engine') else None
+        
+        if not forex_client:
+            return {
+                "finnhub": {"status": "unknown", "message": "Forex client not initialized"},
+                "twelve_data": {"status": "unknown", "message": "Forex client not initialized"},
+                "alpha_vantage": {"status": "unknown", "message": "Forex client not initialized"},
+                "last_scan": None
+            }
+        
+        # Check API keys
+        finnhub_active = bool(forex_client.finnhub_key)
+        twelve_data_active = bool(forex_client.twelve_data_key)
+        alpha_vantage_active = bool(forex_client.alpha_vantage_key)
+        
+        return {
+            "finnhub": {
+                "status": "active" if finnhub_active else "missing",
+                "message": "60 req/min (Free)" if finnhub_active else "API key not set",
+                "rate_limit": "60/min"
+            },
+            "twelve_data": {
+                "status": "limited" if twelve_data_active else "missing",
+                "message": "800/day limit" if twelve_data_active else "API key not set",
+                "rate_limit": "800/day"
+            },
+            "alpha_vantage": {
+                "status": "limited" if alpha_vantage_active else "missing",
+                "message": "25/day limit" if alpha_vantage_active else "API key not set",
+                "rate_limit": "25/day"
+            },
+            "last_scan": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Forex API status error: {e}")
+        return {
+            "finnhub": {"status": "error", "message": str(e)},
+            "twelve_data": {"status": "error", "message": str(e)},
+            "alpha_vantage": {"status": "error", "message": str(e)},
+            "last_scan": None
+        }
 
 
 @app.get("/api/signals/pending")
@@ -427,7 +516,7 @@ async def pending_signals(request: Request, _=Depends(rate_limit_lenient)):
         }
     except Exception as e:
         logger.error(f"Error getting pending signals: {e}")
-        return {"count": 0, "signals": [], "error": str(e)}
+        return {"count": 0, "signals": [], "error": "Internal server error — check logs"}
 
 
 @app.get("/api/signals/active")
@@ -460,11 +549,13 @@ async def active_signals(request: Request, _=Depends(rate_limit_lenient)):
                 "direction": s.direction.value if hasattr(s.direction, 'value') else str(s.direction),
                 "timeframe": s.timeframe,
                 "setup_type": s.setup_type.value if hasattr(s.setup_type, 'value') else str(s.setup_type),
+                "market_type": getattr(s, 'market_type', 'crypto').value if hasattr(getattr(s, 'market_type', None), 'value') else str(getattr(s, 'market_type', 'crypto')),
                 "is_limit_order": getattr(s, 'is_limit_order', False),
                 "status": s.status.value if hasattr(s.status, 'value') else str(s.status),
                 "confidence": s.confidence,
                 "risk_reward": s.risk_reward,
                 "entry_price": entry,
+                "actual_entry": getattr(s, 'actual_entry', None),
                 "current_price": current_price,
                 "stop_loss": s.stop_loss,
                 "take_profit_1": s.take_profit_1,
@@ -477,6 +568,7 @@ async def active_signals(request: Request, _=Depends(rate_limit_lenient)):
                 "pnl_percent": round(pnl, 2),
                 "created_at": s.created_at.isoformat() if s.created_at else None,
                 "approved_at": s.approved_at.isoformat() if hasattr(s, 'approved_at') and s.approved_at else None,
+                "metadata": getattr(s, 'metadata', None),
             })
         
         return {
@@ -485,7 +577,105 @@ async def active_signals(request: Request, _=Depends(rate_limit_lenient)):
         }
     except Exception as e:
         logger.error(f"Error getting active signals: {e}")
-        return {"count": 0, "signals": [], "error": str(e)}
+        return {"count": 0, "signals": [], "error": "Internal server error — check logs"}
+
+
+@app.get("/api/signals/active/management")
+async def active_trade_management(request: Request, _=Depends(rate_limit_lenient)):
+    """Get real-time management recommendations for all active trades."""
+    orch = require_orch()
+    try:
+        if not orch.trade_manager:
+            return {"count": 0, "recommendations": [], "error": "Trade management engine not initialized"}
+
+        active = await orch.db.get_active_signals()
+        if not active:
+            return {"count": 0, "recommendations": []}
+
+        recommendations = await orch.trade_manager.analyze_all(active)
+
+        return {
+            "count": len(recommendations),
+            "recommendations": [
+                {
+                    "signal_id": r.signal_id,
+                    "symbol": r.symbol,
+                    "action": r.action.value,
+                    "confidence": r.confidence,
+                    "urgency": r.urgency.value,
+                    "reasoning": r.reasoning,
+                    "current_pnl_percent": r.current_pnl_percent,
+                    "current_price": r.current_price,
+                    "entry_price": r.entry_price,
+                    "stop_loss": r.stop_loss,
+                    "take_profit_1": r.take_profit_1,
+                    "take_profit_2": r.take_profit_2,
+                    "take_profit_3": r.take_profit_3,
+                    "distance_to_tp1_percent": r.distance_to_tp1_percent,
+                    "distance_to_sl_percent": r.distance_to_sl_percent,
+                    "rsi": r.rsi,
+                    "trend_direction": r.trend_direction,
+                    "trend_strength": r.trend_strength,
+                    "news_sentiment": r.news_sentiment,
+                    "structure_note": r.structure_note,
+                    "suggested_stop_price": r.suggested_stop_price,
+                    "suggested_scale_percent": r.suggested_scale_percent,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in recommendations
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error getting trade management recommendations: {e}")
+        return {"count": 0, "recommendations": [], "error": "Internal server error — check logs"}
+
+
+@app.get("/api/signals/{signal_id}/management")
+async def single_trade_management(signal_id: str, request: Request, _=Depends(rate_limit_lenient)):
+    """Get management recommendation for a single active trade."""
+    orch = require_orch()
+    try:
+        if not orch.trade_manager:
+            return {"error": "Trade management engine not initialized"}
+
+        signal = await orch.db.get_signal(signal_id)
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal not found")
+
+        rec = await orch.trade_manager.analyze_trade(signal)
+        if not rec:
+            return {"error": "Could not generate recommendation for this signal"}
+
+        return {
+            "signal_id": rec.signal_id,
+            "symbol": rec.symbol,
+            "action": rec.action.value,
+            "confidence": rec.confidence,
+            "urgency": rec.urgency.value,
+            "reasoning": rec.reasoning,
+            "current_pnl_percent": rec.current_pnl_percent,
+            "current_price": rec.current_price,
+            "entry_price": rec.entry_price,
+            "stop_loss": rec.stop_loss,
+            "take_profit_1": rec.take_profit_1,
+            "take_profit_2": rec.take_profit_2,
+            "take_profit_3": rec.take_profit_3,
+            "distance_to_tp1_percent": rec.distance_to_tp1_percent,
+            "distance_to_sl_percent": rec.distance_to_sl_percent,
+            "rsi": rec.rsi,
+            "trend_direction": rec.trend_direction,
+            "trend_strength": rec.trend_strength,
+            "news_sentiment": rec.news_sentiment,
+            "structure_note": rec.structure_note,
+            "suggested_stop_price": rec.suggested_stop_price,
+            "suggested_scale_percent": rec.suggested_scale_percent,
+            "created_at": rec.created_at.isoformat() if rec.created_at else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting single trade management: {e}")
+        return {"error": "Internal server error — check logs"}
 
 
 @app.get("/api/portfolio")
@@ -576,7 +766,7 @@ async def portfolio_data(request: Request, _=Depends(rate_limit_lenient)):
         }
     except Exception as e:
         logger.error(f"Error getting portfolio: {e}")
-        return {"count": 0, "signals": [], "error": str(e)}
+        return {"count": 0, "signals": [], "error": "Internal server error — check logs"}
 
 
 @app.get("/api/public/portfolio")
@@ -653,7 +843,7 @@ async def public_portfolio_data(request: Request, _=Depends(rate_limit_lenient))
         }
     except Exception as e:
         logger.error(f"Error getting public portfolio: {e}")
-        return {"enabled": True, "count": 0, "signals": [], "error": str(e)}
+        return {"enabled": True, "count": 0, "signals": [], "error": "Internal server error — check logs"}
 
 
 @app.get("/api/account")
@@ -695,7 +885,7 @@ async def account_data():
             accounts.append({
                 "source": "mexc",
                 "label": "MEXC Personal",
-                "error": str(e),
+                "error": "Internal server error — check logs",
             })
     
     return {
@@ -895,7 +1085,7 @@ async def alpha_plays():
         }
     except Exception as e:
         logger.error(f"Error getting alpha plays: {e}")
-        return {"active_count": 0, "pending_count": 0, "active": [], "pending": [], "error": str(e)}
+        return {"active_count": 0, "pending_count": 0, "active": [], "pending": [], "error": "Internal server error — check logs"}
 
 
 @app.get("/api/alpha/portfolio")
@@ -991,7 +1181,7 @@ async def alpha_portfolio_holds():
         }
     except Exception as e:
         logger.error(f"Error getting portfolio holds: {e}")
-        return {"count": 0, "total_pnl": 0, "holds": [], "error": str(e)}
+        return {"count": 0, "total_pnl": 0, "holds": [], "error": "Internal server error — check logs"}
 
 
 @app.post("/api/alpha/approve")
@@ -1029,7 +1219,7 @@ async def approve_alpha(request: Request, symbol: str, is_limit_order: bool = Fa
             return {"success": False, "error": f"Alpha play {symbol} not found in pending queue"}
     except Exception as e:
         logger.error(f"Error approving alpha play: {e}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": "Internal server error — check logs"}
 
 
 @app.post("/api/alpha/reject")
@@ -1064,7 +1254,7 @@ async def reject_alpha(request: Request, symbol: str,
             return {"success": True, "symbol": symbol, "message": f"Alpha play {symbol} rejected via DB"}
     except Exception as e:
         logger.error(f"Error rejecting alpha play: {e}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": "Internal server error — check logs"}
 
 
 @app.post("/api/alpha/close")
@@ -1089,7 +1279,7 @@ async def close_alpha(request: Request, play_id: str, reason: str = "manual",
             return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} closed via DB"}
     except Exception as e:
         logger.error(f"Error closing alpha play: {e}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": "Internal server error — check logs"}
 
 
 @app.post("/api/alpha/update")
@@ -1109,7 +1299,7 @@ async def update_alpha(play_id: str, updates: dict = Body(...)):
             return {"success": True, "play_id": play_id, "message": f"Alpha play {play_id} updated via DB", "updates": updates}
     except Exception as e:
         logger.error(f"Error updating alpha play: {e}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": "Internal server error — check logs"}
 
 
 @app.post("/api/alpha/trigger")
@@ -1126,7 +1316,7 @@ async def trigger_alpha_scan(request: Request, chain: str = None,
         return {"success": True, "message": f"DEX scan triggered (chain={chain or 'all'}). Check logs for results."}
     except Exception as e:
         logger.error(f"Error triggering alpha scan: {e}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": "Internal server error — check logs"}
 
 
 @app.get("/api/alpha/stats")
@@ -1162,7 +1352,7 @@ async def alpha_stats():
         }
     except Exception as e:
         logger.error(f"Error getting alpha stats: {e}")
-        return {"error": str(e)}
+        return {"error": "Internal server error — check logs"}
 
 
 @app.get("/api/whales/{symbol}")
@@ -1198,7 +1388,7 @@ async def get_whale_activity(symbol: str):
         return {"symbol": symbol, "active": False, "message": "No whale activity detected"}
     except Exception as e:
         logger.error(f"Error fetching whale data for {symbol}: {e}")
-        return {"symbol": symbol, "active": False, "error": str(e)}
+        return {"symbol": symbol, "active": False, "error": "Internal server error — check logs"}
 
 
 @app.get("/api/alpha/performance")
@@ -1382,7 +1572,7 @@ async def alpha_performance(days: int = 90):
         }
     except Exception as e:
         logger.error(f"Error getting alpha performance: {e}")
-        return {"error": str(e)}
+        return {"error": "Internal server error — check logs"}
 
 
 @app.get("/api/dex/opportunities")
@@ -1443,7 +1633,7 @@ async def dex_opportunities(chain: str = None, trade_type: str = None):
         }
     except Exception as e:
         logger.error(f"Error getting DEX opportunities: {e}")
-        return {"opportunities": [], "count": 0, "error": str(e)}
+        return {"opportunities": [], "count": 0, "error": "Internal server error — check logs"}
 
 
 # ==================== SIGNALS ====================
@@ -1528,7 +1718,7 @@ async def update_signal_prices(signal_id: str, update: SignalUpdate,
         raise
     except Exception as e:
         logger.error(f"Error updating signal: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/signals/{signal_id}/close")
@@ -1585,7 +1775,16 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal,
             signal.pnl_percent = pnl
             signal.status = SignalStatus.CLOSED
             signal.closed_at = datetime.utcnow()
-            
+
+            # CRITICAL FIX: Remove from autopilot tracking so old signal object
+            # with stale status isn't saved back to DB on next check
+            if orch.autopilot and signal_id in orch.autopilot.performance.active_signals:
+                del orch.autopilot.performance.active_signals[signal_id]
+                logger.info(f"🛡️ Signal {signal_id} removed from autopilot tracking after manual close")
+            if orch.autopilot and signal_id in orch.autopilot.performance.pending_limit_orders:
+                del orch.autopilot.performance.pending_limit_orders[signal_id]
+                orch.autopilot.performance.pending_limit_extremes.pop(signal_id, None)
+
             # Send notification to VIP channel
             await orch.channel_publisher.send_trade_closed(
                 signal, 
@@ -1607,7 +1806,127 @@ async def close_signal_manually(signal_id: str, close_data: CloseSignal,
         raise
     except Exception as e:
         logger.error(f"Error closing signal: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/signals/{signal_id}/close-partial")
+async def close_signal_partially(signal_id: str, close_data: PartialCloseSignal,
+                                 request: Request, _=Depends(rate_limit_strict)):
+    """Partially close an active signal (e.g., close 50% of position)"""
+    orch = require_orch()
+    try:
+        # Validate percentage
+        if close_data.close_percent <= 0 or close_data.close_percent >= 100:
+            raise HTTPException(status_code=400, detail="Close percent must be between 0 and 100 (exclusive)")
+        
+        # Get the signal
+        signal = await orch.db.get_signal_by_id(signal_id)
+        if not signal:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        
+        # Check if already closed
+        if signal.status.value == 'closed':
+            return {"success": False, "message": "Signal already fully closed"}
+        
+        # Calculate P&L for the partial close
+        entry = signal.actual_entry or signal.entry_price
+        if not entry or entry == 0:
+            raise HTTPException(status_code=400, detail="Cannot calculate P&L: invalid entry price")
+        
+        pnl_full = ((close_data.close_price - entry) / entry) * 100
+        if signal.direction.value == "SHORT":
+            pnl_full = -pnl_full
+        
+        pnl_partial = pnl_full * (close_data.close_percent / 100)
+        remaining_percent = 100 - close_data.close_percent
+        
+        # Update signal with partial close metadata
+        if not hasattr(signal, 'metadata') or signal.metadata is None:
+            signal.metadata = {}
+        
+        if 'partial_closes' not in signal.metadata:
+            signal.metadata['partial_closes'] = []
+        
+        signal.metadata['partial_closes'].append({
+            'percent': close_data.close_percent,
+            'price': close_data.close_price,
+            'pnl': round(pnl_partial, 2),
+            'timestamp': datetime.utcnow().isoformat(),
+            'reason': close_data.reason
+        })
+        signal.metadata['remaining_position'] = remaining_percent
+        
+        # Save updated signal to database
+        if orch.db:
+            try:
+                await orch.db.save_signal(signal)
+                logger.info(f"✅ Signal updated with partial close metadata: {remaining_percent}% remaining")
+            except Exception as e:
+                logger.warning(f"Could not update signal after partial close: {e}")
+        
+        # Log the partial close event
+        if orch.db:
+            try:
+                await orch.db.log_trade_event(
+                    signal_id=signal_id,
+                    event_type='partial_close',
+                    details={
+                        'symbol': signal.symbol,
+                        'close_percent': close_data.close_percent,
+                        'close_price': close_data.close_price,
+                        'pnl_partial': round(pnl_partial, 2),
+                        'remaining_percent': remaining_percent,
+                        'reason': close_data.reason
+                    },
+                    price=close_data.close_price
+                )
+            except Exception as e:
+                logger.warning(f"Could not log partial close event: {e}")
+        
+        # Send notification to admin and VIP channel
+        msg = (
+            f"📉 <b>PARTIAL CLOSE</b>\n\n"
+            f"<b>{signal.symbol}</b> {signal.direction.value}\n"
+            f"Closed: {close_data.close_percent:.0f}% of position\n"
+            f"Remaining: {remaining_percent:.0f}%\n\n"
+            f"💰 P&L on closed portion: {pnl_partial:+.2f}%\n"
+            f"📊 Close Price: ${close_data.close_price:.6f}\n"
+            f"🎯 Entry: ${entry:.6f}\n\n"
+            f"✅ Profit locked in. Remaining position continues to run.\n"
+            f"Stop loss remains active on remaining {remaining_percent:.0f}%."
+        )
+        
+        if not orch.dashboard_only:
+            try:
+                await orch.admin_bot.send_notification(msg)
+                # Also send to VIP channel
+                await orch.channel_publisher.bot.send_message(
+                    chat_id=orch.channel_publisher.vip_channel_id,
+                    text=msg,
+                    parse_mode='HTML'
+                )
+                logger.info(f"✅ Partial close notification sent to Telegram")
+            except Exception as e:
+                logger.warning(f"Could not send partial close notification: {e}")
+        else:
+            logger.info(f"📱 Dashboard-only mode: Telegram notification skipped (will work on Oracle)")
+        
+        logger.info(f"Signal {signal_id} partially closed: {close_data.close_percent:.0f}% at {close_data.close_price}, P&L: {pnl_partial:.2f}%")
+        
+        return {
+            "success": True,
+            "message": f"Partially closed {close_data.close_percent:.0f}% of position",
+            "pnl_partial": round(pnl_partial, 2),
+            "pnl_full_position": round(pnl_full, 2),
+            "remaining_percent": remaining_percent,
+            "close_price": close_data.close_price
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error partially closing signal: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/signals/{signal_id}/fill")
@@ -1654,7 +1973,7 @@ async def fill_limit_order_manually(signal_id: str, fill_data: FillLimitOrder,
         raise
     except Exception as e:
         logger.error(f"Error filling signal: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/signals/{signal_id}/mark-tp")
@@ -1690,7 +2009,7 @@ async def mark_tp_hit_manually(signal_id: str, tp_data: MarkTPHit,
         raise
     except Exception as e:
         logger.error(f"Error marking TP hit: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/signals/history")
@@ -1711,7 +2030,7 @@ async def signal_history(
         return {"count": len(signals), "signals": signals}
     except Exception as e:
         logger.error(f"Dashboard history error: {e}")
-        return {"count": 0, "signals": [], "error": str(e)}
+        return {"count": 0, "signals": [], "error": "Internal server error — check logs"}
 
 
 @app.post("/api/marketing/post")
@@ -1739,7 +2058,7 @@ async def send_marketing_post(post: MarketingPost,
         return {"success": True, "sent": sent}
     except Exception as e:
         logger.error(f"Dashboard marketing post error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/marketing/campaign")
@@ -1860,7 +2179,7 @@ async def trigger_campaign(campaign: CampaignTrigger,
             raise HTTPException(status_code=400, detail="Unknown campaign type")
     except Exception as e:
         logger.error(f"Dashboard campaign error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/schedule/trigger")
@@ -1897,7 +2216,7 @@ async def trigger_scheduled_job(job: ScheduleJob,
             raise HTTPException(status_code=400, detail="Unknown job type")
     except Exception as e:
         logger.error(f"Dashboard schedule trigger error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/subscribers")
@@ -1910,7 +2229,7 @@ async def subscribers():
         return {"count": len(subs), "subscribers": subs}
     except Exception as e:
         logger.error(f"Dashboard subscribers error: {e}")
-        return {"count": 0, "subscribers": [], "error": str(e)}
+        return {"count": 0, "subscribers": [], "error": "Internal server error — check logs"}
 
 
 @app.get("/api/settings")
@@ -1998,7 +2317,7 @@ async def signal_performance(days: int = Query(30, ge=1, le=365)):
         }
     except Exception as e:
         logger.error(f"Performance error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/portfolio/analytics")
@@ -2019,7 +2338,7 @@ async def portfolio_analytics(request: Request, days: int = Query(30, ge=1, le=3
         }
     except Exception as e:
         logger.error(f"Portfolio analytics error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/audit/signal/{signal_id}")
@@ -2031,7 +2350,7 @@ async def get_signal_audit(signal_id: str):
         return {"signal_id": signal_id, "entries": entries, "count": len(entries)}
     except Exception as e:
         logger.error(f"Audit trail error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/audit/recent")
@@ -2043,7 +2362,7 @@ async def get_recent_audit(event_type: str = Query(None), limit: int = Query(100
         return {"entries": entries, "count": len(entries), "filter": event_type}
     except Exception as e:
         logger.error(f"Recent audit error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/marketing/send-performance")
@@ -2091,7 +2410,7 @@ async def send_performance_to_channel(request: Request, days: int = Query(7, ge=
         
     except Exception as e:
         logger.error(f"Send performance error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ==================== SIGNALS PRO ====================
@@ -2108,7 +2427,7 @@ async def get_signal_detail(signal_id: str):
         return {"signal": rows[0]}
     except Exception as e:
         logger.error(f"Signal detail error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class BulkSignalAction(BaseModel):
@@ -2142,13 +2461,16 @@ async def bulk_signal_action(bulk: BulkSignalAction):
         return {"success": True, "results": results}
     except Exception as e:
         logger.error(f"Bulk action error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class ManualSignal(BaseModel):
     symbol: str
     direction: str  # LONG or SHORT
     timeframe: str = "1h"
+    market_type: str = "crypto"  # crypto or forex
+    order_type: str = "market"  # market or limit
+    setup_type: str = "support_resistance"  # Setup type from dropdown
     entry_price: float
     stop_loss: float
     take_profit_1: float
@@ -2161,11 +2483,11 @@ class ManualSignal(BaseModel):
 @app.post("/api/signals/create")
 async def create_manual_signal(request: Request, sig: ManualSignal,
                                 _=Depends(rate_limit_strict)):
-    """Manually create a signal and optionally publish immediately."""
+    """Manually create a signal with full control over all parameters."""
     orch = require_orch()
     try:
         from src.models.signal import (
-            SignalDirection, TradingSignal, SetupType,
+            SignalDirection, TradingSignal, SetupType, MarketType,
             TechnicalScore, ContextScore
         )
         
@@ -2176,6 +2498,24 @@ async def create_manual_signal(request: Request, sig: ManualSignal,
             raise HTTPException(status_code=400, detail="Prices must be positive numbers")
         
         direction = SignalDirection.LONG if sig.direction.upper() == "LONG" else SignalDirection.SHORT
+        
+        # Map market_type string to MarketType enum
+        market_type = MarketType.FOREX if sig.market_type.lower() == "forex" else MarketType.CRYPTO
+        
+        # Map setup_type string to SetupType enum
+        setup_type_map = {
+            "breakout_retest": SetupType.BREAKOUT_RETEST,
+            "bos_retest": SetupType.BOS_RETEST,
+            "order_block": SetupType.ORDER_BLOCK,
+            "liquidity_sweep": SetupType.LIQUIDITY_SWEEP,
+            "fair_value_gap": SetupType.FAIR_VALUE_GAP,
+            "support_resistance": SetupType.SUPPORT_RESISTANCE,
+            "pullback_continuation": SetupType.PULLBACK_CONTINUATION
+        }
+        setup_type = setup_type_map.get(sig.setup_type.lower(), SetupType.SUPPORT_RESISTANCE)
+        
+        # Determine if limit order
+        is_limit_order = sig.order_type.lower() == "limit"
         
         # Calculate risk/reward
         risk = abs(sig.entry_price - sig.stop_loss)
@@ -2204,24 +2544,28 @@ async def create_manual_signal(request: Request, sig: ManualSignal,
         signal = TradingSignal(
             symbol=sig.symbol,
             direction=direction,
-            setup_type=SetupType.SUPPORT_RESISTANCE,  # Default for manual
+            setup_type=setup_type,
             timeframe=sig.timeframe,
+            market_type=market_type,
             entry_price=sig.entry_price,
             stop_loss=sig.stop_loss,
             take_profit_1=sig.take_profit_1,
             take_profit_2=sig.take_profit_2,
             take_profit_3=sig.take_profit_3,
+            is_limit_order=is_limit_order,
             confidence=sig.confidence,
             technical_score=technical_score,
             context_score=context_score,
-            reasoning=sig.notes or "Manual signal created from dashboard",
+            reasoning=sig.notes or f"Manual {market_type.value} signal: {setup_type.value}",
             risk_reward=risk_reward,
             atr=atr,
             volume_24h=0,  # Manual signals don't have volume data
-            notes=sig.notes or "Manual signal from dashboard"
+            notes=sig.notes or f"Manual signal from dashboard ({sig.order_type} order)"
         )
+        
+        logger.info(f"📝 Manual signal created: {sig.symbol} {direction.value} ({market_type.value}, {sig.order_type})")
         await orch.on_signal_approved(signal)
-        return {"success": True, "signal_id": signal.id}
+        return {"success": True, "signal_id": signal.id, "message": f"Signal published as {sig.order_type.upper()} order"}
     except Exception as e:
         logger.error(f"Manual signal creation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2282,7 +2626,7 @@ async def schedule_marketing_post(post: ScheduledPost):
         return {"success": True, "scheduled_at": post.scheduled_at}
     except Exception as e:
         logger.error(f"Schedule post error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/marketing/schedule")
@@ -2409,7 +2753,7 @@ async def add_beta_tester(tester: AddBetaTester):
             
     except Exception as e:
         logger.error(f"Add beta tester error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class UpdateSubscriber(BaseModel):
@@ -2446,7 +2790,7 @@ async def update_subscriber_endpoint(user_id: str, update: UpdateSubscriber):
             
     except Exception as e:
         logger.error(f"Update subscriber error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/subscribers/{user_id}/cancel")
@@ -2473,7 +2817,7 @@ async def cancel_subscriber_endpoint(user_id: str):
             
     except Exception as e:
         logger.error(f"Cancel subscriber error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/subscribers/blast")
@@ -2502,7 +2846,7 @@ async def subscriber_dm_blast(blast: DmBlast):
         return {"success": True, "sent": sent, "failed": failed, "total": len(subs)}
     except Exception as e:
         logger.error(f"DM blast error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/subscribers/stats")
@@ -2621,7 +2965,7 @@ async def send_test_signal():
         }
     except Exception as e:
         logger.error(f"Test signal error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/test/telegram")
@@ -2730,7 +3074,7 @@ async def enhanced_performance_analytics(days: int = Query(30, ge=1, le=365)):
         return await analytics_engine.get_performance_analytics(days)
     except Exception as e:
         logger.error(f"Enhanced analytics error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/analytics/subscribers")
@@ -2744,7 +3088,7 @@ async def subscriber_analytics():
         return await analytics_engine.get_subscriber_analytics()
     except Exception as e:
         logger.error(f"Subscriber analytics error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ==================== CONTENT GENERATOR ====================
@@ -2760,7 +3104,7 @@ async def generate_weekly_report():
         return await content_generator.generate_weekly_report()
     except Exception as e:
         logger.error(f"Weekly report error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/content/social-post")
@@ -2774,7 +3118,7 @@ async def generate_social_post(post_type: str = Query("performance")):
         return await content_generator.generate_social_media_post(post_type)
     except Exception as e:
         logger.error(f"Social post error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/content/comparison-chart")
@@ -2788,7 +3132,7 @@ async def generate_comparison_chart(days: int = Query(30, ge=1, le=365)):
         return await content_generator.generate_comparison_chart_data(days)
     except Exception as e:
         logger.error(f"Comparison chart error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/content/export-pdf")
@@ -2802,7 +3146,7 @@ async def export_signals_pdf(days: int = Query(30, ge=1, le=365)):
         return await content_generator.export_signals_pdf_data(days)
     except Exception as e:
         logger.error(f"PDF export error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ==================== FREE VIRAL MARKETING ====================
@@ -2819,7 +3163,7 @@ async def trigger_viral_daily_marketing():
         return {"success": True, "message": "Daily viral marketing executed"}
     except Exception as e:
         logger.error(f"Viral daily marketing error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/marketing/viral-weekly")
@@ -2834,7 +3178,7 @@ async def trigger_viral_weekly_marketing():
         return {"success": True, "message": "Weekly viral marketing blitz completed"}
     except Exception as e:
         logger.error(f"Viral weekly marketing error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/marketing/reddit-post")
@@ -2852,7 +3196,7 @@ async def post_to_reddit():
             return {"success": False, "message": "Reddit posting disabled (add REDDIT_CLIENT_ID to .env)"}
     except Exception as e:
         logger.error(f"Reddit post error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/marketing/discord-blast")
@@ -2871,7 +3215,7 @@ async def post_to_discord_servers():
         return {"success": True, "message": "Posted to Discord servers"}
     except Exception as e:
         logger.error(f"Discord blast error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/marketing/forum-content")
@@ -2886,7 +3230,7 @@ async def generate_forum_content():
         return {"success": True, "content": content, "message": "Forum content generated"}
     except Exception as e:
         logger.error(f"Forum content error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/marketing/social-proof")
@@ -2901,7 +3245,7 @@ async def get_social_proof():
         return {"success": True, "content": content}
     except Exception as e:
         logger.error(f"Social proof error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/settings")
@@ -2957,7 +3301,7 @@ async def get_research_projects(request: Request, status: str = None, _=Depends(
         return {"success": True, "projects": projects, "count": len(projects)}
     except Exception as e:
         logger.error(f"Error getting research projects: {e}")
-        return {"success": False, "error": str(e), "projects": []}
+        return {"success": False, "error": "Internal server error — check logs", "projects": []}
 
 
 @app.get("/api/research/projects/{project_id}")
@@ -2980,7 +3324,7 @@ async def get_research_project(request: Request, project_id: str, _=Depends(rate
         raise
     except Exception as e:
         logger.error(f"Error getting project: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/research/projects/{project_id}/rescore")
@@ -3000,7 +3344,7 @@ async def rescore_project(request: Request, project_id: str, _=Depends(rate_limi
         raise
     except Exception as e:
         logger.error(f"Error rescoring project: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/basket/current")
@@ -3015,7 +3359,7 @@ async def get_alpha_basket(request: Request, _=Depends(rate_limit_lenient)):
         return {"success": True, "basket": basket, "count": len(basket)}
     except Exception as e:
         logger.error(f"Error getting basket: {e}")
-        return {"success": False, "error": str(e), "basket": []}
+        return {"success": False, "error": "Internal server error — check logs", "basket": []}
 
 
 @app.post("/api/basket/update")
@@ -3030,7 +3374,7 @@ async def update_alpha_basket(request: Request, _=Depends(rate_limit_moderate)):
         return {"success": True, "basket": basket, "count": len(basket)}
     except Exception as e:
         logger.error(f"Error updating basket: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/reports/list")
@@ -3045,7 +3389,7 @@ async def list_research_reports(request: Request, project_id: str = None, _=Depe
         return {"success": True, "reports": reports, "count": len(reports)}
     except Exception as e:
         logger.error(f"Error listing reports: {e}")
-        return {"success": False, "error": str(e), "reports": []}
+        return {"success": False, "error": "Internal server error — check logs", "reports": []}
 
 
 @app.post("/api/reports/generate")
@@ -3101,7 +3445,7 @@ async def generate_research_report(request: Request, _=Depends(rate_limit_modera
         raise
     except Exception as e:
         logger.error(f"Error generating report: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/reports/{report_id}")
@@ -3135,7 +3479,7 @@ async def get_research_report_detail(request: Request, report_id: str, _=Depends
         raise
     except Exception as e:
         logger.error(f"Error getting report: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/settings/public-portfolio-toggle")
@@ -3252,7 +3596,7 @@ async def get_conviction_breakdown(signal_id: str, request: Request, _=Depends(r
         raise
     except Exception as e:
         logger.error(f"Error fetching conviction breakdown: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/conviction/stats")
@@ -3317,7 +3661,7 @@ async def get_conviction_stats(request: Request, _=Depends(rate_limit_lenient)):
             "tier_distribution": {"ELITE": 0, "VIP": 0, "WATCHLIST": 0, "REJECTED": 0},
             "average_scores": {},
             "current_mode": settings.SIGNAL_MODE,
-            "error": str(e)
+            "error": "Internal server error — check logs"
         }
 
 

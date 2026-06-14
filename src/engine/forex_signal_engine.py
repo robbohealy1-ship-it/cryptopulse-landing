@@ -1,6 +1,10 @@
 """
-Forex Signal Engine - mirrors crypto signal engine but for Forex markets
-Generates trading signals for major Forex pairs, commodities (XAUUSD), and indices (NAS100)
+CryptoPulse Signals — Forex Signal Engine
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
+
+Generates trading signals for major Forex pairs, commodities (XAUUSD), and indices (NAS100).
 """
 import asyncio
 from datetime import datetime, timedelta
@@ -77,7 +81,7 @@ class ForexSignalEngine:
         # Scan lock to prevent concurrent scans (rate limit protection)
         self._scan_lock = asyncio.Lock()
         self._last_scan_time = None
-        self._min_scan_interval = 30  # Minimum 30 seconds between scans
+        self._min_scan_interval = 300  # Minimum 5 MINUTES between scans (was 30s) - saves API calls
         
     async def initialize(self):
         """Initialize Forex client and load today's signals"""
@@ -133,9 +137,9 @@ class ForexSignalEngine:
                 logger.info("🔄 Daily Forex signal counter reset")
             
             # Check if we've hit daily limit
-            approved_today = len([s for s in self.signals_today if s.status.value == 'approved'])
-            if approved_today >= self.max_signals_per_day:
-                logger.info(f"✋ Daily Forex signal limit reached ({approved_today}/{self.max_signals_per_day})")
+            signals_today_count = len(self.signals_today)
+            if signals_today_count >= self.max_signals_per_day:
+                logger.info(f"✋ Daily Forex signal limit reached ({signals_today_count}/{self.max_signals_per_day})")
                 return []
             
             logger.info("🔍 Scanning Forex markets for opportunities...")
@@ -143,17 +147,22 @@ class ForexSignalEngine:
             all_candidates = []
             symbols = await self.forex_client.get_all_symbols()
             
-            # Analyze each Forex pair
+            # OPTIMIZATION: Only scan 1h and 4h for Forex (skip 15m to save API calls)
+            # Forex moves slower than crypto - 1h/4h are sufficient for quality signals
             for symbol in symbols:
                 try:
-                    # Get timeframe-specific signals
-                    for timeframe in ['15m', '1h', '4h']:
+                    # Get timeframe-specific signals (skip 15m to save API calls)
+                    for timeframe in ['1h', '4h']:
                         signal = await self.analyze_pair(symbol, timeframe)
                         if signal:
                             all_candidates.append(signal)
                             logger.info(f"📊 Forex candidate: {symbol} {timeframe} (confidence: {signal.confidence:.1f}%)")
+                        # Small delay between timeframes to avoid burst requests
+                        await asyncio.sleep(0.5)
                 except Exception as e:
                     logger.error(f"Error analyzing Forex pair {symbol}: {e}")
+                # Delay between symbols to respect rate limits
+                await asyncio.sleep(1)
             
             if not all_candidates:
                 logger.info("No Forex signals found this scan")
@@ -172,8 +181,7 @@ class ForexSignalEngine:
             for signal in final_signals:
                 signal.market_type = MarketType.FOREX  # Mark as Forex
                 signal.id = str(uuid.uuid4())
-                signal.status = SignalStatus.APPROVED  # Auto-approve like crypto
-            signal.approved_at = datetime.utcnow()
+                signal.status = SignalStatus.PENDING  # Send to admin for approval (same as crypto)
             
             # Validate
             is_valid, validation_result = await self.validation_pipeline.validate(signal)

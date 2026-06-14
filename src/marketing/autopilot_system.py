@@ -40,6 +40,8 @@ class PerformanceTracker:
         # Track price extremes for pending limit orders so brief touches aren't missed
         self.pending_limit_extremes: Dict[str, dict] = {}  # signal_id -> {'lowest': float, 'highest': float}
         self.performance_log: List[Dict] = []
+        # CRITICAL: Lock to prevent concurrent check_all_signals from causing duplicate TP/SL notifications
+        self._check_lock = asyncio.Lock()
         
     async def track_signal(self, signal: TradingSignal):
         """Start tracking an approved signal for TP/SL hits"""
@@ -205,74 +207,88 @@ class PerformanceTracker:
     
     async def check_all_signals(self):
         """Check all active signals for TP/SL hits and update P&L. Also check pending limit orders."""
-        # Check pending limit orders - move to active when limit price is hit
-        for signal_id in list(self.pending_limit_orders.keys()):
-            await self._check_limit_order_hit(signal_id)
+        # CRITICAL: Prevent concurrent execution — two callers hitting the same signal
+        # at the same time causes duplicate Telegram notifications (race condition)
+        if self._check_lock.locked():
+            logger.warning("🛡️ Autopilot check already in progress, skipping concurrent request")
+            return
         
-        # Check active signals
-        for signal_id in list(self.active_signals.keys()):
-            signal_data = self.active_signals[signal_id]
-            signal = signal_data['signal']
+        async with self._check_lock:
+            # Check pending limit orders - move to active when limit price is hit
+            for signal_id in list(self.pending_limit_orders.keys()):
+                await self._check_limit_order_hit(signal_id)
             
-            # Stale recovery: signal loaded from DB with TP/SL already hit but not closed
-            # (previous _close_signal may have crashed before updating DB status)
-            # GUARD: only recover if signal status is NOT already CLOSED in DB
-            if signal.status != SignalStatus.CLOSED and getattr(signal, 'tp3_hit', False):
-                tp3 = signal.take_profit_3 or signal.take_profit_2 or signal.take_profit_1
-                entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
-                if entry and entry != 0 and tp3:
-                    if signal.direction.value == "SHORT":
-                        pnl = ((entry - tp3) / entry) * 100
+            # Check active signals
+            for signal_id in list(self.active_signals.keys()):
+                signal_data = self.active_signals[signal_id]
+                signal = signal_data['signal']
+
+                # DEFENSE: Skip signals that were manually closed via dashboard
+                # (dashboard updates DB but old object may still be in memory)
+                if signal.status == SignalStatus.CLOSED:
+                    logger.warning(f"🛡️ Removing {signal.symbol} from autopilot: status is CLOSED (manual close)")
+                    del self.active_signals[signal_id]
+                    continue
+
+                # Stale recovery: signal loaded from DB with TP/SL already hit but not closed
+                # (previous _close_signal may have crashed before updating DB status)
+                # GUARD: only recover if signal status is NOT already CLOSED in DB
+                if signal.status != SignalStatus.CLOSED and getattr(signal, 'tp3_hit', False):
+                    tp3 = signal.take_profit_3 or signal.take_profit_2 or signal.take_profit_1
+                    entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
+                    if entry and entry != 0 and tp3:
+                        if signal.direction.value == "SHORT":
+                            pnl = ((entry - tp3) / entry) * 100
+                        else:
+                            pnl = ((tp3 - entry) / entry) * 100
                     else:
-                        pnl = ((tp3 - entry) / entry) * 100
-                else:
-                    pnl = 0.0
-                logger.warning(f"🔄 Stale signal recovery: {signal.symbol} has TP3 hit but was not closed. Closing now.")
-                await self._close_signal(signal_id, tp3 or entry, pnl, tp_level=3)
-                continue
-            
-            if signal.status != SignalStatus.CLOSED and getattr(signal, 'stop_hit', False):
-                entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
-                sl = signal.stop_loss
-                if entry and entry != 0 and sl:
-                    if signal.direction.value == "SHORT":
-                        pnl = ((entry - sl) / entry) * 100
+                        pnl = 0.0
+                    logger.warning(f"🔄 Stale signal recovery: {signal.symbol} has TP3 hit but was not closed. Closing now.")
+                    await self._close_signal(signal_id, tp3 or entry, pnl, tp_level=3)
+                    continue
+                
+                if signal.status != SignalStatus.CLOSED and getattr(signal, 'stop_hit', False):
+                    entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
+                    sl = signal.stop_loss
+                    if entry and entry != 0 and sl:
+                        if signal.direction.value == "SHORT":
+                            pnl = ((entry - sl) / entry) * 100
+                        else:
+                            pnl = ((sl - entry) / entry) * 100
                     else:
-                        pnl = ((sl - entry) / entry) * 100
-                else:
-                    pnl = 0.0
-                logger.warning(f"🔄 Stale signal recovery: {signal.symbol} has SL hit but was not closed. Closing now.")
-                await self._close_signal(signal_id, sl or entry, pnl, sl_hit=True)
-                continue
-            
-            # CRITICAL: Auto-close stale signals that have been open too long without TP/SL hit
-            # This catches signals that somehow bypassed SL/TP detection (scanner failures, state bugs, etc.)
-            entry_time = signal_data['entry_time']
-            elapsed_hours = (datetime.utcnow() - entry_time).total_seconds() / 3600
-            if elapsed_hours > 48:
-                entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
-                sl = signal.stop_loss
-                if entry and entry != 0 and sl:
-                    if signal.direction.value == "SHORT":
-                        pnl = ((entry - sl) / entry) * 100
+                        pnl = 0.0
+                    logger.warning(f"🔄 Stale signal recovery: {signal.symbol} has SL hit but was not closed. Closing now.")
+                    await self._close_signal(signal_id, sl or entry, pnl, sl_hit=True)
+                    continue
+                
+                # CRITICAL: Auto-close stale signals that have been open too long without TP/SL hit
+                # This catches signals that somehow bypassed SL/TP detection (scanner failures, state bugs, etc.)
+                entry_time = signal_data['entry_time']
+                elapsed_hours = (datetime.utcnow() - entry_time).total_seconds() / 3600
+                if elapsed_hours > 48:
+                    entry = signal_data.get('entry_price', signal.actual_entry or signal.entry_price)
+                    sl = signal.stop_loss
+                    if entry and entry != 0 and sl:
+                        if signal.direction.value == "SHORT":
+                            pnl = ((entry - sl) / entry) * 100
+                        else:
+                            pnl = ((sl - entry) / entry) * 100
                     else:
-                        pnl = ((sl - entry) / entry) * 100
-                else:
-                    pnl = 0.0
-                logger.warning(f"🔄 STALE AUTO-CLOSE: {signal.symbol} active for {elapsed_hours:.1f}h with no TP/SL hit. Forcing SL close.")
-                await self._close_signal(signal_id, sl or entry or signal.entry_price, pnl, sl_hit=True)
-                continue
+                        pnl = 0.0
+                    logger.warning(f"🔄 STALE AUTO-CLOSE: {signal.symbol} active for {elapsed_hours:.1f}h with no TP/SL hit. Forcing SL close.")
+                    await self._close_signal(signal_id, sl or entry or signal.entry_price, pnl, sl_hit=True)
+                    continue
+                
+                await self._check_signal(signal_id)
             
-            await self._check_signal(signal_id)
-        
-        # Save updated signals to DB — ONLY signals that had state changes
-        dirty_signals = [data['signal'] for data in self.active_signals.values() if data.get('dirty', False)]
-        if dirty_signals:
-            await self.db.save_signals_batch(dirty_signals)
-            # Reset dirty flags after successful save
-            for data in self.active_signals.values():
-                data['dirty'] = False
-            logger.info(f"💾 Saved {len(dirty_signals)} dirty signals to DB")
+            # Save updated signals to DB — ONLY signals that had state changes
+            dirty_signals = [data['signal'] for data in self.active_signals.values() if data.get('dirty', False)]
+            if dirty_signals:
+                await self.db.save_signals_batch(dirty_signals)
+                # Reset dirty flags after successful save
+                for data in self.active_signals.values():
+                    data['dirty'] = False
+                logger.info(f"💾 Saved {len(dirty_signals)} dirty signals to DB")
         
         active_count = len(self.active_signals)
         pending_count = len(self.pending_limit_orders)
@@ -283,6 +299,13 @@ class PerformanceTracker:
         """Check if a signal has hit TP or SL"""
         signal_data = self.active_signals[signal_id]
         signal = signal_data['signal']
+
+        # DEFENSE: Skip if signal was already closed (e.g. manual dashboard close)
+        if signal.status == SignalStatus.CLOSED:
+            logger.warning(f"🛡️ Skipping check for {signal.symbol}: already CLOSED")
+            del self.active_signals[signal_id]
+            return
+
         entry_price = signal_data['entry_price']
         highest_price = signal_data['highest_price']
         lowest_price = signal_data['lowest_price']
@@ -308,22 +331,18 @@ class PerformanceTracker:
             tp2 = signal.take_profit_2
             tp3 = signal.take_profit_3
             
-            # Update tracked price extremes for this signal
+            # Update tracked price extremes for this signal (in-memory only —
+            # do NOT mark dirty; MFE/MAE/MDD tracking should not trigger DB writes every minute)
             new_high = max(highest_price, current_price)
             new_low = min(lowest_price, current_price)
-            if new_high != highest_price or new_low != lowest_price:
-                signal_data['dirty'] = True
             signal_data['highest_price'] = new_high
             signal_data['lowest_price'] = new_low
-            
-            # Track MDD / MAE / MFE on the signal object
+
+            # Track MDD / MAE / MFE on the signal object (in-memory only)
             if entry and entry != 0:
                 if direction == SignalDirection.LONG:
-                    # MFE = best unrealized profit
                     mfe_pct = ((signal_data['highest_price'] - entry) / entry) * 100
-                    # MAE = worst unrealized loss
                     mae_pct = ((signal_data['lowest_price'] - entry) / entry) * 100
-                    # MDD = max drawdown from peak
                     if signal_data['highest_price'] > entry:
                         mdd_pct = ((current_price - signal_data['highest_price']) / signal_data['highest_price']) * 100
                     else:
@@ -335,17 +354,15 @@ class PerformanceTracker:
                         mdd_pct = ((signal_data['lowest_price'] - current_price) / signal_data['lowest_price']) * 100
                     else:
                         mdd_pct = mae_pct
-                
+
                 old_mfe = signal.max_favorable_excursion
                 old_mae = signal.max_adverse_excursion
                 old_mdd = signal.max_drawdown_percent
                 signal.max_favorable_excursion = max(old_mfe or mfe_pct, mfe_pct)
                 signal.max_adverse_excursion = min(old_mae or mae_pct, mae_pct)
                 signal.max_drawdown_percent = min(old_mdd or mdd_pct, mdd_pct)
-                if (signal.max_favorable_excursion != old_mfe or
-                    signal.max_adverse_excursion != old_mae or
-                    signal.max_drawdown_percent != old_mdd):
-                    signal_data['dirty'] = True
+                # NOTE: deliberately NOT marking dirty for MFE/MAE/MDD changes —
+                # these are analytics metrics that don't need per-minute DB persistence
             
             safe_entry = entry if entry and entry != 0 else 1.0  # avoid div by zero
             

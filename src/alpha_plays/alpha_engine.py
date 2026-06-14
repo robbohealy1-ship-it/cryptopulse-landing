@@ -54,7 +54,8 @@ class ActiveAlphaPlay:
     partial_sell_1_done: bool = False  # Sold 50% at 2x
     partial_sell_2_done: bool = False  # Sold 25% at 5x
     is_degen: bool = False  # Use degen strategy (no hard SL, trailing stop, partial sells)
-    
+    _dirty: bool = False  # True when structural change requires DB persistence
+
     def __post_init__(self):
         if self.approved_at is None:
             self.approved_at = datetime.utcnow()
@@ -734,12 +735,16 @@ class AlphaPlaysEngine:
             return None
     
     async def _persist_play(self, play: ActiveAlphaPlay):
-        """Save play state to DB."""
-        if self.db:
-            try:
-                await self.db.save_alpha_play(play)
-            except Exception as e:
-                logger.warning(f"Could not persist alpha play to DB: {e}")
+        """Save play state to DB only if it has structural changes (_dirty=True)."""
+        if not self.db:
+            return
+        if not getattr(play, '_dirty', False):
+            return
+        try:
+            await self.db.save_alpha_play(play)
+            play._dirty = False
+        except Exception as e:
+            logger.warning(f"Could not persist alpha play to DB: {e}")
     
     async def _check_alpha_limit_hit(self, play_id: str):
         """Check if an alpha limit order's entry price has been hit."""
@@ -806,6 +811,7 @@ class AlphaPlaysEngine:
                     logger.warning(f"Could not send alpha limit fill VIP notification: {e}")
             
             # Save to DB
+            play._dirty = True
             if self.db:
                 try:
                     await self.db.save_alpha_play(play)
@@ -858,9 +864,6 @@ class AlphaPlaysEngine:
                 if play.highest_price is None or current_price > play.highest_price:
                     play.highest_price = current_price
                 
-                # Persist every cycle
-                await self._persist_play(play)
-                
                 # ─── RUG PROTECTION (all plays) ───
                 entry_liq = play.entry_liquidity or 0
                 curr_liq = current_liquidity or 0
@@ -894,6 +897,7 @@ class AlphaPlaysEngine:
                     if not play.partial_sell_1_done and tp1 > 0:
                         if current_price >= tp1:
                             play.partial_sell_1_done = True
+                            play._dirty = True
                             await self._persist_play(play)
                             await self._notify_partial_sell(play, 1, 50, "2x")
                     
@@ -902,6 +906,7 @@ class AlphaPlaysEngine:
                     if not play.partial_sell_2_done and play.partial_sell_1_done and tp2 > 0:
                         if current_price >= tp2:
                             play.partial_sell_2_done = True
+                            play._dirty = True
                             await self._persist_play(play)
                             await self._notify_partial_sell(play, 2, 25, "5x")
                     
@@ -998,6 +1003,7 @@ class AlphaPlaysEngine:
         """Generic close with VIP notification."""
         play.status = reason_code.lower()
         play.closed_at = datetime.utcnow()
+        play._dirty = True
         await self._persist_play(play)
         self.active_plays.pop(play.id, None)
         
@@ -1010,6 +1016,7 @@ class AlphaPlaysEngine:
         """Handle TP1 hit (standard non-degen plays only)"""
         play.status = 'tp1_hit'
         play.tp1_hit_at = datetime.utcnow()
+        play._dirty = True
         await self._persist_play(play)
         
         logger.info(f"🎯 Alpha TP1 HIT: {play.candidate.symbol} at ${play.current_price:.6f}")

@@ -81,7 +81,9 @@ class EnhancedContextEngine:
             return []  # Skip if NewsAPI not configured
         
         cache_key = 'newsapi'
-        if self._is_cache_valid(cache_key):
+        # Use longer cache for NewsAPI to stay within free tier (100 req/24h)
+        # Extended to 120 minutes (2 hours) to minimize rate limit hits
+        if self._is_cache_valid(cache_key, duration_minutes=120):
             return self.caches[cache_key]
         
         try:
@@ -863,11 +865,12 @@ class EnhancedContextEngine:
     
     # ==================== CACHE MANAGEMENT ====================
     
-    def _is_cache_valid(self, key: str) -> bool:
+    def _is_cache_valid(self, key: str, duration_minutes: int = None) -> bool:
         """Check if cache entry is still valid"""
         if key not in self.last_fetches:
             return False
-        return datetime.utcnow() - self.last_fetches[key] < self.cache_duration
+        duration = timedelta(minutes=duration_minutes) if duration_minutes else self.cache_duration
+        return datetime.utcnow() - self.last_fetches[key] < duration
     
     def _update_cache(self, key: str, data):
         """Update cache with new data"""

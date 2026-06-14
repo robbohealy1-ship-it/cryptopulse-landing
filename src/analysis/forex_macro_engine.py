@@ -210,6 +210,11 @@ class ForexMacroEngine:
                         current = float(df['close'].iloc[-1])
                         prev = float(df['close'].iloc[-5])
                         
+                        # Validate DXY is in reasonable range (real DXY is ~95-105)
+                        if current < 70 or current > 130:
+                            logger.debug(f"DXY ({sym}) returned invalid value {current:.2f}, skipping")
+                            continue
+                        
                         if current > prev * 1.002:
                             trend = 'bullish'
                         elif current < prev * 0.998:

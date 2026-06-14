@@ -1,0 +1,58 @@
+═══════════════════════════════════════════════════════════════
+  CRYPTOPULSE SIGNALS - QUICK ACCESS LINKS
+═══════════════════════════════════════════════════════════════
+
+📱 ORACLE DASHBOARD (PRODUCTION - MOBILE & DESKTOP)
+───────────────────────────────────────────────────────────────
+URL: http://141.147.114.169:8081
+
+✅ Full Telegram notifications
+✅ Works on phone/tablet
+✅ Live trading data
+✅ 24/7 uptime
+✅ Partial close with Telegram alerts
+
+Use this for: Production trading, Telegram testing, mobile access
+
+
+💻 LOCAL DASHBOARD (DEVELOPMENT - DESKTOP ONLY)
+───────────────────────────────────────────────────────────────
+URL: http://localhost:8081
+Start: START_DASHBOARD.bat
+
+❌ No Telegram notifications (by design)
+❌ Desktop only (not accessible on phone)
+✅ Quick UI testing
+✅ Development/debugging
+
+Use this for: UI testing, code changes before deploying
+
+
+🚀 DEPLOYMENT
+───────────────────────────────────────────────────────────────
+Deploy to Oracle: deploy_oracle.bat
+
+Run this after making code changes to update the live bot.
+
+
+📊 ORACLE SERVER INFO
+───────────────────────────────────────────────────────────────
+IP: 141.147.114.169
+Port: 8081
+SSH Key: ssh-key-2026-05-20 (2).key
+
+
+📱 MOBILE SETUP (ADD TO HOME SCREEN)
+───────────────────────────────────────────────────────────────
+iPhone:
+1. Open http://141.147.114.169:8081 in Safari
+2. Tap Share button → "Add to Home Screen"
+3. Name it "CryptoPulse Oracle"
+
+Android:
+1. Open http://141.147.114.169:8081 in Chrome
+2. Tap menu (3 dots) → "Add to Home Screen"
+3. Name it "CryptoPulse Oracle"
+
+
+═══════════════════════════════════════════════════════════════

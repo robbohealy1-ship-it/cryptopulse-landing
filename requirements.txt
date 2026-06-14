@@ -63,7 +63,7 @@ matplotlib==3.8.2
 
 # Social Media Automation (optional)
 tweepy==4.14.0        # Twitter/X posting
-praw==7.7.1           # Reddit posting
+praw==7.8.2           # Reddit posting (updated from 7.7.1)
 discord-webhook==1.3.0 # Discord webhooks
 
 # Validation

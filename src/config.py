@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # Forex Data APIs (free tier)
     ALPHA_VANTAGE_API_KEY: Optional[str] = "demo"  # Get free key at alphavantage.co
     TWELVE_DATA_API_KEY: Optional[str] = "demo"    # Get free key at twelvedata.com
+    FINNHUB_API_KEY: Optional[str] = None          # Get free key at finnhub.io (60 calls/min)
+    GOLD_API_KEY: Optional[str] = None             # Get FREE key at gold-api.com (unlimited XAU/USD prices)
+    EXCHANGE_RATE_API_KEY: Optional[str] = None    # Get FREE key at exchangerate-api.com (1500/mo currency rates)
     
     NEWS_API_KEY: Optional[str] = None
     
@@ -66,7 +69,7 @@ class Settings(BaseSettings):
     MIN_DAILY_VOLUME_USD: float = 5000000  # Lowered from $10M to $5M for more pairs
     
     # NEW: Signal Mode (strict/balanced/aggressive)
-    SIGNAL_MODE: str = "strict"  # strict=85+, balanced=75+, aggressive=65+
+    SIGNAL_MODE: str = "balanced"  # strict=85+, balanced=75+, aggressive=65+
     
     # VIP-exclusive signals (higher quality)
     VIP_MIN_CONFIDENCE: int = 90

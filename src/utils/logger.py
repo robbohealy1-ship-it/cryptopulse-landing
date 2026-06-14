@@ -16,7 +16,7 @@ logger.add(
 )
 
 logger.add(
-    "logs/signalforge_{time:YYYY-MM-DD}.log",
+    "logs/cryptopulse_{time:YYYY-MM-DD}.log",
     rotation="00:00",
     retention="30 days",
     compression="zip",

@@ -1,3 +1,9 @@
+"""
+CryptoPulse Signals — Supabase Database Client
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
+"""
 from supabase import create_client, Client
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta
@@ -104,6 +110,10 @@ class SupabaseClient:
                 data['chart_url'] = signal.chart_url
             if signal.chart_path:
                 data['chart_path'] = signal.chart_path
+            
+            # Partial close metadata
+            if hasattr(signal, 'metadata') and signal.metadata is not None:
+                data['metadata'] = signal.metadata
             
             # Try to save with progressive column stripping
             # If a column doesn't exist in the DB, we extract its name from the error
@@ -245,8 +255,9 @@ class SupabaseClient:
         try:
             start = datetime.utcnow() - timedelta(days=days)
             result = self.client.table('signals').select('*')\
-                .gte('created_at', start.isoformat())\
-                .order('created_at', desc=True)\
+                .eq('status', 'closed')\
+                .gte('closed_at', start.isoformat())\
+                .order('closed_at', desc=True)\
                 .limit(200)\
                 .execute()
             signals = [self._dict_to_signal(data) for data in result.data]
@@ -416,27 +427,38 @@ class SupabaseClient:
             return []
     
     async def get_daily_stats(self, date: datetime = None) -> Dict:
-        """Get statistics for a specific day"""
+        """Get statistics for a specific day — includes signals CLOSED today,
+        regardless of when they were created."""
         try:
             from datetime import datetime, timedelta
             if date is None:
                 date = datetime.utcnow()
-            
+
             start = date.replace(hour=0, minute=0, second=0, microsecond=0)
             end = start + timedelta(days=1)
-            
-            result = self.client.table('signals').select('*')\
+
+            # Fetch signals created today (for scan/approval metrics)
+            created_result = self.client.table('signals').select('*')\
                 .gte('created_at', start.isoformat())\
                 .lt('created_at', end.isoformat())\
                 .execute()
-            
-            signals = result.data
-            
+            created_signals = created_result.data or []
+
+            # Fetch signals closed today (for P&L and win/loss metrics)
+            closed_result = self.client.table('signals').select('*')\
+                .eq('status', 'closed')\
+                .gte('closed_at', start.isoformat())\
+                .lt('closed_at', end.isoformat())\
+                .execute()
+            closed_signals = closed_result.data or []
+
+            # Merge: created_signals for scan counts, closed_signals for P&L
+            signals = created_signals
             approved = [s for s in signals if s.get('admin_approved')]
             rejected = [s for s in signals if s.get('admin_rejected')]
-            closed = [s for s in signals if s.get('status') == 'closed']
             active = [s for s in signals if s.get('status') == 'active']
-            
+
+            closed = closed_signals
             wins = len([s for s in closed if (s.get('pnl_percent') or 0) > 0])
             
             # TP Hit tracking
@@ -711,9 +733,10 @@ class SupabaseClient:
             return True
         except Exception as e:
             error_str = str(e)
-            # Handle missing columns by stripping them and retrying
-            if "Could not find" in error_str and "column" in error_str:
-                # Extract column name from error like: "Could not find the 'duration_minutes' column"
+            # Handle missing columns by stripping them and retrying in a loop
+            max_retries = 5
+            retry_count = 0
+            while "Could not find" in error_str and "column" in error_str and retry_count < max_retries:
                 import re
                 col_match = re.search(r"'([^']+)'\s+column", error_str)
                 if col_match:
@@ -723,16 +746,19 @@ class SupabaseClient:
                         data.pop(missing_col)
                         try:
                             self.client.table('signals').update(data).eq('id', signal_id).execute()
-                            logger.info(f"Signal {signal_id} result updated after stripping missing column")
+                            logger.info(f"Signal {signal_id} result updated after stripping missing columns")
                             return True
                         except Exception as e2:
-                            logger.error(f"Retry failed after stripping {missing_col}: {e2}")
+                            error_str = str(e2)
+                            retry_count += 1
+                            continue
                     else:
-                        # Column not in our data but in some other context - log and continue
                         logger.warning(f"DB reports missing column '{missing_col}' but it's not in our update data")
+                        break
                 else:
                     logger.warning(f"Could not parse missing column from error: {error_str}")
-            logger.error(f"Error updating signal result: {e}")
+                    break
+            logger.error(f"Error updating signal result: {error_str}")
             return False
     
     async def get_trials_expiring_soon(self, days: int = 2) -> List[Dict]:
@@ -878,6 +904,7 @@ class SupabaseClient:
             is_limit_order=data.get('is_limit_order', False),
             chart_url=data.get('chart_url'),
             chart_path=data.get('chart_path'),
+            metadata=data.get('metadata'),
         )
 
     # ==================== ALPHA/DEGEN PLAYS ====================
@@ -922,6 +949,17 @@ class SupabaseClient:
                 if candidate is not None:
                     return getattr(candidate, field, default)
                 return default
+
+            # VALIDATION: reject corrupted plays before writing to DB
+            entry_price = _get('entry_price')
+            stop_loss = _get('stop_loss')
+            symbol = _get('symbol')
+            if not symbol:
+                logger.warning("⚠️ Skipping save_alpha_play: missing symbol")
+                return False
+            if (entry_price is None or entry_price <= 0) and (stop_loss is None or stop_loss <= 0):
+                logger.warning(f"⚠️ Skipping save_alpha_play for {symbol}: entry_price={entry_price}, stop_loss={stop_loss} — corrupted data")
+                return False
             
             # Serialize full candidate as JSON for reconstruction on restart
             # Also embed play-level metadata (approved_at, closed_at, etc.) since

@@ -39,8 +39,8 @@ class ForexMarketAdjustments:
     
     # Volatility adjustments (Forex moves smaller than crypto)
     VOLATILITY_MULTIPLIERS = {
-        'stop_loss': 0.6,      # Tighter stops (60% of crypto)
-        'take_profit': 0.7,    # Smaller targets (70% of crypto)
+        'stop_loss': 0.85,     # Modestly tighter stops (85% of crypto)
+        'take_profit': 0.9,    # Modestly smaller targets (90% of crypto)
         'atr_multiplier': 1.2, # Less aggressive ATR (vs 1.5x for crypto)
     }
     
@@ -97,21 +97,21 @@ class ForexMarketAdjustments:
     @staticmethod
     def adjust_stop_loss(crypto_sl_distance: float, symbol: str) -> float:
         """
-        Adjust stop loss for Forex (tighter than crypto)
-        
+        Adjust stop loss for Forex (modestly tighter than crypto)
+
         Example:
         - Crypto: 2% SL
-        - Forex: 0.6 * 2% = 1.2% SL (tighter)
+        - Forex: 0.85 * 2% = 1.7% SL (modestly tighter)
         """
         multiplier = ForexMarketAdjustments.VOLATILITY_MULTIPLIERS['stop_loss']
         
         # Gold (XAUUSD) moves more like crypto - use less aggressive tightening
         if 'XAU' in symbol or 'XAG' in symbol:
-            multiplier = 0.8
+            multiplier = 0.9
         
         # Indices move medium volatility
         if any(idx in symbol for idx in ['NAS100', 'US30', 'SPX500']):
-            multiplier = 0.75
+            multiplier = 0.9
         
         adjusted_sl = crypto_sl_distance * multiplier
         logger.debug(f"Forex SL adjustment: {crypto_sl_distance:.4f} -> {adjusted_sl:.4f} ({symbol})")
@@ -120,21 +120,21 @@ class ForexMarketAdjustments:
     @staticmethod
     def adjust_take_profit(crypto_tp_distance: float, symbol: str) -> float:
         """
-        Adjust take profit for Forex (smaller targets than crypto)
-        
+        Adjust take profit for Forex (modestly smaller targets than crypto)
+
         Example:
         - Crypto: 3% TP
-        - Forex: 0.7 * 3% = 2.1% TP (smaller)
+        - Forex: 0.9 * 3% = 2.7% TP (modestly smaller)
         """
         multiplier = ForexMarketAdjustments.VOLATILITY_MULTIPLIERS['take_profit']
         
         # Gold moves more like crypto
         if 'XAU' in symbol or 'XAG' in symbol:
-            multiplier = 0.85
+            multiplier = 0.95
         
         # Indices
         if any(idx in symbol for idx in ['NAS100', 'US30', 'SPX500']):
-            multiplier = 0.8
+            multiplier = 0.9
         
         adjusted_tp = crypto_tp_distance * multiplier
         logger.debug(f"Forex TP adjustment: {crypto_tp_distance:.4f} -> {adjusted_tp:.4f} ({symbol})")

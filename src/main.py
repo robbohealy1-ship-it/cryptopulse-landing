@@ -1,3 +1,9 @@
+"""
+CryptoPulse Signals — Main Orchestrator
+Copyright (c) 2026 CryptoPulse Signals. All rights reserved.
+Unauthorized copying, distribution, or modification of this software,
+via any medium, is strictly prohibited. Proprietary and confidential.
+"""
 import asyncio
 import os
 import random
@@ -6,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime, timedelta, timezone
 from src.engine.signal_engine import SignalEngine
 from src.engine.forex_signal_engine import ForexSignalEngine
+from src.engine.sniper_signal_engine import SniperSignalEngine
 from src.telegram_bot.admin_bot import AdminBot
 from src.telegram_bot.vip_bot import VIPBot
 from src.telegram_bot.channel_publisher import ChannelPublisher
@@ -26,7 +33,8 @@ from src.marketing.pro_features import (
     GiveawayEngine, BonusReportEngine, PrioritySupport
 )
 from src.database.supabase_client import SupabaseClient
-from src.models.signal import SignalStatus
+from src.exchange.forex_client import ForexClient
+from src.models.signal import SignalStatus, MarketType
 from src.utils.logger import get_logger
 from src.utils.validators import run_all_validations
 from src.utils.cleanup import CleanupManager
@@ -35,6 +43,7 @@ from src.utils.ai_content_generator import AIContentGenerator
 from src.config import settings
 from src.admin.dashboard_server import start_dashboard
 from src.alpha_plays import AlphaPlaysEngine, AlphaPublisher
+from src.engine.trade_management_engine import TradeManagementEngine
 
 logger = get_logger(__name__)
 
@@ -46,6 +55,7 @@ class CryptoPulseOrchestrator:
         
         self.signal_engine = SignalEngine(db=self.db)
         self.forex_signal_engine = ForexSignalEngine(db=self.db)  # Forex signal generation
+        self.sniper_engine = None  # Initialized after signal_engine (needs scanner + technical analyzer)
         self.admin_bot = AdminBot(
             signal_callback=self.on_signal_approved,
             rejection_callback=self.on_signal_rejected,
@@ -205,6 +215,23 @@ class CryptoPulseOrchestrator:
             )
             logger.info("🚀 Campaign Engine initialized — signal marketing active")
             
+            # Initialize Sniper Signal Engine (Pine Script strategy)
+            self.sniper_engine = SniperSignalEngine(
+                scanner=self.signal_engine.scanner,
+                technical_analyzer=self.signal_engine.technical_analyzer,
+                context_engine=self.signal_engine.context_engine,
+                db=self.db
+            )
+            logger.info("🎯 Sniper Signal Engine initialized — EMA21 + pivot structure strategy active")
+            
+            # Initialize Trade Management Engine (active trade monitoring & recommendations)
+            self.trade_manager = TradeManagementEngine(
+                scanner=self.signal_engine.scanner,
+                technical_analyzer=self.signal_engine.technical_analyzer,
+                context_engine=self.signal_engine.context_engine
+            )
+            logger.info("📈 Trade Management Engine initialized — active trade recommendations ready")
+            
             # Initialize AutoPilot System with FOMO callback
             self.autopilot = AutoPilotSystem(
                 scanner=self.signal_engine.scanner,
@@ -344,6 +371,15 @@ class CryptoPulseOrchestrator:
             CronTrigger(hour='*/1'),
             id='check_stale_limits',
             name='Check stale limit orders',
+            replace_existing=True
+        )
+        
+        # Active trade management: check every 5 min for scale out / close / move stop signals
+        self.scheduler.add_job(
+            self.check_trade_management,
+            CronTrigger(minute='*/5'),
+            id='check_trade_mgmt',
+            name='Check active trade management',
             replace_existing=True
         )
         
@@ -572,9 +608,27 @@ class CryptoPulseOrchestrator:
     async def scan_4h(self):
         logger.info("🔍 Scanning 4h timeframe (position trades, 3R minimum)...")
         try:
-            candidates = await self.signal_engine.scan_for_signals('4h')
-            if candidates:
-                logger.info(f"✅ 4h scan found {len(candidates)} position candidate(s)")
+            # Try sniper engine first (82%+ required)
+            candidates = []
+            if self.sniper_engine:
+                try:
+                    sniper_candidates = await self.sniper_engine.scan_for_signals(
+                        symbols=self.signal_engine.scanner.liquid_pairs,
+                        timeframe='4h',
+                        market_type=MarketType.CRYPTO
+                    )
+                    if sniper_candidates:
+                        candidates.extend(sniper_candidates)
+                        logger.info(f"🎯 Sniper engine found {len(sniper_candidates)} 4h candidate(s)")
+                except Exception as e:
+                    logger.warning(f"Sniper engine 4h scan failed: {e}")
+            
+            # Fallback to existing engine if sniper found nothing
+            if not candidates:
+                candidates = await self.signal_engine.scan_for_signals('4h')
+                if candidates:
+                    logger.info(f"✅ 4h scan found {len(candidates)} position candidate(s) (backup engine)")
+            
             await self.process_candidates(candidates)
             await self._process_free_real_candidates()
             await self._publish_teasers('4h')
@@ -584,9 +638,27 @@ class CryptoPulseOrchestrator:
     async def scan_daily(self):
         logger.info("🔍 Scanning daily timeframe (macro positions, 4R minimum)...")
         try:
-            candidates = await self.signal_engine.scan_for_signals('1d')
-            if candidates:
-                logger.info(f"✅ Daily scan found {len(candidates)} macro candidate(s)")
+            # Try sniper engine first (80%+ required)
+            candidates = []
+            if self.sniper_engine:
+                try:
+                    sniper_candidates = await self.sniper_engine.scan_for_signals(
+                        symbols=self.signal_engine.scanner.liquid_pairs,
+                        timeframe='1d',
+                        market_type=MarketType.CRYPTO
+                    )
+                    if sniper_candidates:
+                        candidates.extend(sniper_candidates)
+                        logger.info(f"🎯 Sniper engine found {len(sniper_candidates)} daily candidate(s)")
+                except Exception as e:
+                    logger.warning(f"Sniper engine daily scan failed: {e}")
+            
+            # Fallback to existing engine if sniper found nothing
+            if not candidates:
+                candidates = await self.signal_engine.scan_for_signals('1d')
+                if candidates:
+                    logger.info(f"✅ Daily scan found {len(candidates)} macro candidate(s) (backup engine)")
+            
             await self.process_candidates(candidates)
             await self._process_free_real_candidates()
             await self._publish_teasers('1d')
@@ -601,9 +673,27 @@ class CryptoPulseOrchestrator:
     async def scan_15m(self):
         logger.info("🔍 Scanning 15m timeframe (institutional, liquidity + session)...")
         try:
-            candidates = await self.signal_engine.scan_for_signals('15m')
-            if candidates:
-                logger.info(f"✅ 15m scan found {len(candidates)} candidate(s)")
+            # Try sniper engine first (only perfect setups 95%+)
+            candidates = []
+            if self.sniper_engine:
+                try:
+                    sniper_candidates = await self.sniper_engine.scan_for_signals(
+                        symbols=self.signal_engine.scanner.liquid_pairs,
+                        timeframe='15m',
+                        market_type=MarketType.CRYPTO
+                    )
+                    if sniper_candidates:
+                        candidates.extend(sniper_candidates)
+                        logger.info(f"🎯 Sniper engine found {len(sniper_candidates)} 15m candidate(s)")
+                except Exception as e:
+                    logger.warning(f"Sniper engine 15m scan failed: {e}")
+            
+            # Fallback to existing engine if sniper found nothing
+            if not candidates:
+                candidates = await self.signal_engine.scan_for_signals('15m')
+                if candidates:
+                    logger.info(f"✅ 15m scan found {len(candidates)} candidate(s) (backup engine)")
+            
             await self.process_candidates(candidates)
             await self._process_free_real_candidates()
             await self._publish_teasers('15m')
@@ -613,9 +703,27 @@ class CryptoPulseOrchestrator:
     async def scan_1h(self):
         logger.info("🔍 Scanning 1h timeframe (institutional, OB + structure)...")
         try:
-            candidates = await self.signal_engine.scan_for_signals('1h')
-            if candidates:
-                logger.info(f"✅ 1h scan found {len(candidates)} candidate(s)")
+            # Try sniper engine first (85%+ required)
+            candidates = []
+            if self.sniper_engine:
+                try:
+                    sniper_candidates = await self.sniper_engine.scan_for_signals(
+                        symbols=self.signal_engine.scanner.liquid_pairs,
+                        timeframe='1h',
+                        market_type=MarketType.CRYPTO
+                    )
+                    if sniper_candidates:
+                        candidates.extend(sniper_candidates)
+                        logger.info(f"🎯 Sniper engine found {len(sniper_candidates)} 1h candidate(s)")
+                except Exception as e:
+                    logger.warning(f"Sniper engine 1h scan failed: {e}")
+            
+            # Fallback to existing engine if sniper found nothing
+            if not candidates:
+                candidates = await self.signal_engine.scan_for_signals('1h')
+                if candidates:
+                    logger.info(f"✅ 1h scan found {len(candidates)} candidate(s) (backup engine)")
+            
             await self.process_candidates(candidates)
             await self._process_free_real_candidates()
             await self._publish_teasers('1h')
@@ -623,15 +731,48 @@ class CryptoPulseOrchestrator:
             logger.error(f"Error in 1h scan: {e}")
     
     async def scan_forex(self):
-        """Scan Forex markets and generate signals (runs every 2 hours)"""
+        """Scan Forex markets and generate signals (runs every 2 hours).
+        Skips Saturday and Sunday — Forex markets are closed."""
+        from datetime import datetime
+        today = datetime.utcnow().weekday()
+        if today >= 5:  # 5 = Saturday, 6 = Sunday
+            logger.info("📅 Forex markets closed (weekend) — skipping scan")
+            return
+
         logger.info("🌍 Scanning Forex markets (EUR/USD, XAUUSD, NAS100, etc.)...")
         try:
-            forex_signals = await self.forex_signal_engine.scan_and_generate()
+            forex_signals = []
+            
+            # Try sniper engine first for Forex (1h and 4h timeframes)
+            if self.sniper_engine and self.forex_signal_engine.forex_client:
+                try:
+                    forex_symbols = self.forex_signal_engine.forex_client.FOREX_SYMBOLS
+                    # Scan 1h and 4h for Forex
+                    for tf in ['1h', '4h']:
+                        sniper_forex = await self.sniper_engine.scan_for_signals(
+                            symbols=forex_symbols,
+                            timeframe=tf,
+                            market_type=MarketType.FOREX
+                        )
+                        if sniper_forex:
+                            forex_signals.extend(sniper_forex)
+                            logger.info(f"🎯 Sniper engine found {len(sniper_forex)} Forex {tf} candidate(s)")
+                except Exception as e:
+                    logger.warning(f"Sniper engine Forex scan failed: {e}")
+            
+            # Fallback to existing Forex engine if sniper found nothing
+            if not forex_signals:
+                forex_signals = await self.forex_signal_engine.scan_and_generate()
+                if forex_signals:
+                    logger.info(f"✅ Forex scan generated {len(forex_signals)} signal(s) (backup engine)")
+            
+            # Send Forex signals to admin for approval
             if forex_signals:
-                logger.info(f"✅ Forex scan generated {len(forex_signals)} signal(s)")
-                # Publish Forex signals to channels (same flow as crypto)
                 for signal in forex_signals:
-                    await self.on_signal_approved(signal)
+                    await self.db.save_signal(signal)
+                    await self.admin_bot.send_signal_for_approval(signal)
+                    self.signal_engine.add_signal(signal)
+                    logger.info(f"✅ Forex candidate {signal.symbol} sent for approval")
             else:
                 logger.info("No Forex signals generated this scan")
         except Exception as e:
@@ -795,13 +936,12 @@ class CryptoPulseOrchestrator:
                     continue
                 
                 await self.db.save_signal(candidate)
-                
-                # Send to admin for approval ONLY
-                if not self.dashboard_only:
-                    await self.admin_bot.send_signal_for_approval(candidate)
-                
+
+                # Send to admin for approval (works in both full and dashboard-only send-only mode)
+                await self.admin_bot.send_signal_for_approval(candidate)
+
                 self.signal_engine.add_signal(candidate)
-                
+
                 logger.info(f"✅ Candidate {candidate.symbol} sent for VIP approval")
                 
             except Exception as e:
@@ -840,13 +980,12 @@ class CryptoPulseOrchestrator:
                     continue
                 
                 await self.db.save_signal(candidate)
-                
-                # Send to admin for approval
-                if not self.dashboard_only:
-                    await self.admin_bot.send_signal_for_approval(candidate)
-                
+
+                # Send to admin for approval (works in both full and dashboard-only send-only mode)
+                await self.admin_bot.send_signal_for_approval(candidate)
+
                 self.signal_engine.add_signal(candidate)
-                
+
                 logger.info(f"✅ Free real candidate {candidate.symbol} sent for approval")
                 
             except Exception as e:
@@ -1402,8 +1541,182 @@ class CryptoPulseOrchestrator:
         result = "Stop Loss Hit"
         await self.channel_publisher.send_trade_closed(signal, result, pnl)
     
+    async def check_trade_management(self):
+        """Check active trades for management recommendations and send critical alerts."""
+        try:
+            if not self.trade_manager:
+                return
+
+            active = await self.db.get_active_signals()
+            if not active:
+                return
+
+            recommendations = await self.trade_manager.analyze_all(active)
+
+            # Only notify for HIGH and CRITICAL urgency recommendations
+            critical_actions = [r for r in recommendations if r.urgency.value in ("high", "critical")]
+
+            for rec in critical_actions:
+                emoji_map = {
+                    "close_full": "🛑",
+                    "scale_out_major": "📉",
+                    "scale_out_partial": "📊",
+                    "move_stop": "🛡️",
+                    "trailing_stop": "📍",
+                    "add": "📈",
+                    "hold": "✋"
+                }
+                emoji = emoji_map.get(rec.action.value, "⚡")
+                urgency_emoji = "🔴" if rec.urgency.value == "critical" else "🟠"
+                
+                # Build action header
+                action_header = rec.action.value.upper().replace('_', ' ')
+                if rec.suggested_scale_percent:
+                    action_header = f"{action_header} ({rec.suggested_scale_percent:.0f}%)"
+
+                msg = (
+                    f"{urgency_emoji} <b>TRADE MANAGEMENT ALERT</b>\n\n"
+                    f"<b>{rec.symbol}</b> — {action_header}\n"
+                    f"{emoji} Confidence: {rec.confidence:.0f}% | Urgency: {rec.urgency.value.upper()}\n\n"
+                    f"💰 Current P&L: {rec.current_pnl_percent:+.2f}%\n"
+                    f"📊 Current Price: ${rec.current_price:.6f}\n"
+                    f"🎯 Entry: ${rec.entry_price:.6f}\n"
+                    f"🛡️ Stop Loss: ${rec.stop_loss:.6f}\n\n"
+                    f"📍 POSITION STATUS:\n"
+                    f"• Distance to TP1: {rec.distance_to_tp1_percent:.2f}%\n"
+                    f"• Distance to SL: {rec.distance_to_sl_percent:.2f}%\n"
+                )
+                
+                # Add action description
+                if rec.action_description:
+                    msg += f"\n💡 <b>ACTION:</b>\n{rec.action_description}\n"
+                
+                # Add detailed reasoning sections
+                msg += f"\n📋 <b>DETAILED REASONING:</b>\n"
+                
+                if rec.reversal_signals:
+                    msg += f"\n🔄 <b>Reversal Signals:</b>\n"
+                    for signal in rec.reversal_signals:
+                        msg += f"• {signal}\n"
+                
+                if rec.momentum_analysis:
+                    msg += f"\n📈 <b>Momentum:</b> {rec.momentum_analysis}\n"
+                
+                if rec.volume_analysis:
+                    msg += f"📊 <b>Volume:</b> {rec.volume_analysis}\n"
+                
+                if rec.structure_note:
+                    msg += f"🏗️ <b>Structure:</b> {rec.structure_note}\n"
+                
+                if rec.resistance_support_note:
+                    msg += f"🎯 <b>Key Level:</b> {rec.resistance_support_note}\n"
+                
+                if rec.news_sentiment and rec.news_sentiment != "neutral":
+                    msg += f"📰 <b>News Sentiment:</b> {rec.news_sentiment.capitalize()}\n"
+                
+                # Futures-specific context (perpetual futures data)
+                if rec.is_futures:
+                    msg += f"\n🔄 <b>PERPETUAL FUTURES DATA:</b>\n"
+                    if rec.funding_rate_pct is not None:
+                        funding_emoji = "🔴" if abs(rec.funding_rate_pct) > 0.05 else "🟡" if abs(rec.funding_rate_pct) > 0.01 else "🟢"
+                        msg += f"{funding_emoji} Funding Rate: {rec.funding_rate_pct:.4f}%\n"
+                    if rec.oi_trend:
+                        oi_emoji = {"rising_oi": "🟢", "falling_oi": "🔴", "stable_oi": "⚪"}.get(rec.oi_trend, "⚪")
+                        oi_label = {"rising_oi": "Rising", "falling_oi": "Falling", "stable_oi": "Stable"}.get(rec.oi_trend, rec.oi_trend)
+                        msg += f"{oi_emoji} Open Interest: {oi_label}\n"
+                    if rec.liquidation_note:
+                        msg += f"⚡ {rec.liquidation_note}\n"
+                
+                if rec.risk_reward_note:
+                    msg += f"\n💰 <b>Risk/Reward:</b> {rec.risk_reward_note}\n"
+                
+                # Add suggested actions
+                if rec.suggested_stop_price:
+                    msg += f"\n🛡️ <b>Suggested Stop:</b> ${rec.suggested_stop_price:.6f}"
+                
+                msg += f"\n\n🔥 Manage on Dashboard: http://localhost:8081"
+
+                if not self.dashboard_only:
+                    try:
+                        await self.admin_bot.send_notification(msg)
+                        logger.info(f"📨 Sent trade management alert for {rec.symbol}: {rec.action.value} ({rec.urgency.value})")
+                    except Exception as e:
+                        logger.warning(f"Could not send trade management alert for {rec.symbol}: {e}")
+                else:
+                    logger.info(f"[Dashboard-only] Trade management alert for {rec.symbol}: {rec.action.value} ({rec.urgency.value})")
+
+            if critical_actions:
+                logger.info(f"📈 Trade management check: {len(critical_actions)} critical alerts sent")
+            
+            # ─── SEND COMPREHENSIVE ACTIVE TRADES SUMMARY TO ADMIN ───
+            # Build a full portfolio snapshot so admin can copy/paste to channels
+            if not self.dashboard_only and self.admin_bot:
+                try:
+                    summary_lines = []
+                    summary_lines.append(f"📊 <b>ACTIVE TRADES SUMMARY</b> | {datetime.utcnow().strftime('%H:%M UTC')}")
+                    summary_lines.append(f"Total Active: {len(active)}")
+                    
+                    in_profit = [s for s in recommendations if s.current_pnl_percent > 0]
+                    in_loss = [s for s in recommendations if s.current_pnl_percent <= 0]
+                    
+                    summary_lines.append(f"🟢 In Profit: {len(in_profit)} | 🔴 In Loss: {len(in_loss)}")
+                    summary_lines.append("")
+                    
+                    # Categorize by urgency
+                    critical = [r for r in recommendations if r.urgency.value == "critical"]
+                    high = [r for r in recommendations if r.urgency.value == "high"]
+                    medium = [r for r in recommendations if r.urgency.value == "medium"]
+                    low = [r for r in recommendations if r.urgency.value in ("low", None)]
+                    
+                    # Critical/HIGH first
+                    for rec in critical + high + medium + low:
+                        pnl_emoji = "🟢" if rec.current_pnl_percent > 0 else "🔴" if rec.current_pnl_percent < 0 else "⚪"
+                        urgency_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(rec.urgency.value, "⚪")
+                        
+                        summary_lines.append(
+                            f"{urgency_emoji} <b>{rec.symbol}</b> {rec.current_price:.4f} | "
+                            f"{pnl_emoji} {rec.current_pnl_percent:+.2f}% | "
+                            f"Action: {rec.action.value.replace('_', ' ').upper()}"
+                        )
+                        
+                        if rec.reversal_signals:
+                            for sig in rec.reversal_signals:
+                                summary_lines.append(f"  → {sig}")
+                        if rec.momentum_analysis:
+                            summary_lines.append(f"  → {rec.momentum_analysis}")
+                        if rec.volume_analysis:
+                            summary_lines.append(f"  → {rec.volume_analysis}")
+                        if rec.risk_reward_note:
+                            summary_lines.append(f"  → {rec.risk_reward_note}")
+                        
+                        summary_lines.append("")
+                    
+                    summary_lines.append("📋 <b>COPY-PASTE PORTFOLIO STATUS:</b>")
+                    for rec in sorted(recommendations, key=lambda x: x.current_pnl_percent, reverse=True):
+                        pnl_emoji = "🟢" if rec.current_pnl_percent > 0 else "🔴"
+                        futures_tag = ""
+                        if rec.is_futures and rec.funding_rate_pct is not None:
+                            futures_tag = f" | Funding: {rec.funding_rate_pct:.4f}%"
+                        summary_lines.append(
+                            f"{pnl_emoji} {rec.symbol}: {rec.current_pnl_percent:+.2f}% | "
+                            f"{rec.action.value.replace('_', ' ').upper()}{futures_tag}"
+                        )
+                    
+                    admin_summary = "\n".join(summary_lines)
+                    await self.admin_bot.send_notification(admin_summary)
+                    logger.info(f"📨 Sent active trades summary to admin ({len(active)} trades)")
+                except Exception as e:
+                    logger.warning(f"Failed to send active trades summary to admin: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in trade management check: {e}")
+
     async def _get_current_price(self, symbol):
         try:
+            # Route Forex pairs through Forex client (Binance scanner doesn't have EUR/USD etc.)
+            if symbol in ForexClient.FOREX_SYMBOLS:
+                return await self.forex_signal_engine.forex_client.get_price(symbol)
+            # Crypto pairs go through Binance scanner
             ticker = await self.signal_engine.scanner.fetch_ticker(symbol)
             return ticker.get('last')
         except Exception as e:
@@ -1635,15 +1948,93 @@ class CryptoPulseOrchestrator:
                 else:
                     momentum_note = "Range-bound price action - wait for breakout confirmation"
                 
+                # Fetch Forex macro data for morning outlook
+                forex_section = ""
+                try:
+                    fme = self.signal_engine.context_engine.forex_macro
+                    dxy_data = await fme._get_dxy(self.forex_signal_engine.forex_client)
+                    risk_app = await fme._calculate_risk_appetite(self.forex_signal_engine.forex_client)
+                    session_data = fme._get_session_info()
+
+                    dxy_trend = dxy_data.get('trend', 'neutral')
+                    dxy_val = dxy_data.get('value', 100.0)
+                    dxy_emoji = "🟢" if dxy_trend == 'bullish' else "🔴" if dxy_trend == 'bearish' else "⚪"
+                    risk_emoji = "🟢" if 'on' in risk_app.lower() else "🔴" if 'off' in risk_app.lower() else "⚪"
+                    session_name = session_data.get('current_session', 'Unknown')
+                    if session_data.get('is_london_ny_overlap'):
+                        liquidity = "peak"
+                    elif session_data.get('is_major_session'):
+                        liquidity = "high"
+                    else:
+                        liquidity = "low"
+                    
+                    # Build risk-on/off explanation
+                    risk_explanation = ""
+                    if 'off' in risk_app.lower():
+                        risk_explanation = """
+<b>🔴 RISK-OFF ENVIRONMENT DETECTED</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>What This Means:</b>
+• Investors fleeing to safe-haven assets (USD, Gold, Bonds)
+• Crypto & equities under selling pressure
+• Flight to quality — risk assets declining
+
+<b>What We're Looking For:</b>
+✅ Oversold bounces from key support levels
+✅ Capitulation wicks (panic selling exhaustion)
+✅ Safe-haven pairs: USD/JPY, XAU/USD strength
+❌ Avoid chasing breakouts — likely to fail
+❌ Avoid high-leverage longs — downside risk elevated
+"""
+                    elif 'on' in risk_app.lower():
+                        risk_explanation = """
+<b>🟢 RISK-ON ENVIRONMENT DETECTED</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>What This Means:</b>
+• Capital flowing into risk assets (crypto, stocks, commodities)
+• USD weakening as investors seek yield
+• Growth assets outperforming safe havens
+
+<b>What We're Looking For:</b>
+✅ Breakout trades above resistance
+✅ Momentum continuation on pullbacks
+✅ Risk pairs: EUR/USD, GBP/USD, crypto strength
+❌ Avoid shorting strong trends
+❌ Avoid safe-haven longs (USD, JPY weakness)
+"""
+                    else:
+                        risk_explanation = """
+<b>⚪ NEUTRAL RISK ENVIRONMENT</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>What This Means:</b>
+• Markets in consolidation — no clear directional bias
+• Mixed signals across asset classes
+• Waiting for catalyst (data, news, event)
+
+<b>What We're Looking For:</b>
+✅ Range-bound strategies (support/resistance bounces)
+✅ Wait for breakout confirmation before entering
+✅ Reduce position sizes — uncertainty elevated
+❌ Avoid forcing trades in choppy conditions
+"""
+                    
+                    forex_section = f"""<b>🌍 FOREX MACRO ENVIRONMENT:</b>
+DXY: {dxy_emoji} {dxy_trend.title()} ({dxy_val:.2f}) | Session: {session_name} ({liquidity} liquidity)
+{risk_explanation}
+"""
+                except Exception as forex_err:
+                    logger.debug(f"Forex macro data unavailable for morning outlook: {forex_err}")
+                    forex_section = "<b>🌍 FOREX MACRO:</b>\nData unavailable — macro analysis offline\n\n"
+                
                 vip_outlook = f"""🌅 <b>MORNING MARKET OUTLOOK</b>
 <b>{now.strftime('%A, %d %B %Y')}</b>
 
-<b>📊 Market Sentiment:</b>
+<b>📊 Crypto Market Sentiment:</b>
 Fear & Greed: <b>{fear.get('classification', 'Neutral')}</b> ({fear.get('value', 'N/A')}/100)
 BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
 BTC Dominance: <b>{global_data.get('btc_dominance', 'N/A')}%</b>
 
-<b>💰 Funding & Positioning:</b>
+{forex_section}<b>💰 Funding & Positioning:</b>
 {funding_note}
 
 <b>📰 Key Headlines:</b>
@@ -1714,24 +2105,25 @@ Good luck! 🎯
             market_change = mctx.get('market_change', 0)
             btc_dominance = mctx.get('btc_dominance', 0)
             
-            # Get active trades
+            # Get active trades — separate crypto and Forex
             active_signals = await self.db.get_active_signals()
+            crypto_signals = [s for s in active_signals if getattr(s, 'market_type', MarketType.CRYPTO) == MarketType.CRYPTO]
+            forex_signals = [s for s in active_signals if getattr(s, 'market_type', MarketType.CRYPTO) == MarketType.FOREX]
+            
             active_trades_text = ""
             
-            if active_signals:
-                active_trades_text = "\n\n<b>🔄 ACTIVE TRADES:</b>\n"
-                for sig in active_signals:
+            # Crypto active trades
+            if crypto_signals:
+                active_trades_text = "\n\n<b>🔄 ACTIVE CRYPTO TRADES:</b>\n"
+                for sig in crypto_signals:
                     current_price = await self._get_current_price(sig.symbol)
                     
                     if current_price:
-                        # Check if limit order is still pending fill
                         if sig.is_limit_order and not sig.actual_entry:
-                            # Limit order not yet filled — show pending, no P&L
                             pnl = 0
                             pnl_emoji = "⚪"
                             entry_str = f"Limit: ${sig.entry_price:.4f} (Pending fill)"
                         else:
-                            # Order filled — calculate real P&L
                             entry = sig.actual_entry or sig.entry_price or 0
                             if entry and entry > 0:
                                 pnl = ((current_price - entry) / entry) * 100
@@ -1749,6 +2141,39 @@ Good luck! 🎯
                         active_trades_text += f"""
 {sig.symbol} {sig.direction.value}
 Entry: {entry_str} | Current: ${current_price:.4f}
+P&L: {pnl_emoji} {pnl:+.2f}%
+Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
+"""
+            
+            # Forex active trades
+            if forex_signals:
+                active_trades_text += "\n\n<b>🌍 ACTIVE FOREX TRADES:</b>\n"
+                for sig in forex_signals:
+                    current_price = await self._get_current_price(sig.symbol)
+                    
+                    if current_price:
+                        if sig.is_limit_order and not sig.actual_entry:
+                            pnl = 0
+                            pnl_emoji = "⚪"
+                            entry_str = f"Limit: {sig.entry_price:.5f} (Pending fill)"
+                        else:
+                            entry = sig.actual_entry or sig.entry_price or 0
+                            if entry and entry > 0:
+                                pnl = ((current_price - entry) / entry) * 100
+                            else:
+                                pnl = 0
+                            if sig.direction.value == "SHORT":
+                                pnl = -pnl
+                            pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                            entry_str = f"{entry:.5f}" if entry else "N/A"
+                        
+                        tp1_status = "✅" if getattr(sig, 'tp1_hit', False) else "⏳"
+                        tp2_status = "✅" if getattr(sig, 'tp2_hit', False) else "⏳"
+                        tp3_status = "✅" if getattr(sig, 'tp3_hit', False) else "⏳"
+                        
+                        active_trades_text += f"""
+{sig.symbol} {sig.direction.value}
+Entry: {entry_str} | Current: {current_price:.5f}
 P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
 """
@@ -1840,13 +2265,26 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
                     exit_str = f"${exit_p:.4f}" if exit_p else "N/A"
                     closed_trades_text += f"{pnl_emoji} {s.symbol} {s.direction.value} | Entry: {entry_str} → Exit: {exit_str} | P&L: {pnl:+.2f}% ({result})\n"
             
-            performance_text = "\n".join([
+            # Split performance by market type
+            crypto_today = [s for s in today_signals if getattr(s, 'market_type', MarketType.CRYPTO) == MarketType.CRYPTO]
+            forex_today = [s for s in today_signals if getattr(s, 'market_type', MarketType.CRYPTO) == MarketType.FOREX]
+            crypto_week = [s for s in week_signals if getattr(s, 'market_type', MarketType.CRYPTO) == MarketType.CRYPTO]
+            forex_week = [s for s in week_signals if getattr(s, 'market_type', MarketType.CRYPTO) == MarketType.FOREX]
+            
+            performance_lines = [
                 "",
-                "<b>📊 PERFORMANCE:</b>",
-                _format_performance(today_signals, "TODAY"),
-                _format_performance(week_signals, "THIS WEEK"),
-                _format_performance(month_signals, "THIS MONTH"),
-            ])
+                "<b>📊 CRYPTO PERFORMANCE:</b>",
+                _format_performance(crypto_today, "TODAY"),
+                _format_performance(crypto_week, "THIS WEEK"),
+            ]
+            if forex_today or forex_week:
+                performance_lines.extend([
+                    "",
+                    "<b>🌍 FOREX PERFORMANCE:</b>",
+                    _format_performance(forex_today, "TODAY"),
+                    _format_performance(forex_week, "THIS WEEK"),
+                ])
+            performance_text = "\n".join(performance_lines)
             
             # Key levels from real data
             key_levels = self._get_key_levels(btc_price, btc_24h)
@@ -1891,15 +2329,45 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | SL {sl_status}
                 else:
                     tomorrow_bias = "Range-bound tomorrow - wait for breakout or breakdown confirmation before trading."
                 
+                # Fetch Forex macro data for evening outlook
+                forex_evening_section = ""
+                try:
+                    fme = self.signal_engine.context_engine.forex_macro
+                    dxy_data = await fme._get_dxy(self.forex_signal_engine.forex_client)
+                    risk_app = await fme._calculate_risk_appetite(self.forex_signal_engine.forex_client)
+                    session_data = fme._get_session_info()
+
+                    dxy_trend = dxy_data.get('trend', 'neutral')
+                    dxy_val = dxy_data.get('value', 100.0)
+                    dxy_emoji = "🟢" if dxy_trend == 'bullish' else "🔴" if dxy_trend == 'bearish' else "⚪"
+                    risk_emoji = "🟢" if 'on' in risk_app.lower() else "🔴" if 'off' in risk_app.lower() else "⚪"
+                    session_name = session_data.get('current_session', 'Unknown')
+                    if session_data.get('is_london_ny_overlap'):
+                        liquidity = "peak"
+                    elif session_data.get('is_major_session'):
+                        liquidity = "high"
+                    else:
+                        liquidity = "low"
+                    
+                    forex_evening_section = f"""<b>🌍 FOREX MACRO:</b>
+DXY: {dxy_emoji} {dxy_trend.title()} ({dxy_val:.2f})
+Risk Appetite: {risk_emoji} {risk_app.replace('_', '-').upper()}
+Session: {session_name} ({liquidity} liquidity)
+
+"""
+                except Exception as forex_err:
+                    logger.debug(f"Forex macro data unavailable for evening outlook: {forex_err}")
+                
                 outlook = f"""🌙 <b>EVENING MARKET OUTLOOK</b>
 📅 {datetime.utcnow().strftime('%A, %B %d, %Y')}
 
-<b>📊 Current Market State:</b>
+<b>📊 Current Crypto Market State:</b>
 Fear & Greed: <b>{fear_class}</b> ({fear_value}/100)
 BTC Price: <b>${btc_price:,.2f}</b> ({btc_24h:+.2f}% 24h)
 BTC Dominance: <b>{btc_dominance:.1f}%</b>
 Funding Rate: <b>{funding_pct:.4f}%</b>
-{active_trades_text}{alpha_plays_text}{closed_trades_text}{performance_text}
+
+{forex_evening_section}{active_trades_text}{alpha_plays_text}{closed_trades_text}{performance_text}
 
 <b>🔮 Tomorrow's Game Plan:</b>
 • {key_levels}
@@ -2407,6 +2875,24 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
         Deduplication is handled in ChannelPublisher to prevent stale recovery duplicates."""
         try:
             if sl_hit:
+                # DEFENSIVE: verify DB state before sending — prevents duplicates after restarts
+                try:
+                    db_signal = await self.db.get_signal_by_id(signal.id)
+                    if db_signal and db_signal.status == SignalStatus.CLOSED:
+                        logger.warning(f"🛡️ Skipping SL notification for {signal.symbol}: already closed in DB")
+                        return
+                except Exception:
+                    pass  # Don't block notification if DB check fails
+                
+                # Also check in-memory dedup for same-session protection
+                session_key = f"sl_sent_{signal.id}"
+                if hasattr(self, '_session_sl_dedup') and session_key in self._session_sl_dedup:
+                    logger.warning(f"🛡️ Skipping duplicate SL notification for {signal.symbol} in same session")
+                    return
+                if not hasattr(self, '_session_sl_dedup'):
+                    self._session_sl_dedup = set()
+                self._session_sl_dedup.add(session_key)
+                
                 logger.info(f"📨 Channel handler: SL hit for {signal.symbol}")
                 entry = signal.actual_entry or signal.entry_price
                 pnl = 0.0
@@ -2414,8 +2900,33 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                     pnl = ((current_price - entry) / entry) * 100
                     if signal.direction.value == "SHORT":
                         pnl = -pnl
+                
+                # Send to VIP/Free channels
                 await self.channel_publisher.send_trade_closed(signal, "Stop Loss Hit", pnl)
                 logger.info(f"✅ SL notification sent for {signal.symbol}")
+                
+                # ALSO send detailed copy-paste ready message to admin bot
+                if not self.dashboard_only and self.admin_bot:
+                    admin_msg = (
+                        f"🛑 <b>STOP LOSS HIT — ADMIN COPY</b>\n\n"
+                        f"<b>Symbol:</b> {signal.symbol}\n"
+                        f"<b>Direction:</b> {signal.direction.value}\n"
+                        f"<b>Setup:</b> {signal.setup_type.value} | {signal.timeframe}\n"
+                        f"<b>Entry:</b> ${entry:.6f}\n"
+                        f"<b>Exit (SL):</b> ${current_price:.6f}\n"
+                        f"<b>P&L:</b> {pnl:+.2f}%\n\n"
+                        f"📋 <b>COPY-PASTE FOR CHANNELS:</b>\n"
+                        f"{'❌'} <b>TRADE CLOSED</b> | {signal.symbol} {signal.direction.value}\n"
+                        f"Result: Stop Loss Hit\n"
+                        f"Entry: ${entry:.4f} → Exit: ${current_price:.4f}\n"
+                        f"P&L: {'🔴' if pnl < 0 else '🟢'} {pnl:+.2f}%\n"
+                        f"Closed: {datetime.utcnow().strftime('%H:%M UTC')}"
+                    )
+                    try:
+                        await self.admin_bot.send_notification(admin_msg)
+                        logger.info(f"📨 Admin SL notification sent for {signal.symbol}")
+                    except Exception as e:
+                        logger.warning(f"Failed to send admin SL notification: {e}")
                 return
             
             # TP3: trade is closing — just send close message (no separate TP3 hit)
@@ -2427,8 +2938,34 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                     pnl = ((current_price - entry) / entry) * 100
                     if signal.direction.value == "SHORT":
                         pnl = -pnl
+                
+                # Send to VIP/Free channels
                 await self.channel_publisher.send_trade_closed(signal, "TP3 Hit", pnl)
                 logger.info(f"✅ TP3 close notification sent for {signal.symbol}")
+                
+                # ALSO send detailed copy-paste ready message to admin bot
+                if not self.dashboard_only and self.admin_bot:
+                    admin_msg = (
+                        f"✅ <b>TP3 HIT — ADMIN COPY</b>\n\n"
+                        f"<b>Symbol:</b> {signal.symbol}\n"
+                        f"<b>Direction:</b> {signal.direction.value}\n"
+                        f"<b>Setup:</b> {signal.setup_type.value} | {signal.timeframe}\n"
+                        f"<b>Entry:</b> ${entry:.6f}\n"
+                        f"<b>Exit (TP3):</b> ${current_price:.6f}\n"
+                        f"<b>P&L:</b> {pnl:+.2f}%\n\n"
+                        f"📋 <b>COPY-PASTE FOR CHANNELS:</b>\n"
+                        f"{'✅'} <b>TRADE CLOSED</b> | {signal.symbol} {signal.direction.value}\n"
+                        f"Result: TP3 Hit\n"
+                        f"Entry: ${entry:.4f} → Exit: ${current_price:.4f}\n"
+                        f"P&L: {'🟢'} {pnl:+.2f}%\n"
+                        f"Closed: {datetime.utcnow().strftime('%H:%M UTC')}\n\n"
+                        f"Full position closed — all targets achieved."
+                    )
+                    try:
+                        await self.admin_bot.send_notification(admin_msg)
+                        logger.info(f"📨 Admin TP3 notification sent for {signal.symbol}")
+                    except Exception as e:
+                        logger.warning(f"Failed to send admin TP3 notification: {e}")
                 return
             
             # TP1 / TP2: send hit update to correct channel based on confidence
@@ -2456,6 +2993,52 @@ BTC: <b>${btc_price:,.0f}</b> ({btc_24h:+.2f}%)
                 # Also send TP2 teaser to free channel for marketing
                 if tp_level == 2:
                     await self.channel_publisher.send_tp_hit_free(signal, tp_level)
+            
+            # ALSO send detailed copy-paste ready message to admin bot for TP1/TP2
+            if not self.dashboard_only and self.admin_bot:
+                tp_price = getattr(signal, f'take_profit_{tp_level}', None)
+                entry = signal.actual_entry or signal.entry_price
+                pnl = 0.0
+                if entry and entry != 0:
+                    pnl = ((current_price - entry) / entry) * 100
+                    if signal.direction.value == "SHORT":
+                        pnl = -pnl
+                
+                # Get remaining targets
+                next_tps = []
+                for i in range(tp_level + 1, 4):
+                    tp = getattr(signal, f'take_profit_{i}', None)
+                    if tp:
+                        next_tps.append(f"TP{i}: ${tp:.4f}")
+                
+                # Get SL status
+                sl_text = ""
+                if tp_level == 1 and signal.stop_loss == entry:
+                    sl_text = f"\n🛡️ SL moved to breakeven: ${entry:.4f}"
+                else:
+                    sl_text = f"\n🛡️ SL: ${signal.stop_loss:.4f}"
+                
+                admin_msg = (
+                    f"🎯 <b>TP{tp_level} HIT — ADMIN COPY</b>\n\n"
+                    f"<b>Symbol:</b> {signal.symbol}\n"
+                    f"<b>Direction:</b> {signal.direction.value}\n"
+                    f"<b>Setup:</b> {signal.setup_type.value} | {signal.timeframe}\n"
+                    f"<b>Entry:</b> ${entry:.6f}\n"
+                    f"<b>TP{tp_level}:</b> ${tp_price:.6f} (reached at ${current_price:.6f})\n"
+                    f"<b>P&L so far:</b> {pnl:+.2f}%\n"
+                    f"{sl_text}\n\n"
+                    f"📋 <b>COPY-PASTE FOR CHANNELS:</b>\n"
+                    f"🎯 <b>TP{tp_level} HIT</b> | {signal.symbol}\n"
+                    f"Target ${tp_price:.4f} reached\n"
+                    f"P&L: {pnl:+.2f}%\n"
+                    f"Next: {' | '.join(next_tps) if next_tps else 'All targets achieved'}\n"
+                    f"SL: ${signal.stop_loss:.4f}"
+                )
+                try:
+                    await self.admin_bot.send_notification(admin_msg)
+                    logger.info(f"📨 Admin TP{tp_level} notification sent for {signal.symbol}")
+                except Exception as e:
+                    logger.warning(f"Failed to send admin TP{tp_level} notification: {e}")
             
             # Breakeven SL move after TP1
             if tp_level == 1:
