@@ -150,14 +150,52 @@ See you tomorrow! 💎"""
             week_closed = [s for s in week_closed
                           if s.closed_at and s.closed_at >= start_of_week]
             
+            # ALSO include active signals with partial closes or TP hits this week
+            active_signals = await self.db.get_active_signals()
+            week_partial_or_tp = []
+            for s in active_signals:
+                # Check if TP hit this week
+                tp_hit_this_week = False
+                for tp_level in [1, 2, 3]:
+                    tp_hit_at = getattr(s, f'tp{tp_level}_hit_at', None)
+                    if tp_hit_at and tp_hit_at >= start_of_week:
+                        tp_hit_this_week = True
+                        break
+                
+                # Check if partial close this week
+                partial_close_this_week = False
+                if hasattr(s, 'metadata') and s.metadata and 'partial_closes' in s.metadata:
+                    for pc in s.metadata['partial_closes']:
+                        pc_time = datetime.fromisoformat(pc['timestamp'])
+                        if pc_time >= start_of_week:
+                            partial_close_this_week = True
+                            break
+                
+                if tp_hit_this_week or partial_close_this_week:
+                    week_partial_or_tp.append(s)
+            
             # Pull ALL closed signals for running total
             all_closed = await self.db.get_closed_signals(days=365)
             
-            # Calculate REAL weekly stats from actual signals
+            # Calculate REAL weekly stats from actual signals (closed + partial)
+            # For closed signals, use full P&L
+            # For partial closes, use the P&L of the closed portion
             wins = [s for s in week_closed if (s.pnl_percent or 0) > 0]
             losses = [s for s in week_closed if (s.pnl_percent or 0) <= 0]
             week_pnl = sum((s.pnl_percent or 0) for s in week_closed)
-            win_rate = (len(wins) / len(week_closed) * 100) if week_closed else 0
+            
+            # Add partial close P&L
+            for s in week_partial_or_tp:
+                if hasattr(s, 'metadata') and s.metadata and 'partial_closes' in s.metadata:
+                    partial_pnl = sum(pc['pnl'] for pc in s.metadata['partial_closes'])
+                    week_pnl += partial_pnl
+                    if partial_pnl > 0:
+                        wins.append(s)
+                    else:
+                        losses.append(s)
+            
+            total_trades = len(week_closed) + len(week_partial_or_tp)
+            win_rate = (len(wins) / total_trades * 100) if total_trades else 0
             
             # Running total PnL (all time)
             total_pnl = sum((s.pnl_percent or 0) for s in all_closed)
@@ -169,13 +207,59 @@ See you tomorrow! 💎"""
             best_trade = max(week_closed, key=lambda s: s.pnl_percent or 0) if week_closed else None
             worst_trade = min(week_closed, key=lambda s: s.pnl_percent or 0) if week_closed else None
             
-            # Build individual trade lines
+            # Build individual trade lines (closed + partial/TP)
             trade_lines = []
+            
+            # First, add fully closed trades
             for s in week_closed:
                 emoji = "🟢" if (s.pnl_percent or 0) > 0 else "🔴"
+                annotation = ""
+                
+                # Check if it was a partial close that later fully closed
+                if hasattr(s, 'metadata') and s.metadata and 'partial_closes' in s.metadata:
+                    total_partial = sum(pc['percent'] for pc in s.metadata['partial_closes'])
+                    if total_partial > 0:
+                        annotation = f" (partial close: {total_partial:.0f}%)"
+                
                 trade_lines.append(
-                    f"{emoji} {s.symbol} {s.direction.value}: {s.pnl_percent or 0:+.2f}%"
+                    f"{emoji} {s.symbol} {s.direction.value}: {s.pnl_percent or 0:+.2f}%{annotation}"
                 )
+            
+            # Then, add active trades with TP hits or partial closes
+            for s in week_partial_or_tp:
+                # Determine annotation
+                annotations = []
+                
+                # Check TP hits
+                if s.tp1_hit:
+                    annotations.append("TP1")
+                if s.tp2_hit:
+                    annotations.append("TP2")
+                if s.tp3_hit:
+                    annotations.append("TP3")
+                
+                # Check partial closes
+                if hasattr(s, 'metadata') and s.metadata and 'partial_closes' in s.metadata:
+                    total_partial = sum(pc['percent'] for pc in s.metadata['partial_closes'])
+                    remaining = s.metadata.get('remaining_position', 100)
+                    if total_partial > 0:
+                        annotations.append(f"{total_partial:.0f}% closed, {remaining:.0f}% running")
+                
+                annotation_text = " — " + ", ".join(annotations) if annotations else ""
+                
+                # For partial closes, show the P&L of the closed portion
+                if hasattr(s, 'metadata') and s.metadata and 'partial_closes' in s.metadata:
+                    partial_pnl = sum(pc['pnl'] for pc in s.metadata['partial_closes'])
+                    emoji = "🟢" if partial_pnl > 0 else "🔴"
+                    trade_lines.append(
+                        f"{emoji} {s.symbol} {s.direction.value}: {partial_pnl:+.2f}%{annotation_text}"
+                    )
+                else:
+                    # Just TP hit, no partial close yet
+                    trade_lines.append(
+                        f"🟡 {s.symbol} {s.direction.value}: {annotation_text} (still running)"
+                    )
+            
             trades_text = "\n".join(trade_lines) if trade_lines else "No trades closed this week yet."
             
             pnl_emoji = "🟢" if week_pnl >= 0 else "📊"
