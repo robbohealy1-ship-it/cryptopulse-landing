@@ -707,29 +707,38 @@ class SupabaseClient:
                                    exit_slippage: float = None) -> bool:
         """Update signal when TP/SL is hit (AutoPilot performance tracking)"""
         try:
+            # CRITICAL FIX: Only update core fields that exist in DB schema
+            # Performance tracking fields (max_drawdown, duration, slippage) don't exist yet
+            # This prevents update failures that leave signals in 'active' status
             data = {
                 'status': status.value,
                 'actual_exit': actual_exit,
                 'pnl_percent': pnl_percent,
                 'closed_at': datetime.utcnow().isoformat()
             }
+            
+            # Only add tp_level if provided (core field that exists)
             if tp_level is not None:
                 data['tp_level'] = tp_level
-            if max_drawdown is not None:
-                data['max_drawdown_percent'] = max_drawdown
-            if max_adverse is not None:
-                data['max_adverse_excursion'] = max_adverse
-            if max_favorable is not None:
-                data['max_favorable_excursion'] = max_favorable
-            if duration_minutes is not None:
-                data['duration_minutes'] = duration_minutes
-            if entry_slippage is not None:
-                data['entry_slippage_percent'] = entry_slippage
-            if exit_slippage is not None:
-                data['exit_slippage_percent'] = exit_slippage
+            
+            # SKIP all optional performance tracking fields - they don't exist in DB schema
+            # These would cause PGRST204 errors and prevent the critical status update
+            # TODO: Add these columns to DB schema, then uncomment:
+            # if max_drawdown is not None:
+            #     data['max_drawdown_percent'] = max_drawdown
+            # if max_adverse is not None:
+            #     data['max_adverse_excursion'] = max_adverse
+            # if max_favorable is not None:
+            #     data['max_favorable_excursion'] = max_favorable
+            # if duration_minutes is not None:
+            #     data['duration_minutes'] = duration_minutes
+            # if entry_slippage is not None:
+            #     data['entry_slippage_percent'] = entry_slippage
+            # if exit_slippage is not None:
+            #     data['exit_slippage_percent'] = exit_slippage
             
             self.client.table('signals').update(data).eq('id', signal_id).execute()
-            logger.info(f"Signal {signal_id} result updated: {status.value} P&L={pnl_percent:+.2f}%")
+            logger.info(f"✅ Signal {signal_id} result updated: {status.value} P&L={pnl_percent:+.2f}%")
             return True
         except Exception as e:
             error_str = str(e)
