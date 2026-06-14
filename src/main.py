@@ -1553,10 +1553,15 @@ class CryptoPulseOrchestrator:
 
             recommendations = await self.trade_manager.analyze_all(active)
 
-            # Only notify for HIGH and CRITICAL urgency recommendations
-            critical_actions = [r for r in recommendations if r.urgency.value in ("high", "critical")]
+            # CRITICAL FIX: Only notify for ACTIONABLE recommendations (not HOLD)
+            # Filter for HIGH/CRITICAL urgency AND non-HOLD actions
+            actionable_alerts = [
+                r for r in recommendations 
+                if r.urgency.value in ("high", "critical") 
+                and r.action.value != "hold"  # Don't spam with HOLD alerts
+            ]
 
-            for rec in critical_actions:
+            for rec in actionable_alerts:
                 emoji_map = {
                     "close_full": "🛑",
                     "scale_out_major": "📉",
@@ -1645,12 +1650,16 @@ class CryptoPulseOrchestrator:
                 else:
                     logger.info(f"[Dashboard-only] Trade management alert for {rec.symbol}: {rec.action.value} ({rec.urgency.value})")
 
-            if critical_actions:
-                logger.info(f"📈 Trade management check: {len(critical_actions)} critical alerts sent")
+            if actionable_alerts:
+                logger.info(f"📈 Trade management check: {len(actionable_alerts)} actionable alerts sent (HOLD alerts suppressed)")
             
             # ─── SEND COMPREHENSIVE ACTIVE TRADES SUMMARY TO ADMIN ───
             # Build a full portfolio snapshot so admin can copy/paste to channels
-            if not self.dashboard_only and self.admin_bot:
+            # ONLY send once per hour (at :00 minutes) to avoid spam
+            current_minute = datetime.utcnow().minute
+            send_summary = (current_minute == 0)  # Only at top of hour
+            
+            if not self.dashboard_only and self.admin_bot and send_summary:
                 try:
                     summary_lines = []
                     summary_lines.append(f"📊 <b>ACTIVE TRADES SUMMARY</b> | {datetime.utcnow().strftime('%H:%M UTC')}")

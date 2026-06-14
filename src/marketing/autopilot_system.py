@@ -374,18 +374,24 @@ class PerformanceTracker:
                 logger.error(f"🚨 {signal.symbol} has invalid SL ({sl_price}) — cannot check stop loss!")
                 return
             
+            # CRITICAL FIX: SL must CLOSE below/above, not just wick
+            # Add 0.1% buffer to prevent premature SL hits from price wicks
+            sl_buffer = sl_price * 0.001  # 0.1% buffer
+            
             # Log every SL check for debugging
             if direction == SignalDirection.LONG:
-                sl_triggered = current_price <= sl_price
-                logger.debug(f"🔍 {signal.symbol} LONG SL check: price={current_price:.6f} <= sl={sl_price:.6f} ? {sl_triggered}")
+                # LONG: SL triggers if price closes BELOW SL (with buffer)
+                sl_triggered = current_price < (sl_price - sl_buffer)
+                logger.debug(f"🔍 {signal.symbol} LONG SL check: price={current_price:.6f} < sl={sl_price:.6f} (buffer={sl_buffer:.6f}) ? {sl_triggered}")
                 if sl_triggered:
                     pnl = ((current_price - safe_entry) / safe_entry) * 100
                     logger.info(f"🛑 SL HIT: {signal.symbol} LONG at {current_price:.6f} (SL was {sl_price:.6f}), P&L: {pnl:+.2f}%")
                     await self._close_signal(signal_id, current_price, pnl, sl_hit=True)
                     return
             else:
-                sl_triggered = current_price >= sl_price
-                logger.debug(f"🔍 {signal.symbol} SHORT SL check: price={current_price:.6f} >= sl={sl_price:.6f} ? {sl_triggered}")
+                # SHORT: SL triggers if price closes ABOVE SL (with buffer)
+                sl_triggered = current_price > (sl_price + sl_buffer)
+                logger.debug(f"🔍 {signal.symbol} SHORT SL check: price={current_price:.6f} > sl={sl_price:.6f} (buffer={sl_buffer:.6f}) ? {sl_triggered}")
                 if sl_triggered:
                     pnl = ((safe_entry - current_price) / safe_entry) * 100
                     logger.info(f"🛑 SL HIT: {signal.symbol} SHORT at {current_price:.6f} (SL was {sl_price:.6f}), P&L: {pnl:+.2f}%")
@@ -415,7 +421,8 @@ class PerformanceTracker:
                     pnl = ((tp_price - safe_entry) / safe_entry) * 100
                 else:
                     pnl = ((safe_entry - tp_price) / safe_entry) * 100
-                logger.info(f"🎯 {signal.symbol} hit TP{hit_tp} at ${tp_price:.6f}! P&L: {pnl:+.2f}%")
+                
+                logger.info(f"🎯🎯🎯 TP{hit_tp} HIT DETECTED: {signal.symbol} at ${current_price:.6f} (TP{hit_tp}=${tp_price:.6f}), P&L: {pnl:+.2f}%")
                 
                 # Mark TP as hit — on BOTH in-memory dict AND signal object
                 # (signal object is what gets saved to DB via _signal_to_dict)
@@ -425,19 +432,22 @@ class PerformanceTracker:
                 if self.db:
                     try:
                         await self.db.mark_tp_hit(signal.id, hit_tp)
-                    except Exception:
-                        pass
+                        logger.info(f"✅ DB updated: TP{hit_tp} marked for {signal.symbol}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to mark TP{hit_tp} in DB for {signal.symbol}: {e}")
                 
-                # Send channel notification
+                # CRITICAL: Send channel notification (VIP/Free + Admin)
                 if self.on_channel_notification:
-                    logger.info(f"📨 Sending TP{hit_tp} notification for {signal.symbol} to channel handler...")
+                    logger.info(f"📨 Calling channel notification handler for {signal.symbol} TP{hit_tp}...")
                     try:
                         await self.on_channel_notification(signal, hit_tp, False, current_price)
-                        logger.info(f"✅ TP{hit_tp} notification sent for {signal.symbol}")
+                        logger.info(f"✅✅✅ TP{hit_tp} notification SENT for {signal.symbol}")
                     except Exception as e:
-                        logger.error(f"❌ Channel notification error for {signal.symbol} TP{hit_tp}: {e}")
+                        logger.error(f"❌❌❌ Channel notification FAILED for {signal.symbol} TP{hit_tp}: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
                 else:
-                    logger.warning(f"⚠️ No channel notification handler for {signal.symbol} TP{hit_tp} — notification skipped!")
+                    logger.error(f"⚠️⚠️⚠️ NO CHANNEL NOTIFICATION HANDLER for {signal.symbol} TP{hit_tp} — notification SKIPPED!")
                 
                 # Move SL to breakeven after TP1 (only once)
                 if hit_tp == 1 and not stop_moved_to_breakeven:
