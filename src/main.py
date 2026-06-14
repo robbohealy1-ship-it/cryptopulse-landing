@@ -1550,8 +1550,16 @@ class CryptoPulseOrchestrator:
             active = await self.db.get_active_signals()
             if not active:
                 return
+            
+            logger.info(f"📊 Trade management: analyzing {len(active)} active signals")
+            for sig in active:
+                logger.debug(f"  → {sig.symbol} ({sig.market_type.value if hasattr(sig, 'market_type') else 'unknown'})")
 
             recommendations = await self.trade_manager.analyze_all(active)
+            
+            skipped = len(active) - len(recommendations)
+            if skipped > 0:
+                logger.warning(f"⚠️ Trade management: {skipped} trades skipped (likely forex symbols or partial closes)")
 
             # CRITICAL FIX: Only notify for ACTIONABLE recommendations (not HOLD)
             # Filter for HIGH/CRITICAL urgency AND non-HOLD actions
@@ -1655,9 +1663,9 @@ class CryptoPulseOrchestrator:
             
             # ─── SEND COMPREHENSIVE ACTIVE TRADES SUMMARY TO ADMIN ───
             # Build a full portfolio snapshot so admin can copy/paste to channels
-            # ONLY send once per hour (at :00 minutes) to avoid spam
-            current_minute = datetime.utcnow().minute
-            send_summary = (current_minute == 0)  # Only at top of hour
+            # ONLY send once per day at 8:00 AM UTC to avoid spam
+            current_time = datetime.utcnow()
+            send_summary = (current_time.hour == 8 and current_time.minute == 0)  # Only at 8:00 AM UTC daily
             
             if not self.dashboard_only and self.admin_bot and send_summary:
                 try:

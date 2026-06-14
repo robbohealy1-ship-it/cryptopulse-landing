@@ -133,13 +133,12 @@ class TradeManagementEngine:
                 logger.info(f"Skipping trade management for {signal.symbol} — partial close already executed ({remaining}% remaining)")
                 return None
         
-        # Skip Forex symbols (Binance scanner doesn't support them)
-        # DEFENSE: Also detect by exact symbol in case market_type was incorrectly saved as CRYPTO
-        KNOWN_FOREX = {'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CAD', 'USD/CHF', 'NZD/USD', 'XAU/USD'}
+        # Skip ONLY actual Forex symbols (with slash format like EUR/USD, XAU/USD)
+        # Crypto pairs like XAUUSDT, EURUSDT are Binance perpetual futures and SHOULD be tracked
+        KNOWN_FOREX_WITH_SLASH = {'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CAD', 'USD/CHF', 'NZD/USD', 'XAU/USD'}
         is_forex_symbol = (
             (hasattr(signal, 'market_type') and signal.market_type == MarketType.FOREX) or
-            signal.symbol in KNOWN_FOREX or
-            signal.symbol.startswith('XAU/')
+            signal.symbol in KNOWN_FOREX_WITH_SLASH  # Only exact match with slash
         )
         if is_forex_symbol:
             logger.debug(f"Skipping trade management for Forex symbol {signal.symbol} (not supported by Binance scanner)")
