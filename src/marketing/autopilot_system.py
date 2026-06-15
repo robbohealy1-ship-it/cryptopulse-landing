@@ -134,8 +134,8 @@ class PerformanceTracker:
             return
         
         try:
-            ticker = await self.scanner.fetch_ticker(signal.symbol)
-            current_price = ticker.get('last', 0)
+            # Use _get_current_price helper to support both crypto and forex
+            current_price = await self._get_current_price(signal.symbol)
             if not current_price or current_price <= 0:
                 return
         except Exception:
