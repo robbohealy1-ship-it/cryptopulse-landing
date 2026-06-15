@@ -384,7 +384,7 @@ class AdminBot:
 🎯 <b>TP2:</b> {tp2_str}
 🎯 <b>TP3:</b> {tp3_str}
 
-📊 <b>R/R:</b> 1:{signal.risk_reward:.2f} | ⚡ <b>Conf:</b> {signal.confidence:.1f}%
+📊 <b>R/R:</b> 1:{signal.risk_reward:.2f} | ⚡ <b>Conf:</b> {signal.confidence:.1f}% | 🎓 <b>Grade:</b> {signal.grade if signal.grade else 'N/A'}
 
 <b>Tech:</b> {signal.technical_score.total_score:.0f}/100 (T:{signal.technical_score.trend_score:.0f} V:{signal.technical_score.volume_score:.0f} M:{signal.technical_score.momentum_score:.0f} S:{signal.technical_score.structure_score:.0f})
 <b>Context:</b> {signal.context_score.total_score:.0f}/100 (M:{signal.context_score.macro_score:.0f} N:{signal.context_score.news_score:.0f} S:{signal.context_score.sentiment_score:.0f})

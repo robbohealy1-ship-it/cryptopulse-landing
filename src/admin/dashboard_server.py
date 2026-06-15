@@ -505,6 +505,7 @@ async def pending_signals(request: Request, _=Depends(rate_limit_lenient)):
                     "direction": s.direction.value if hasattr(s.direction, 'value') else str(s.direction),
                     "timeframe": s.timeframe,
                     "confidence": s.confidence,
+                    "grade": s.grade if hasattr(s, 'grade') and s.grade else 'N/A',
                     "risk_reward": s.risk_reward,
                     "entry_price": s.entry_price,
                     "stop_loss": s.stop_loss,

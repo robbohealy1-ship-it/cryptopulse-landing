@@ -1256,7 +1256,7 @@ async function loadHistory() {
       <td><span class="badge ${marketType}">${marketIcon}</span></td>
       <td><span class="badge ${dir.toLowerCase()}">${dir}</span></td>
       <td>${s.timeframe || '--'}</td>
-      <td>${s.confidence ? s.confidence.toFixed(0) + '%' : '--'}</td>
+      <td>${s.confidence ? s.confidence.toFixed(0) + '%' : '--'} <span class="badge">${s.grade || 'N/A'}</span></td>
       <td>${s.risk_reward ? '1:' + s.risk_reward.toFixed(1) : '--'}</td>
       <td>$${s.entry_price ? s.entry_price.toLocaleString() : '--'}</td>
       <td>$${s.stop_loss ? s.stop_loss.toLocaleString() : '--'}</td>
