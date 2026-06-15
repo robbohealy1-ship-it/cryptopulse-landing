@@ -30,9 +30,10 @@ class PerformanceTracker:
     - Generates performance stats for reports
     """
     
-    def __init__(self, scanner=None, db=None, on_signal_result=None, on_channel_notification=None):
+    def __init__(self, scanner=None, db=None, on_signal_result=None, on_channel_notification=None, forex_client=None):
         self.scanner = scanner
         self.db = db
+        self.forex_client = forex_client  # For fetching forex prices (XAU/USD, EUR/USD, etc.)
         self.on_signal_result = on_signal_result  # Callback for FOMO campaigns
         self.on_channel_notification = on_channel_notification  # Callback for TP/SL channel messages
         self.active_signals: Dict[str, TradingSignal] = {}  # symbol -> signal
@@ -42,6 +43,24 @@ class PerformanceTracker:
         self.performance_log: List[Dict] = []
         # CRITICAL: Lock to prevent concurrent check_all_signals from causing duplicate TP/SL notifications
         self._check_lock = asyncio.Lock()
+    
+    async def _get_current_price(self, symbol: str) -> float:
+        """Fetch current price for crypto or forex symbol"""
+        try:
+            # Check if it's a forex symbol (with slash format like EUR/USD, XAU/USD)
+            if self.forex_client and '/' in symbol:
+                from src.exchange.forex_client import ForexClient
+                if symbol in ForexClient.FOREX_SYMBOLS:
+                    price = await self.forex_client.get_price(symbol)
+                    if price and price > 0:
+                        return price
+            
+            # Crypto pairs go through Binance scanner
+            ticker = await self.scanner.fetch_ticker(symbol)
+            return ticker.get('last', 0) if ticker else 0
+        except Exception as e:
+            logger.error(f"Error fetching price for {symbol}: {e}")
+            return 0
         
     async def track_signal(self, signal: TradingSignal):
         """Start tracking an approved signal for TP/SL hits"""
@@ -317,11 +336,11 @@ class PerformanceTracker:
         entry_time = signal_data['entry_time']
         
         try:
-            ticker = await self.scanner.fetch_ticker(signal.symbol)
-            current_price = ticker.get('last', 0)
+            # Fetch current price (supports both crypto and forex)
+            current_price = await self._get_current_price(signal.symbol)
             
             if current_price == 0 or current_price is None:
-                logger.warning(f"⚠️ Scanner returned 0 price for {signal.symbol} — skipping SL/TP check (signal at risk!)")
+                logger.warning(f"⚠️ Could not fetch price for {signal.symbol} — skipping SL/TP check (signal at risk!)")
                 return
             
             direction = signal.direction
@@ -386,6 +405,15 @@ class PerformanceTracker:
                 if sl_triggered:
                     pnl = ((current_price - safe_entry) / safe_entry) * 100
                     logger.info(f"🛑 SL HIT: {signal.symbol} LONG at {current_price:.6f} (SL was {sl_price:.6f}), P&L: {pnl:+.2f}%")
+                    
+                    # Send channel notification BEFORE closing signal
+                    if self.on_channel_notification:
+                        try:
+                            await self.on_channel_notification(signal, None, True, current_price)
+                            logger.info(f"✅ SL notification sent for {signal.symbol}")
+                        except Exception as e:
+                            logger.error(f"❌ SL notification failed for {signal.symbol}: {e}")
+                    
                     await self._close_signal(signal_id, current_price, pnl, sl_hit=True)
                     return
             else:
@@ -395,6 +423,15 @@ class PerformanceTracker:
                 if sl_triggered:
                     pnl = ((safe_entry - current_price) / safe_entry) * 100
                     logger.info(f"🛑 SL HIT: {signal.symbol} SHORT at {current_price:.6f} (SL was {sl_price:.6f}), P&L: {pnl:+.2f}%")
+                    
+                    # Send channel notification BEFORE closing signal
+                    if self.on_channel_notification:
+                        try:
+                            await self.on_channel_notification(signal, None, True, current_price)
+                            logger.info(f"✅ SL notification sent for {signal.symbol}")
+                        except Exception as e:
+                            logger.error(f"❌ SL notification failed for {signal.symbol}: {e}")
+                    
                     await self._close_signal(signal_id, current_price, pnl, sl_hit=True)
                     return
             
@@ -602,12 +639,14 @@ class PerformanceTracker:
             except Exception:
                 pass
         
-        # Send channel notifications
-        if self.on_channel_notification:
-            try:
-                await self.on_channel_notification(signal, tp_level, sl_hit, exit_price)
-            except Exception as e:
-                logger.error(f"Channel notification error: {e}")
+        # REMOVED: Duplicate channel notification call
+        # Channel notifications are already sent by TP/SL detection logic (lines 443, 380)
+        # Calling again here was causing duplicate messages to Telegram
+        # if self.on_channel_notification:
+        #     try:
+        #         await self.on_channel_notification(signal, tp_level, sl_hit, exit_price)
+        #     except Exception as e:
+        #         logger.error(f"Channel notification error: {e}")
         
         # Auto-notify admin
         await self._notify_admin(signal, result)
@@ -925,13 +964,14 @@ class AutoPilotSystem:
     
     def __init__(self, scanner=None, db=None, social_media=None, discord=None,
                  channel_publisher=None, community_engagement=None,
-                 on_channel_notification=None):
+                 on_channel_notification=None, forex_client=None):
         self.scanner = scanner
         self.db = db
         self.social_media = social_media
         self.discord = discord
         self.channel_publisher = channel_publisher
         self.community_engagement = community_engagement
+        self.forex_client = forex_client
         
         # Payment orchestrator (for trial expiry, payment routing)
         self.payment_orchestrator = PaymentOrchestrator(
@@ -943,7 +983,8 @@ class AutoPilotSystem:
         # Sub-systems
         self.performance = PerformanceTracker(
             scanner, db,
-            on_channel_notification=on_channel_notification
+            on_channel_notification=on_channel_notification,
+            forex_client=forex_client
         )
         self.public_stats = PublicStatsPoster(social_media, discord, channel_publisher, self.performance, db)
         self.trial_manager = FreeTrialManager(db, channel_publisher, self.payment_orchestrator)

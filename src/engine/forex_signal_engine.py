@@ -142,10 +142,11 @@ class ForexSignalEngine:
                 logger.info(f"✋ Daily Forex signal limit reached ({signals_today_count}/{self.max_signals_per_day})")
                 return []
             
-            logger.info("🔍 Scanning Forex markets for opportunities...")
+            logger.info(f"🔍 Scanning Forex markets for opportunities... ({len(await self.forex_client.get_all_symbols())} symbols)")
             
             all_candidates = []
             symbols = await self.forex_client.get_all_symbols()
+            logger.info(f"🌍 Forex symbols to scan: {', '.join(symbols)}")
             
             # OPTIMIZATION: Only scan 1h and 4h for Forex (skip 15m to save API calls)
             # Forex moves slower than crypto - 1h/4h are sufficient for quality signals
@@ -170,7 +171,7 @@ class ForexSignalEngine:
             
             # Rank and select best signals
             ranked = self.signal_ranker.rank_signals(all_candidates)
-            slots_available = self.max_signals_per_day - approved_today
+            slots_available = self.max_signals_per_day - signals_today_count
             selected = ranked[:slots_available]
             
             # Filter out correlated pairs
@@ -182,24 +183,24 @@ class ForexSignalEngine:
                 signal.market_type = MarketType.FOREX  # Mark as Forex
                 signal.id = str(uuid.uuid4())
                 signal.status = SignalStatus.PENDING  # Send to admin for approval (same as crypto)
-            
-            # Validate
-            is_valid, validation_result = await self.validation_pipeline.validate(signal)
-            if is_valid:
-                signal.grade = validation_result['grade']
-                signal.validation_score = validation_result['validation_score']
-                signal.validation_breakdown = validation_result['breakdown']
                 
-                # Save to DB
-                if self.db:
-                    try:
-                        await self.db.save_signal(signal)
-                        logger.info(f"💾 Forex signal saved: {signal.symbol} {signal.timeframe}")
-                    except Exception as e:
-                        logger.error(f"Failed to save Forex signal: {e}")
-                
-                validated_signals.append(signal)
-                self.signals_today.append(signal)
+                # Validate
+                is_valid, validation_result = await self.validation_pipeline.validate(signal)
+                if is_valid:
+                    signal.grade = validation_result['grade']
+                    signal.validation_score = validation_result['validation_score']
+                    signal.validation_breakdown = validation_result['breakdown']
+                    
+                    # Save to DB
+                    if self.db:
+                        try:
+                            await self.db.save_signal(signal)
+                            logger.info(f"💾 Forex signal saved: {signal.symbol} {signal.timeframe}")
+                        except Exception as e:
+                            logger.error(f"Failed to save Forex signal: {e}")
+                    
+                    validated_signals.append(signal)
+                    self.signals_today.append(signal)
             
             logger.info(f"✅ Generated {len(validated_signals)} Forex signals")
             return validated_signals
@@ -371,6 +372,7 @@ class ForexSignalEngine:
             adjusted_min_conf = self._base_threshold + self._threshold_adjustment
             
             if conviction_score < min_conviction or confidence < adjusted_min_conf:
+                logger.debug(f"❌ {symbol} {timeframe}: Conviction {conviction_score:.1f} < {min_conviction} OR Confidence {confidence:.1f}% < {adjusted_min_conf}%")
                 return None
             
             # Build TechnicalScore object if needed

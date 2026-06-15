@@ -240,7 +240,8 @@ class CryptoPulseOrchestrator:
                 discord=self.discord_publisher,
                 channel_publisher=self.channel_publisher,
                 community_engagement=self.community_engagement,
-                on_channel_notification=self._on_autopilot_channel_notification
+                on_channel_notification=self._on_autopilot_channel_notification,
+                forex_client=self.forex_signal_engine.forex_client if self.forex_signal_engine else None
             )
             # Wire FOMO campaign: when TP hits, blast to all channels
             self.autopilot.performance.on_signal_result = self.campaign_engine.signal_result_campaign
@@ -732,13 +733,37 @@ class CryptoPulseOrchestrator:
     
     async def scan_forex(self):
         """Scan Forex markets and generate signals (runs every 2 hours).
-        Skips Saturday and Sunday — Forex markets are closed."""
+        Forex market hours: Sunday 5pm EST - Friday 5pm EST (24/5 market)
+        Asia session opens: Sunday 5pm EST (Monday 00:00 Tokyo time)"""
         from datetime import datetime
-        today = datetime.utcnow().weekday()
-        if today >= 5:  # 5 = Saturday, 6 = Sunday
-            logger.info("📅 Forex markets closed (weekend) — skipping scan")
+        import pytz
+        
+        # Get current time in EST
+        est = pytz.timezone('US/Eastern')
+        now_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        now_est = now_utc.astimezone(est)
+        
+        weekday = now_est.weekday()  # 0=Monday, 6=Sunday
+        hour = now_est.hour
+        
+        # Market closed: Saturday (all day) and Sunday before 5pm EST
+        if weekday == 5:  # Saturday
+            logger.info("📅 Forex markets closed (Saturday) — skipping scan")
             return
-
+        
+        if weekday == 6 and hour < 17:  # Sunday before 5pm EST
+            logger.info(f"📅 Forex markets closed (Sunday {hour:02d}:{now_est.minute:02d} EST, opens at 17:00 EST) — skipping scan")
+            return
+        
+        # Market closed: Friday after 5pm EST
+        if weekday == 4 and hour >= 17:  # Friday after 5pm EST
+            logger.info(f"📅 Forex markets closed (Friday {hour:02d}:{now_est.minute:02d} EST, closed at 17:00 EST) — skipping scan")
+            return
+        
+        # Market is open!
+        if weekday == 6:  # Sunday after 5pm
+            logger.info(f"🌍 Forex markets OPEN (Asia session) — Sunday {hour:02d}:{now_est.minute:02d} EST")
+        
         logger.info("🌍 Scanning Forex markets (EUR/USD, XAUUSD, NAS100, etc.)...")
         try:
             forex_signals = []
@@ -1711,11 +1736,26 @@ class CryptoPulseOrchestrator:
                     summary_lines.append("📋 <b>COPY-PASTE PORTFOLIO STATUS:</b>")
                     for rec in sorted(recommendations, key=lambda x: x.current_pnl_percent, reverse=True):
                         pnl_emoji = "🟢" if rec.current_pnl_percent > 0 else "🔴"
+                        
+                        # Determine which TP was hit (for R:R context)
+                        tp_hit_text = ""
+                        if hasattr(rec, 'tp3_hit') and rec.tp3_hit:
+                            tp_hit_text = " [TP3]"
+                        elif hasattr(rec, 'tp2_hit') and rec.tp2_hit:
+                            tp_hit_text = " [TP2]"
+                        elif hasattr(rec, 'tp1_hit') and rec.tp1_hit:
+                            tp_hit_text = " [TP1]"
+                        
+                        # Add R:R ratio if available
+                        rr_text = ""
+                        if hasattr(rec, 'risk_reward') and rec.risk_reward:
+                            rr_text = f" ({rec.risk_reward:.1f}R)"
+                        
                         futures_tag = ""
                         if rec.is_futures and rec.funding_rate_pct is not None:
                             futures_tag = f" | Funding: {rec.funding_rate_pct:.4f}%"
                         summary_lines.append(
-                            f"{pnl_emoji} {rec.symbol}: {rec.current_pnl_percent:+.2f}% | "
+                            f"{pnl_emoji} {rec.symbol}: {rec.current_pnl_percent:+.2f}%{tp_hit_text}{rr_text} | "
                             f"{rec.action.value.replace('_', ' ').upper()}{futures_tag}"
                         )
                     
@@ -2155,8 +2195,13 @@ Good luck! 🎯
                         tp2_status = "✅" if getattr(sig, 'tp2_hit', False) else "⏳"
                         tp3_status = "✅" if getattr(sig, 'tp3_hit', False) else "⏳"
                         
+                        # Add R:R ratio if available
+                        rr_text = ""
+                        if hasattr(sig, 'risk_reward') and sig.risk_reward:
+                            rr_text = f" ({sig.risk_reward:.1f}R)"
+                        
                         active_trades_text += f"""
-{sig.symbol} {sig.direction.value}
+{sig.symbol} {sig.direction.value}{rr_text}
 Entry: {entry_str} | Current: ${current_price:.4f}
 P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
@@ -2188,8 +2233,13 @@ Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}
                         tp2_status = "✅" if getattr(sig, 'tp2_hit', False) else "⏳"
                         tp3_status = "✅" if getattr(sig, 'tp3_hit', False) else "⏳"
                         
+                        # Add R:R ratio if available
+                        rr_text = ""
+                        if hasattr(sig, 'risk_reward') and sig.risk_reward:
+                            rr_text = f" ({sig.risk_reward:.1f}R)"
+                        
                         active_trades_text += f"""
-{sig.symbol} {sig.direction.value}
+{sig.symbol} {sig.direction.value}{rr_text}
 Entry: {entry_str} | Current: {current_price:.5f}
 P&L: {pnl_emoji} {pnl:+.2f}%
 Targets: TP1 {tp1_status} | TP2 {tp2_status} | TP3 {tp3_status}

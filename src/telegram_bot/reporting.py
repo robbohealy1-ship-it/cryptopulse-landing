@@ -215,6 +215,22 @@ See you tomorrow! 💎"""
                 emoji = "🟢" if (s.pnl_percent or 0) > 0 else "🔴"
                 annotation = ""
                 
+                # Determine which TP was hit (for R:R context)
+                tp_hit_text = ""
+                if s.tp3_hit:
+                    tp_hit_text = " [TP3]"
+                elif s.tp2_hit:
+                    tp_hit_text = " [TP2]"
+                elif s.tp1_hit:
+                    tp_hit_text = " [TP1]"
+                elif s.stop_hit:
+                    tp_hit_text = " [SL]"
+                
+                # Add R:R ratio if available
+                rr_text = ""
+                if hasattr(s, 'risk_reward') and s.risk_reward:
+                    rr_text = f" ({s.risk_reward:.1f}R)"
+                
                 # Check if it was a partial close that later fully closed
                 if hasattr(s, 'metadata') and s.metadata and 'partial_closes' in s.metadata:
                     total_partial = sum(pc['percent'] for pc in s.metadata['partial_closes'])
@@ -222,7 +238,7 @@ See you tomorrow! 💎"""
                         annotation = f" (partial close: {total_partial:.0f}%)"
                 
                 trade_lines.append(
-                    f"{emoji} {s.symbol} {s.direction.value}: {s.pnl_percent or 0:+.2f}%{annotation}"
+                    f"{emoji} {s.symbol} {s.direction.value}: {s.pnl_percent or 0:+.2f}%{tp_hit_text}{rr_text}{annotation}"
                 )
             
             # Then, add active trades with TP hits or partial closes
@@ -247,17 +263,22 @@ See you tomorrow! 💎"""
                 
                 annotation_text = " — " + ", ".join(annotations) if annotations else ""
                 
+                # Add R:R ratio if available
+                rr_text = ""
+                if hasattr(s, 'risk_reward') and s.risk_reward:
+                    rr_text = f" ({s.risk_reward:.1f}R)"
+                
                 # For partial closes, show the P&L of the closed portion
                 if hasattr(s, 'metadata') and s.metadata and 'partial_closes' in s.metadata:
                     partial_pnl = sum(pc['pnl'] for pc in s.metadata['partial_closes'])
                     emoji = "🟢" if partial_pnl > 0 else "🔴"
                     trade_lines.append(
-                        f"{emoji} {s.symbol} {s.direction.value}: {partial_pnl:+.2f}%{annotation_text}"
+                        f"{emoji} {s.symbol} {s.direction.value}: {partial_pnl:+.2f}%{rr_text}{annotation_text}"
                     )
                 else:
                     # Just TP hit, no partial close yet
                     trade_lines.append(
-                        f"🟡 {s.symbol} {s.direction.value}: {annotation_text} (still running)"
+                        f"🟡 {s.symbol} {s.direction.value}: {annotation_text}{rr_text} (still running)"
                     )
             
             trades_text = "\n".join(trade_lines) if trade_lines else "No trades closed this week yet."
