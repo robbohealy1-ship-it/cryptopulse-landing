@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     # NEW: Signal Mode (strict/balanced/aggressive)
     SIGNAL_MODE: str = "balanced"  # strict=85+, balanced=75+, aggressive=65+
     
+    # Forex-specific thresholds (forex markets have different characteristics than crypto)
+    FOREX_MIN_CONVICTION: int = 65  # Lower than crypto (75) due to lower volatility
+    FOREX_MIN_CONFIDENCE: int = 75  # Lower than crypto (85) but still institutional grade
+    
     # VIP-exclusive signals (higher quality)
     VIP_MIN_CONFIDENCE: int = 90
     FREE_MAX_SIGNALS_PER_DAY: int = 2

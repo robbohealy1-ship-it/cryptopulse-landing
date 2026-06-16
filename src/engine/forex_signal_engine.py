@@ -60,17 +60,19 @@ class ForexSignalEngine:
         self.signals_today = []
         self.last_reset = datetime.utcnow().date()
         
-        self.min_confidence = settings.MIN_CONFIDENCE_SCORE
+        # Forex-specific thresholds (different from crypto due to market characteristics)
+        self.min_confidence = getattr(settings, 'FOREX_MIN_CONFIDENCE', 75)
+        self.min_conviction = getattr(settings, 'FOREX_MIN_CONVICTION', 65)
         self.max_signals_per_day = 3  # Same as crypto: 3 signals/day
         self.min_risk_reward = settings.MIN_RISK_REWARD
         
         # Signal mode
         self.signal_mode = getattr(settings, 'SIGNAL_MODE', 'strict')
         
-        # Dynamic threshold adjustment
+        # Dynamic threshold adjustment (uses forex-specific base)
         self._signal_history = deque(maxlen=50)
         self._setup_performance = {}
-        self._base_threshold = settings.MIN_CONFIDENCE_SCORE
+        self._base_threshold = self.min_confidence  # Forex-specific (75 vs crypto 85)
         self._threshold_adjustment = 0.0
         
         # Teaser signals for free channel
@@ -147,6 +149,10 @@ class ForexSignalEngine:
             all_candidates = []
             symbols = await self.forex_client.get_all_symbols()
             logger.info(f"🌍 Forex symbols to scan: {', '.join(symbols)}")
+            logger.info(f"🎯 Forex thresholds: Conviction ≥ {self.min_conviction}, Confidence ≥ {self.min_confidence}% (vs Crypto: 75/85)")
+            
+            # Track rejection reasons for analysis
+            rejection_stats = {'total_analyzed': 0, 'passed_threshold': 0, 'rejected_conviction': 0, 'rejected_confidence': 0}
             
             # OPTIMIZATION: Only scan 1h and 4h for Forex (skip 15m to save API calls)
             # Forex moves slower than crypto - 1h/4h are sufficient for quality signals
@@ -367,13 +373,17 @@ class ForexSignalEngine:
                 context=context
             )
             
-            # Apply confidence thresholds based on signal mode
-            min_conviction = 70 if self.signal_mode == 'aggressive' else 75 if self.signal_mode == 'balanced' else 80
-            adjusted_min_conf = self._base_threshold + self._threshold_adjustment
+            # Apply FOREX-SPECIFIC confidence thresholds (lower than crypto due to market characteristics)
+            # Forex: 65/75 (conviction/confidence) vs Crypto: 75/85
+            # This accounts for lower volatility and different context scoring in forex markets
+            min_conviction = self.min_conviction  # 65 for forex (vs 75 for crypto)
+            adjusted_min_conf = self._base_threshold + self._threshold_adjustment  # 75 for forex (vs 85 for crypto)
             
             if conviction_score < min_conviction or confidence < adjusted_min_conf:
-                logger.debug(f"❌ {symbol} {timeframe}: Conviction {conviction_score:.1f} < {min_conviction} OR Confidence {confidence:.1f}% < {adjusted_min_conf}%")
+                logger.info(f"❌ {symbol} {timeframe}: Conviction {conviction_score:.1f} < {min_conviction} OR Confidence {confidence:.1f}% < {adjusted_min_conf}% (Forex thresholds)")
                 return None
+            
+            logger.info(f"✅ {symbol} {timeframe}: PASSED forex thresholds - Conviction {conviction_score:.1f} ≥ {min_conviction}, Confidence {confidence:.1f}% ≥ {adjusted_min_conf}%")
             
             # Build TechnicalScore object if needed
             if isinstance(tech_analysis, dict):
